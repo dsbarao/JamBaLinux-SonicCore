@@ -20,6 +20,12 @@ pub struct RuntimeState {
     pub lighting_color: Option<String>,
     pub logo_color: Option<String>,
     pub ring_color: Option<String>,
+    pub logo_colors: Option<Vec<String>>,
+    pub ring_colors: Option<Vec<String>>,
+    pub logo_effect: Option<String>,
+    pub ring_effect: Option<String>,
+    pub logo_speed: Option<String>,
+    pub ring_speed: Option<String>,
     pub battery_percent: Option<u8>,
     pub charging: Option<bool>,
     pub game_chat_value: Option<u8>,
@@ -162,13 +168,38 @@ pub fn update_control(feature: &str, value: &str) -> Result<(), String> {
     save(&mut state)
 }
 
-pub fn update_lighting_colors(logo: &str, ring: &str) -> Result<(), String> {
+pub fn update_lighting_profile(
+    logo_colors: &[String],
+    ring_colors: &[String],
+    logo_effect: &str,
+    ring_effect: &str,
+    logo_speed: &str,
+    ring_speed: &str,
+) -> Result<(), String> {
     let mut state = load().unwrap_or_default();
     state.lighting_enabled = Some(true);
-    state.logo_color = Some(logo.into());
-    state.ring_color = Some(ring.into());
-    state.lighting_color = (logo == ring).then(|| logo.into());
+    state.logo_colors = Some(logo_colors.to_vec());
+    state.ring_colors = Some(ring_colors.to_vec());
+    state.logo_color = uniform_color(logo_colors);
+    state.ring_color = uniform_color(ring_colors);
+    state.lighting_color = if logo_colors == ring_colors {
+        uniform_color(logo_colors)
+    } else {
+        None
+    };
+    state.logo_effect = Some(logo_effect.into());
+    state.ring_effect = Some(ring_effect.into());
+    state.logo_speed = Some(logo_speed.into());
+    state.ring_speed = Some(ring_speed.into());
     save(&mut state)
+}
+
+fn uniform_color(colors: &[String]) -> Option<String> {
+    let first = colors.first()?;
+    colors
+        .iter()
+        .all(|color| color == first)
+        .then(|| first.clone())
 }
 
 #[cfg(test)]

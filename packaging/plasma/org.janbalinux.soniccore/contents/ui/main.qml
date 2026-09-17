@@ -27,7 +27,14 @@ PlasmoidItem {
     property string lightingColor: "unknown"
     property string logoColor: "unknown"
     property string ringColor: "unknown"
+    property var logoColors: ["#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc"]
+    property var ringColors: ["#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc"]
+    property string logoEffect: "solid"
+    property string ringEffect: "solid"
+    property string logoSpeed: "0.5"
+    property string ringSpeed: "0.5"
     property string lightingTarget: "both"
+    property int lightingSegment: -1
     property real pickerHue: 0
     property real pickerSaturation: 1
     property real pickerValue: 1
@@ -84,15 +91,48 @@ PlasmoidItem {
     }
 
     function selectedLightingColor() {
+        if (lightingSegment >= 0) {
+            const colors = lightingTarget === "ring" ? ringColors : logoColors
+            return String(colors[lightingSegment] ?? "unknown")
+        }
         if (lightingTarget === "logo") return logoColor
         if (lightingTarget === "ring") return ringColor
         return lightingColor
     }
 
     function lightingFeature() {
+        if (lightingSegment >= 0) {
+            const prefix = lightingTarget === "logo" ? "logo-"
+                : lightingTarget === "ring" ? "ring-" : ""
+            return `${prefix}segment-${lightingSegment}`
+        }
         if (lightingTarget === "logo") return "logo-color"
         if (lightingTarget === "ring") return "ring-color"
         return "color"
+    }
+
+    function lightingEffectFeature() {
+        if (lightingTarget === "logo") return "logo-effect"
+        if (lightingTarget === "ring") return "ring-effect"
+        return "effect"
+    }
+
+    function lightingSpeedFeature() {
+        if (lightingTarget === "logo") return "logo-speed"
+        if (lightingTarget === "ring") return "ring-speed"
+        return "speed"
+    }
+
+    function selectedLightingEffect() {
+        if (lightingTarget === "ring") return ringEffect
+        if (lightingTarget === "logo") return logoEffect
+        return logoEffect === ringEffect ? logoEffect : "mixed"
+    }
+
+    function selectedLightingSpeed() {
+        if (lightingTarget === "ring") return ringSpeed
+        if (lightingTarget === "logo") return logoSpeed
+        return logoSpeed === ringSpeed ? logoSpeed : "mixed"
     }
 
     function normalizeColor(value) {
@@ -172,6 +212,14 @@ PlasmoidItem {
             lightingColor = String(result.lighting_color ?? "unknown")
             logoColor = String(result.logo_color ?? result.lighting_color ?? "unknown")
             ringColor = String(result.ring_color ?? result.lighting_color ?? "unknown")
+            const logoFallback = normalizeColor(logoColor)
+            const ringFallback = normalizeColor(ringColor)
+            logoColors = result.logo_colors ?? [logoFallback, logoFallback, logoFallback, logoFallback, logoFallback]
+            ringColors = result.ring_colors ?? [ringFallback, ringFallback, ringFallback, ringFallback, ringFallback]
+            logoEffect = String(result.logo_effect ?? "solid")
+            ringEffect = String(result.ring_effect ?? "solid")
+            logoSpeed = String(result.logo_speed ?? "0.5")
+            ringSpeed = String(result.ring_speed ?? "0.5")
             gameChatValue = result.game_chat_value === null ? -1 : Number(result.game_chat_value)
             errorMessage = ""
         } catch (error) {
@@ -260,7 +308,7 @@ PlasmoidItem {
 
     fullRepresentation: ColumnLayout {
         readonly property real requiredGridHeight: root.openSection === "lighting"
-            ? 46 : root.openSection.length > 0 ? 34 : 27
+            ? 52 : root.openSection.length > 0 ? 32 : 25
 
         Layout.minimumWidth: Kirigami.Units.gridUnit * 19
         Layout.minimumHeight: Kirigami.Units.gridUnit * requiredGridHeight
@@ -506,6 +554,7 @@ PlasmoidItem {
                         checked: root.lightingTarget === "both"
                         onClicked: {
                             root.lightingTarget = "both"
+                            root.lightingSegment = -1
                             root.loadPicker()
                         }
                     }
@@ -515,6 +564,7 @@ PlasmoidItem {
                         checked: root.lightingTarget === "logo"
                         onClicked: {
                             root.lightingTarget = "logo"
+                            root.lightingSegment = -1
                             root.loadPicker()
                         }
                     }
@@ -524,7 +574,106 @@ PlasmoidItem {
                         checked: root.lightingTarget === "ring"
                         onClicked: {
                             root.lightingTarget = "ring"
+                            root.lightingSegment = -1
                             root.loadPicker()
+                        }
+                    }
+                }
+
+                PlasmaComponents.Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                    text: "Efeito"
+                    opacity: 0.7
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                    enabled: root.deviceAvailable && !root.controlBusy
+                    spacing: Kirigami.Units.smallSpacing
+
+                    PlasmaComponents.Button { text: "Respiração"; checkable: true; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
+                    PlasmaComponents.Button { text: "Sólido"; checkable: true; checked: root.selectedLightingEffect() === "solid"; onClicked: root.runControl(root.lightingEffectFeature(), "solid") }
+                    PlasmaComponents.Button { text: "Onda"; checkable: true; checked: root.selectedLightingEffect() === "wave"; onClicked: root.runControl(root.lightingEffectFeature(), "wave") }
+                    PlasmaComponents.Button { text: "Falha"; checkable: true; checked: root.selectedLightingEffect() === "glitch"; onClicked: root.runControl(root.lightingEffectFeature(), "glitch") }
+                }
+
+                PlasmaComponents.Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                    text: "Velocidade"
+                    opacity: 0.7
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                    enabled: root.deviceAvailable && !root.controlBusy
+                    spacing: Kirigami.Units.smallSpacing
+
+                    PlasmaComponents.Button { text: "0,5×"; checkable: true; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
+                    PlasmaComponents.Button { text: "1×"; checkable: true; checked: root.selectedLightingSpeed() === "1.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.0") }
+                    PlasmaComponents.Button { text: "1,5×"; checkable: true; checked: root.selectedLightingSpeed() === "1.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.5") }
+                    PlasmaComponents.Button { text: "2×"; checkable: true; checked: root.selectedLightingSpeed() === "2.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "2.0") }
+                }
+
+                PlasmaComponents.Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                    text: root.lightingSegment < 0
+                        ? "Cor: todos os segmentos"
+                        : `Cor: segmento ${root.lightingSegment + 1}`
+                    opacity: 0.7
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                    enabled: root.deviceAvailable && !root.controlBusy
+                    spacing: Kirigami.Units.smallSpacing
+
+                    PlasmaComponents.Button {
+                        text: "Todos"
+                        checkable: true
+                        checked: root.lightingSegment < 0
+                        onClicked: {
+                            root.lightingSegment = -1
+                            root.loadPicker()
+                        }
+                    }
+
+                    Repeater {
+                        model: 5
+
+                        delegate: Rectangle {
+                            required property int index
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 30
+                            radius: Kirigami.Units.cornerRadius
+                            color: root.lightingTarget === "ring"
+                                ? root.ringColors[index] : root.logoColors[index]
+                            border.width: root.lightingSegment === index ? 3 : 1
+                            border.color: root.lightingSegment === index
+                                ? Kirigami.Theme.highlightColor : Kirigami.Theme.textColor
+
+                            PlasmaComponents.Label {
+                                anchors.centerIn: parent
+                                text: parent.index + 1
+                                color: "white"
+                                style: Text.Outline
+                                styleColor: "black"
+                                font.bold: true
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.lightingSegment = parent.index
+                                    root.loadPicker()
+                                }
+                            }
                         }
                     }
                 }

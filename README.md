@@ -210,8 +210,8 @@ Then enter Plasma edit mode, choose **Add Widgets**, search for
 **JanBaLinux SonicCore**, and drag it to the panel. The widget invokes only
 allowlisted `soniccore` commands. Its popup includes expandable controls
 for ambient mode (off/ANC/TalkThru), global lighting (on/off), an HSV color
-picker applied together or independently to the complete Logo and Ring
-profiles, and hardware sidetone
+picker with five segments per zone, four effects, four animation speeds, and
+independent or synchronized Logo and Ring profiles, plus hardware sidetone
 (off/low/medium/high). These controls send only confirmed Feature Reports
 documented under `docs/protocol/`; raw reports and malformed RGB values are
 rejected by the CLI parser.

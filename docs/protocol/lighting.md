@@ -1,9 +1,10 @@
 # Lighting protocol
 
 Status: mapped from controlled QuantumENGINE USBPcap captures. Global on/off
-and full-profile solid RGB colors are implemented through the Linux client's
-strict parser and report generator. Partial-profile writes, animation
-selection, and OpenRGB integration remain out of scope.
+and complete five-segment RGB profiles are implemented through the Linux
+client's strict parser and report generator. All four confirmed effects and
+four confirmed speeds are available. Partial-profile writes and OpenRGB
+integration remain out of scope.
 
 ## Global state
 
@@ -70,7 +71,7 @@ QuantumENGINE sends complete profiles for both zones when one segment changes.
 The application's synchronization switch appears to copy/reapply zone data and
 does not expose a distinct device-side synchronization flag.
 
-## Linux solid-color control
+## Linux lighting control
 
 JanBaLinux SonicCore applies a color by writing a complete five-segment Solid
 profile to both Logo and Ring, followed by global lighting enable. It never
@@ -78,6 +79,11 @@ changes one segment in isolation. The CLI accepts only strict `#RRGGBB` values
 or the six compatibility names blue, cyan, magenta, red, green, and white.
 The widget exposes the full range through an HSV wheel and always passes a
 validated six-digit RGB value to the generator.
+
+For animated profiles, the widget can select Breathing, Solid, Wave, or
+Glitch; select 0.5x, 1x, 1.5x, or 2x; and assign an independent RGB color to
+each of the five segments. Every adjustment reconstructs and writes both
+complete zones, even when the user changes only one segment.
 
 The widget can target both zones, Logo only, or Ring only. Even for an
 independent change, JanBaLinux SonicCore reconstructs and sends both complete zone

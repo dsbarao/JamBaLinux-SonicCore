@@ -198,6 +198,12 @@ struct StatusOutput {
     lighting_color: Option<String>,
     logo_color: Option<String>,
     ring_color: Option<String>,
+    logo_colors: Option<Vec<String>>,
+    ring_colors: Option<Vec<String>>,
+    logo_effect: Option<String>,
+    ring_effect: Option<String>,
+    logo_speed: Option<String>,
+    ring_speed: Option<String>,
     game_chat_value: Option<u8>,
     bluetooth: Option<String>,
     sidetone_level: Option<String>,
@@ -825,30 +831,128 @@ fn canonical_color(value: &str) -> Option<String> {
     Some(format!("#{red:02x}{green:02x}{blue:02x}"))
 }
 
-fn solid_zone_profile(zone: u8, color: (u8, u8, u8)) -> Vec<Vec<u8>> {
-    let (red, green, blue) = color;
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LightingZone {
+    colors: Vec<String>,
+    effect: String,
+    speed: String,
+}
+
+fn effect_id(value: &str) -> Option<u8> {
+    match value {
+        "breathing" => Some(0x00),
+        "solid" => Some(0x01),
+        "wave" => Some(0x02),
+        "glitch" => Some(0x03),
+        _ => None,
+    }
+}
+
+fn speed_byte(value: &str) -> Option<u8> {
+    match value {
+        "0.5" => Some(0x64),
+        "1.0" => Some(0x4b),
+        "1.5" => Some(0x32),
+        "2.0" => Some(0x19),
+        _ => None,
+    }
+}
+
+fn zone_profile(zone: u8, profile: &LightingZone) -> Result<Vec<Vec<u8>>, String> {
+    if profile.colors.len() != 5 {
+        return Err("lighting profile must contain exactly five colors".into());
+    }
+    let speed = speed_byte(&profile.speed).ok_or("unsupported cached lighting speed")?;
+    let effect = effect_id(&profile.effect).ok_or("unsupported cached lighting effect")?;
     let mut reports = Vec::with_capacity(6);
-    reports.push(vec![0x4c, zone, 0x64, 0x05]);
-    for segment in 0..5 {
+    reports.push(vec![0x4c, zone, speed, 0x05]);
+    for (segment, color) in profile.colors.iter().enumerate() {
+        let (red, green, blue) = color_rgb(color).ok_or("unsupported cached lighting color")?;
         reports.push(vec![
             0x4d,
             zone,
-            segment,
+            segment as u8,
             red,
             green,
             blue,
-            0x01,
-            segment * 2,
+            effect,
+            segment as u8 * 2,
         ]);
     }
-    reports
+    Ok(reports)
 }
 
 fn solid_color_profile(logo: (u8, u8, u8), ring: (u8, u8, u8)) -> Vec<Vec<u8>> {
-    let mut reports = solid_zone_profile(0, logo);
-    reports.extend(solid_zone_profile(1, ring));
+    let to_hex = |(red, green, blue)| format!("#{red:02x}{green:02x}{blue:02x}");
+    let logo = LightingZone {
+        colors: vec![to_hex(logo); 5],
+        effect: "solid".into(),
+        speed: "0.5".into(),
+    };
+    let ring = LightingZone {
+        colors: vec![to_hex(ring); 5],
+        effect: "solid".into(),
+        speed: "0.5".into(),
+    };
+    let mut reports = zone_profile(0, &logo).expect("built-in solid profile is valid");
+    reports.extend(zone_profile(1, &ring).expect("built-in solid profile is valid"));
     reports.push(vec![0x4b, 0x01]);
     reports
+}
+
+fn cached_zone(
+    colors: Option<Vec<String>>,
+    legacy_color: Option<String>,
+    effect: Option<String>,
+    speed: Option<String>,
+    name: &str,
+) -> Result<LightingZone, String> {
+    let colors = match colors {
+        Some(colors)
+            if colors.len() == 5 && colors.iter().all(|color| color_rgb(color).is_some()) =>
+        {
+            colors
+        }
+        _ => vec![
+            legacy_color.ok_or_else(|| {
+                format!("{name} color is unknown; apply a synchronized color first")
+            })?;
+            5
+        ],
+    };
+    Ok(LightingZone {
+        colors,
+        effect: effect.unwrap_or_else(|| "solid".into()),
+        speed: speed.unwrap_or_else(|| "0.5".into()),
+    })
+}
+
+fn lighting_reports(logo: &LightingZone, ring: &LightingZone) -> Result<Vec<Vec<u8>>, String> {
+    let mut reports = zone_profile(0, logo)?;
+    reports.extend(zone_profile(1, ring)?);
+    reports.push(vec![0x4b, 0x01]);
+    Ok(reports)
+}
+
+fn segment_feature(value: &str) -> Option<(&'static str, usize)> {
+    match value {
+        "segment-0" => Some(("segment-0", 0)),
+        "segment-1" => Some(("segment-1", 1)),
+        "segment-2" => Some(("segment-2", 2)),
+        "segment-3" => Some(("segment-3", 3)),
+        "segment-4" => Some(("segment-4", 4)),
+        "logo-segment-0" => Some(("logo-segment-0", 0)),
+        "logo-segment-1" => Some(("logo-segment-1", 1)),
+        "logo-segment-2" => Some(("logo-segment-2", 2)),
+        "logo-segment-3" => Some(("logo-segment-3", 3)),
+        "logo-segment-4" => Some(("logo-segment-4", 4)),
+        "ring-segment-0" => Some(("ring-segment-0", 0)),
+        "ring-segment-1" => Some(("ring-segment-1", 1)),
+        "ring-segment-2" => Some(("ring-segment-2", 2)),
+        "ring-segment-3" => Some(("ring-segment-3", 3)),
+        "ring-segment-4" => Some(("ring-segment-4", 4)),
+        _ => None,
+    }
 }
 
 fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetCommand, String> {
@@ -902,6 +1006,41 @@ fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetComman
                 reports: Vec::new(),
             }
         }
+        (feature @ ("effect" | "logo-effect" | "ring-effect"), value)
+            if effect_id(value).is_some() =>
+        {
+            SetCommand {
+                feature: match feature {
+                    "effect" => "effect",
+                    "logo-effect" => "logo-effect",
+                    _ => "ring-effect",
+                },
+                value: value.into(),
+                reports: Vec::new(),
+            }
+        }
+        (feature @ ("speed" | "logo-speed" | "ring-speed"), value)
+            if speed_byte(value).is_some() =>
+        {
+            SetCommand {
+                feature: match feature {
+                    "speed" => "speed",
+                    "logo-speed" => "logo-speed",
+                    _ => "ring-speed",
+                },
+                value: value.into(),
+                reports: Vec::new(),
+            }
+        }
+        (feature, value) if segment_feature(feature).is_some() && color_rgb(value).is_some() => {
+            SetCommand {
+                feature: segment_feature(feature)
+                    .expect("validated segment feature")
+                    .0,
+                value: canonical_color(value).expect("validated RGB color"),
+                reports: Vec::new(),
+            }
+        }
         ("sidetone", "off") => SetCommand {
             feature: "sidetone",
             value: "off".into(),
@@ -931,29 +1070,81 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
     let Some(node) = quantum_hidraw_node()? else {
         return Ok(false);
     };
-    let mut resolved_zone_colors = None;
-    let reports = if matches!(command.feature, "logo-color" | "ring-color") {
+    let is_profile_control = matches!(
+        command.feature,
+        "color"
+            | "logo-color"
+            | "ring-color"
+            | "effect"
+            | "logo-effect"
+            | "ring-effect"
+            | "speed"
+            | "logo-speed"
+            | "ring-speed"
+    ) || segment_feature(command.feature).is_some();
+    let mut resolved_profile = None;
+    let reports = if is_profile_control {
         let cached = state::load().unwrap_or_default();
-        let legacy = cached.lighting_color.as_deref();
-        let logo = if command.feature == "logo-color" {
-            command.value.as_str()
+        let (mut logo, mut ring) = if command.feature == "color" {
+            let initial = LightingZone {
+                colors: vec![command.value.clone(); 5],
+                effect: "solid".into(),
+                speed: "0.5".into(),
+            };
+            (initial.clone(), initial)
         } else {
-            cached.logo_color.as_deref().or(legacy).ok_or(
-                "logo color is unknown; apply a synchronized color before separating zones",
-            )?
+            let legacy = cached.lighting_color.clone();
+            (
+                cached_zone(
+                    cached.logo_colors,
+                    cached.logo_color.or_else(|| legacy.clone()),
+                    cached.logo_effect,
+                    cached.logo_speed,
+                    "logo",
+                )?,
+                cached_zone(
+                    cached.ring_colors,
+                    cached.ring_color.or(legacy),
+                    cached.ring_effect,
+                    cached.ring_speed,
+                    "ring",
+                )?,
+            )
         };
-        let ring = if command.feature == "ring-color" {
-            command.value.as_str()
-        } else {
-            cached.ring_color.as_deref().or(legacy).ok_or(
-                "ring color is unknown; apply a synchronized color before separating zones",
-            )?
-        };
-        let reports = solid_color_profile(
-            color_rgb(logo).ok_or("cached logo color is unsupported")?,
-            color_rgb(ring).ok_or("cached ring color is unsupported")?,
-        );
-        resolved_zone_colors = Some((logo.to_owned(), ring.to_owned()));
+
+        match command.feature {
+            "color" => {
+                logo.colors.fill(command.value.clone());
+                ring.colors.fill(command.value.clone());
+            }
+            "logo-color" => logo.colors.fill(command.value.clone()),
+            "ring-color" => ring.colors.fill(command.value.clone()),
+            "effect" => {
+                logo.effect.clone_from(&command.value);
+                ring.effect.clone_from(&command.value);
+            }
+            "logo-effect" => logo.effect.clone_from(&command.value),
+            "ring-effect" => ring.effect.clone_from(&command.value),
+            "speed" => {
+                logo.speed.clone_from(&command.value);
+                ring.speed.clone_from(&command.value);
+            }
+            "logo-speed" => logo.speed.clone_from(&command.value),
+            "ring-speed" => ring.speed.clone_from(&command.value),
+            feature => {
+                let (_, segment) = segment_feature(feature).ok_or("invalid segment control")?;
+                if feature.starts_with("logo-") {
+                    logo.colors[segment] = command.value.clone();
+                } else if feature.starts_with("ring-") {
+                    ring.colors[segment] = command.value.clone();
+                } else {
+                    logo.colors[segment] = command.value.clone();
+                    ring.colors[segment] = command.value.clone();
+                }
+            }
+        }
+        let reports = lighting_reports(&logo, &ring)?;
+        resolved_profile = Some((logo, ring));
         reports
     } else {
         command.reports.clone()
@@ -961,8 +1152,15 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
     for report in &reports {
         set_feature_report_allowlisted(&node, report)?;
     }
-    if let Some((logo, ring)) = resolved_zone_colors {
-        state::update_lighting_colors(&logo, &ring)?;
+    if let Some((logo, ring)) = resolved_profile {
+        state::update_lighting_profile(
+            &logo.colors,
+            &ring.colors,
+            &logo.effect,
+            &ring.effect,
+            &logo.speed,
+            &ring.speed,
+        )?;
     } else {
         state::update_control(command.feature, &command.value)?;
     }
@@ -1049,6 +1247,12 @@ fn status(options: StatusOptions) -> Result<bool, String> {
                 lighting_color: None,
                 logo_color: None,
                 ring_color: None,
+                logo_colors: None,
+                ring_colors: None,
+                logo_effect: None,
+                ring_effect: None,
+                logo_speed: None,
+                ring_speed: None,
                 game_chat_value: None,
                 bluetooth: None,
                 sidetone_level: None,
@@ -1083,6 +1287,12 @@ fn status(options: StatusOptions) -> Result<bool, String> {
             lighting_color: cached.lighting_color,
             logo_color: cached.logo_color,
             ring_color: cached.ring_color,
+            logo_colors: cached.logo_colors,
+            ring_colors: cached.ring_colors,
+            logo_effect: cached.logo_effect,
+            ring_effect: cached.ring_effect,
+            logo_speed: cached.logo_speed,
+            ring_speed: cached.ring_speed,
             game_chat_value: cached.game_chat_value,
             bluetooth: cached.bluetooth,
             sidetone_level: cached.sidetone_level,
@@ -1153,9 +1363,11 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JanBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|probe-status|set <ambient|lighting|color|logo-color|ring-color|sidetone> <value>|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|probe-status|set <feature> <value>|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
-    eprintln!("set permits only confirmed two-byte Feature Reports from the built-in allowlist");
+    eprintln!(
+        "set permits only confirmed controls and complete lighting profiles from the built-in allowlist"
+    );
 }
 
 fn main() {
@@ -1289,9 +1501,45 @@ mod tests {
         assert!(parse(&["color", "112233"]).is_err());
         assert!(parse(&["color", "#11223g"]).is_err());
         assert!(parse(&["color", "#11223344"]).is_err());
+        assert_eq!(parse(&["effect", "wave"]).unwrap().feature, "effect");
+        assert_eq!(parse(&["logo-speed", "1.5"]).unwrap().value, "1.5");
+        assert_eq!(
+            parse(&["ring-segment-4", "#abcdef"]).unwrap().feature,
+            "ring-segment-4"
+        );
+        assert!(parse(&["effect", "rainbow"]).is_err());
+        assert!(parse(&["speed", "3.0"]).is_err());
+        assert!(parse(&["logo-segment-5", "#abcdef"]).is_err());
         assert!(parse(&["raw", "46ff"]).is_err());
         assert!(parse(&["ambient", "invalid"]).is_err());
         assert!(parse(&["ambient", "anc", "extra"]).is_err());
+    }
+
+    #[test]
+    fn builds_complete_animated_lighting_profile() {
+        let zone = LightingZone {
+            colors: vec![
+                "#112233".into(),
+                "#223344".into(),
+                "#334455".into(),
+                "#445566".into(),
+                "#556677".into(),
+            ],
+            effect: "wave".into(),
+            speed: "1.5".into(),
+        };
+        let reports = lighting_reports(&zone, &zone).unwrap();
+        assert_eq!(reports.len(), 13);
+        assert_eq!(reports[0], vec![0x4c, 0x00, 0x32, 0x05]);
+        assert_eq!(
+            reports[1],
+            vec![0x4d, 0x00, 0x00, 0x11, 0x22, 0x33, 0x02, 0x00]
+        );
+        assert_eq!(
+            reports[5],
+            vec![0x4d, 0x00, 0x04, 0x55, 0x66, 0x77, 0x02, 0x08]
+        );
+        assert_eq!(reports[12], vec![0x4b, 0x01]);
     }
 
     #[test]
@@ -1329,6 +1577,12 @@ mod tests {
             lighting_color: Some("cyan".into()),
             logo_color: Some("cyan".into()),
             ring_color: Some("cyan".into()),
+            logo_colors: Some(vec!["#33ffcc".into(); 5]),
+            ring_colors: Some(vec!["#33ffcc".into(); 5]),
+            logo_effect: Some("solid".into()),
+            ring_effect: Some("solid".into()),
+            logo_speed: Some("0.5".into()),
+            ring_speed: Some("0.5".into()),
             game_chat_value: Some(8),
             bluetooth: Some("connected".into()),
             sidetone_level: Some("low".into()),

@@ -11,6 +11,10 @@
 - control synchronized, Logo-only, or Ring-only solid colors from the widget;
 - replace the fixed swatches with an embedded HSV wheel and saturation/value
   field, accepting any strictly validated `#RRGGBB` color;
+- add complete-profile Breathing, Solid, Wave, and Glitch effects with 0.5x,
+  1x, 1.5x, and 2x speeds;
+- configure five independent colors per Logo and Ring zone while preserving
+  both complete profiles on every hardware write;
 - preserve both complete five-segment zone profiles whenever either zone is
   changed;
 - migrate the previous synchronized color state without guessing unknown
