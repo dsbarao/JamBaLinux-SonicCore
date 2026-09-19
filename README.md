@@ -1,18 +1,18 @@
-# JanBaLinux SonicCore
+# JamBaLinux SonicCore
 
 Open-source gaming headset control and audio platform for Linux.
 
 **First supported device: JBL Quantum 810 Wireless.**
 
-JanBaLinux SonicCore began with safe device detection and now includes
+JamBaLinux SonicCore began with safe device detection and now includes
 HID/USB integration, state monitoring, lighting, and strictly allowlisted
 headset controls. Its independent identity leaves room for additional devices
 and future Linux audio processing, including DSP/PipeWire integration.
 
-> JanBaLinux SonicCore is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Harman International or JBL. JBL, Quantum, and related product names are trademarks of their respective owners.
+> JamBaLinux SonicCore is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Harman International or JBL. JBL, Quantum, and related product names are trademarks of their respective owners.
 
-Technical identifiers use `janbalinux-soniccore`: the CLI is `soniccore`, the
-daemon is `soniccore-daemon`, and the service is `janbalinux-soniccore.service`.
+Technical identifiers use `jambalinux-soniccore`: the CLI is `soniccore`, the
+daemon is `soniccore-daemon`, and the service is `jambalinux-soniccore.service`.
 See [rebranding](docs/rebranding.md).
 
 ## Current status
@@ -154,11 +154,11 @@ An optional KDE application launcher is included. Install it for the current
 user after installing the CLI:
 
 ```bash
-install -Dm644 packaging/kde/janbalinux-soniccore.desktop \
-  "$HOME/.local/share/applications/janbalinux-soniccore.desktop"
+install -Dm644 packaging/kde/jambalinux-soniccore.desktop \
+  "$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 ```
 
-It then appears in the application menu as **JanBaLinux SonicCore**.
+It then appears in the application menu as **JamBaLinux SonicCore**.
 
 ### Plasma 6 panel widget
 
@@ -196,18 +196,18 @@ For manual widget installation, use:
 
 ```bash
 kpackagetool6 --type Plasma/Applet --install \
-  packaging/plasma/org.janbalinux.soniccore
+  packaging/plasma/org.jambalinux.soniccore
 ```
 
 For later development updates, use:
 
 ```bash
 kpackagetool6 --type Plasma/Applet --upgrade \
-  packaging/plasma/org.janbalinux.soniccore
+  packaging/plasma/org.jambalinux.soniccore
 ```
 
 Then enter Plasma edit mode, choose **Add Widgets**, search for
-**JanBaLinux SonicCore**, and drag it to the panel. The widget invokes only
+**JamBaLinux SonicCore**, and drag it to the panel. The widget invokes only
 allowlisted `soniccore` commands. Its popup includes expandable controls
 for ambient mode (off/ANC/TalkThru), global lighting (on/off), an HSV color
 picker applied together or independently to the complete Logo and Ring
@@ -219,10 +219,10 @@ rejected by the CLI parser.
 For real-time state tracking, install and enable the user service:
 
 ```bash
-install -Dm644 packaging/systemd/janbalinux-soniccore.service \
-  "$HOME/.config/systemd/user/janbalinux-soniccore.service"
+install -Dm644 packaging/systemd/jambalinux-soniccore.service \
+  "$HOME/.config/systemd/user/jambalinux-soniccore.service"
 systemctl --user daemon-reload
-systemctl --user enable --now janbalinux-soniccore.service
+systemctl --user enable --now jambalinux-soniccore.service
 ```
 
 The service opens the confirmed Quantum 810 hidraw node read-only, records only
@@ -233,7 +233,7 @@ If the monitor reports permission denied, install the narrowly scoped udev
 rule and reconnect the dongle:
 
 ```bash
-sudo install -m 0644 packaging/udev/70-janbalinux-soniccore.rules /etc/udev/rules.d/70-janbalinux-soniccore.rules
+sudo install -m 0644 packaging/udev/70-jambalinux-soniccore.rules /etc/udev/rules.d/70-jambalinux-soniccore.rules
 sudo udevadm control --reload-rules
 ```
 
@@ -275,7 +275,7 @@ percentage (90%, then 85%).
 The following is a conceptual direction, not a list of implemented modules:
 
 ```text
-JanBaLinux SonicCore
+JamBaLinux SonicCore
 ├── Device Control
 │   ├── Battery
 │   ├── ANC / TalkThru
@@ -311,6 +311,6 @@ captures that may include unrelated USB traffic. Prefer small sanitized byte
 sequences with timestamps removed and document hardware/firmware versions.
 
 For collaboration, bug reports, or responsible disclosure of a safety concern,
-open a GitHub issue or contact [janbalinux@gmail.com](mailto:janbalinux@gmail.com).
+open a GitHub issue or contact [jambalinux@gmail.com](mailto:jambalinux@gmail.com).
 
 Licensed under the MIT License.
