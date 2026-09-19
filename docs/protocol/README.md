@@ -1,7 +1,7 @@
 # Protocol research
 
 Early HID protocol mappings are now documented through controlled passive
-observations and QuantumENGINE USBPcap comparisons. JanBaLinux SonicCore
+observations and QuantumENGINE USBPcap comparisons. JamBaLinux SonicCore
 implements only the confirmed controls in its strict allowlist. Other observed
 vendor writes remain research documentation and must not be replayed blindly.
 Experiment notes preserve the scope and observations at the time of each capture.

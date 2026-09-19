@@ -1,9 +1,9 @@
-# JanBaLinux SonicCore: technical identity
+# JamBaLinux SonicCore: technical identity
 
-The public software name is **JanBaLinux SonicCore** and its technical
-identifier is `janbalinux-soniccore`. The command-line client is `soniccore`;
+The public software name is **JamBaLinux SonicCore** and its technical
+identifier is `jambalinux-soniccore`. The command-line client is `soniccore`;
 the daemon executable is `soniccore-daemon`; and the user unit is
-`janbalinux-soniccore.service`.
+`jambalinux-soniccore.service`.
 
 This project was made public before its first release or installation. There
 are no deployed users, state files, widgets, desktop entries, D-Bus clients, or
@@ -14,17 +14,17 @@ new identifiers directly, without legacy aliases or migration code.
 
 | Interface | Identifier |
 |---|---|
-| Cargo package | `janbalinux-soniccore` |
+| Cargo package | `jambalinux-soniccore` |
 | CLI | `soniccore` |
 | Daemon | `soniccore-daemon` |
-| systemd user unit | `janbalinux-soniccore.service` |
-| Plasma widget | `org.janbalinux.soniccore` |
-| D-Bus name and interface | `org.janbalinux.soniccore.State` |
-| D-Bus object path | `/org/janbalinux/soniccore/State` |
-| Runtime cache | `$XDG_RUNTIME_DIR/janbalinux-soniccore-state.json` |
-| Desktop entry | `janbalinux-soniccore.desktop` |
-| udev rule | `70-janbalinux-soniccore.rules` |
-| Project website | `https://github.com/dsbarao/JanBaLinux-SonicCore` |
+| systemd user unit | `jambalinux-soniccore.service` |
+| Plasma widget | `org.jambalinux.soniccore` |
+| D-Bus name and interface | `org.jambalinux.soniccore.State` |
+| D-Bus object path | `/org/jambalinux/soniccore/State` |
+| Runtime cache | `$XDG_RUNTIME_DIR/jambalinux-soniccore-state.json` |
+| Desktop entry | `jambalinux-soniccore.desktop` |
+| udev rule | `70-jambalinux-soniccore.rules` |
+| Project website | `https://github.com/dsbarao/JamBaLinux-SonicCore` |
 
 The rebrand does not change HID reports, USB matching, VID/PID values,
 allowlists, or protocol behavior. **JBL Quantum 810 Wireless** identifies the

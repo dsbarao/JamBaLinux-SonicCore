@@ -3,18 +3,18 @@
   "KPlugin": {
     "Authors": [
       {
-        "Email": "janbalinux@gmail.com",
+        "Email": "jambalinux@gmail.com",
         "Name": "Daniel Barão"
       }
     ],
     "Category": "System Information",
     "Description": "Headset status, lighting, and controls for JBL Quantum 810 Wireless",
     "Icon": "audio-headphones",
-    "Id": "org.janbalinux.soniccore",
+    "Id": "org.jambalinux.soniccore",
     "License": "MIT",
-    "Name": "JanBaLinux SonicCore",
+    "Name": "JamBaLinux SonicCore",
     "Version": "0.2.0",
-    "Website": "https://github.com/dsbarao/JanBaLinux-SonicCore"
+    "Website": "https://github.com/dsbarao/JamBaLinux-SonicCore"
   },
   "X-Plasma-API-Minimum-Version": "6.0"
 }

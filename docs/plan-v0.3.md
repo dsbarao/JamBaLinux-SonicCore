@@ -1,4 +1,4 @@
-# JanBaLinux SonicCore v0.3 plan
+# JamBaLinux SonicCore v0.3 plan
 
 Goal: turn the Plasma widget into a reliable real-time controller while keeping
 all USB writes strictly allowlisted.

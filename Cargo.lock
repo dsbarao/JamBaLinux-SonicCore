@@ -349,6 +349,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jambalinux-soniccore"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -391,15 +400,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "janbalinux-soniccore"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "zbus",
-]
 
 [[package]]
 name = "ordered-stream"

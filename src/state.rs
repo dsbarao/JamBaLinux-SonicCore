@@ -97,7 +97,7 @@ fn replace_if_changed<T: PartialEq>(slot: &mut Option<T>, value: T) -> bool {
 pub fn path() -> Result<PathBuf, String> {
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .ok_or("XDG_RUNTIME_DIR is not set; refusing to store runtime state elsewhere")?;
-    Ok(PathBuf::from(runtime).join("janbalinux-soniccore-state.json"))
+    Ok(PathBuf::from(runtime).join("jambalinux-soniccore-state.json"))
 }
 
 pub fn load() -> Option<RuntimeState> {
@@ -121,7 +121,7 @@ pub fn save(state: &mut RuntimeState) -> Result<(), String> {
 pub fn init_signal_service() -> Result<(), String> {
     let connection = Connection::session().map_err(|error| error.to_string())?;
     connection
-        .request_name("org.janbalinux.soniccore.State")
+        .request_name("org.jambalinux.soniccore.State")
         .map_err(|error| error.to_string())?;
     SIGNAL_CONNECTION
         .set(connection)
@@ -134,8 +134,8 @@ pub fn emit_changed_signal() {
     };
     let _ = connection.emit_signal(
         None::<&str>,
-        "/org/janbalinux/soniccore/State",
-        "org.janbalinux.soniccore.State",
+        "/org/jambalinux/soniccore/State",
+        "org.jambalinux.soniccore.State",
         "Changed",
         &(),
     );

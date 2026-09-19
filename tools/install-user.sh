@@ -3,13 +3,15 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-readonly PLASMOID_ID="org.janbalinux.soniccore"
+readonly PLASMOID_ID="org.jambalinux.soniccore"
 readonly PLASMOID_SOURCE="$PROJECT_DIR/packaging/plasma/$PLASMOID_ID"
 readonly PLASMOID_TARGET="$HOME/.local/share/plasma/plasmoids/$PLASMOID_ID"
-readonly SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/janbalinux-soniccore.service"
-readonly SERVICE_TARGET="$HOME/.config/systemd/user/janbalinux-soniccore.service"
-readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/janbalinux-soniccore.desktop"
-readonly LAUNCHER_TARGET="$HOME/.local/share/applications/janbalinux-soniccore.desktop"
+readonly SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore.service"
+readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service"
+readonly EQUALIZER_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore-equalizer.service"
+readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
+readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore.desktop"
+readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 
 fail() {
     printf 'erro: %s\n' "$*" >&2
@@ -23,16 +25,21 @@ require_command() {
 check_prerequisites() {
     require_command cargo
     require_command kpackagetool6
+    require_command pactl
+    require_command pipewire
+    require_command pw-cli
+    require_command pw-dump
     require_command systemctl
     [[ -f "$PROJECT_DIR/Cargo.toml" ]] || fail "Cargo.toml não encontrado"
     [[ -f "$PLASMOID_SOURCE/metadata.json" ]] || fail "pacote Plasma não encontrado"
     [[ -f "$SERVICE_SOURCE" ]] || fail "serviço systemd não encontrado"
+    [[ -f "$EQUALIZER_SERVICE_SOURCE" ]] || fail "serviço systemd do equalizador não encontrado"
     [[ -f "$LAUNCHER_SOURCE" ]] || fail "lançador KDE não encontrado"
 }
 
 if [[ "${1:-}" == "--check" ]]; then
     check_prerequisites
-    printf 'Pré-requisitos do JanBaLinux SonicCore verificados. Nenhuma alteração foi feita.\n'
+    printf 'Pré-requisitos do JamBaLinux SonicCore verificados. Nenhuma alteração foi feita.\n'
     exit 0
 fi
 
@@ -49,10 +56,17 @@ else
 fi
 
 install -Dm644 "$SERVICE_SOURCE" "$SERVICE_TARGET"
+install -Dm644 "$EQUALIZER_SERVICE_SOURCE" "$EQUALIZER_SERVICE_TARGET"
 install -Dm644 "$LAUNCHER_SOURCE" "$LAUNCHER_TARGET"
 systemctl --user daemon-reload
-systemctl --user enable --now janbalinux-soniccore.service
+systemctl --user enable jambalinux-soniccore.service
+systemctl --user enable jambalinux-soniccore-equalizer.service
+# Installation is the controlled deployment boundary: restart once here so an
+# already-running service cannot keep an older binary. Band changes never use
+# systemctl and update the persistent equalizer node in place.
+systemctl --user restart jambalinux-soniccore.service
+systemctl --user restart jambalinux-soniccore-equalizer.service
 
-printf '\nJanBaLinux SonicCore instalado para o usuário atual.\n'
+printf '\nJamBaLinux SonicCore instalado para o usuário atual.\n'
 printf 'O Plasma não foi reiniciado automaticamente.\n'
 printf 'A regra udev privilegiada também não foi alterada. Consulte o README se houver erro de permissão.\n'

@@ -13,7 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+mod equalizer;
 mod hid;
+mod pipewire;
 mod state;
 
 const USB_ROOT: &str = "/sys/bus/usb/devices";
@@ -1196,6 +1198,51 @@ fn print_status_json(output: &StatusOutput) -> Result<(), String> {
     Ok(())
 }
 
+fn cached_status_json() -> Result<(), String> {
+    let cached = state::load().ok_or(
+        "runtime state is unavailable; start jambalinux-soniccore.service or use status for a direct read",
+    )?;
+    print_status_json(&StatusOutput {
+        schema: 1,
+        device: "0ecb:2069",
+        hidraw: "runtime-cache".into(),
+        access: "runtime-cache-read-only",
+        dry_run: false,
+        battery_percent: cached.battery_percent,
+        charging: cached.charging,
+        raw_feature: None,
+        headset_connected: cached.headset_connected,
+        ambient_mode: cached.ambient_mode,
+        microphone: cached.microphone,
+        lighting_enabled: cached.lighting_enabled,
+        lighting_color: cached.lighting_color,
+        logo_color: cached.logo_color,
+        ring_color: cached.ring_color,
+        logo_colors: cached.logo_colors,
+        ring_colors: cached.ring_colors,
+        logo_effect: cached.logo_effect,
+        ring_effect: cached.ring_effect,
+        logo_speed: cached.logo_speed,
+        ring_speed: cached.ring_speed,
+        game_chat_value: cached.game_chat_value,
+        bluetooth: cached.bluetooth,
+        sidetone_level: cached.sidetone_level,
+    })
+}
+
+fn cached_status(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match (args.next().as_deref(), args.next()) {
+        (Some("--format"), Some(format)) if format == "json" => {
+            if args.next().is_some() {
+                return Err("cached-status --format accepts only `json`".into());
+            }
+            cached_status_json()?;
+            Ok(true)
+        }
+        _ => Err("usage: soniccore cached-status --format json".into()),
+    }
+}
+
 fn query_battery(node: &Path) -> Result<(u8, String), String> {
     let report =
         read_feature_report_read_only(node, BATTERY_FEATURE_REPORT_ID, BATTERY_FEATURE_REPORT_LEN)?;
@@ -1319,7 +1366,7 @@ fn notify(dry_run: bool) -> Result<bool, String> {
     let urgency = if battery <= 20 { "critical" } else { "normal" };
     let process = Command::new("notify-send")
         .args([
-            "--app-name=JanBaLinux SonicCore",
+            "--app-name=JamBaLinux SonicCore",
             "--icon=audio-headphones",
             &format!("--urgency={urgency}"),
             "JBL Quantum 810",
@@ -1348,7 +1395,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
     let process = Command::new("kdialog")
         .args([
             "--title",
-            "JanBaLinux SonicCore",
+            "JamBaLinux SonicCore",
             "--msgbox",
             &format!("JBL Quantum 810 Wireless\nBateria: {battery}%"),
         ])
@@ -1361,13 +1408,186 @@ fn show(dry_run: bool) -> Result<bool, String> {
 }
 
 fn usage() {
-    eprintln!("JanBaLinux SonicCore — gaming headset control for Linux");
+    eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|probe-status|set <feature> <value>|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|reset]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "set permits only confirmed controls and complete lighting profiles from the built-in allowlist"
     );
+}
+
+fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(profile).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("Host-side equalizer profile (dB):");
+        for band in &profile.bands {
+            let frequency = if band.frequency_hz >= 1_000 {
+                format!("{} kHz", band.frequency_hz / 1_000)
+            } else {
+                format!("{} Hz", band.frequency_hz)
+            };
+            println!("  {frequency:>6}: {:+.1}", band.gain_db);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct EqualizerStatusOutput {
+    schema: u8,
+    bands: Vec<equalizer::Band>,
+    pipewire: pipewire::Status,
+}
+
+fn print_equalizer_status(json: bool) -> Result<(), String> {
+    let profile = equalizer::load()?;
+    let pipewire = pipewire::status(&profile)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&EqualizerStatusOutput {
+                schema: profile.schema,
+                bands: profile.bands,
+                pipewire,
+            })
+            .map_err(|error| error.to_string())?
+        );
+    } else {
+        print_equalizer(&profile, false)?;
+        println!(
+            "PipeWire: {}{}",
+            if pipewire.active {
+                "active"
+            } else {
+                "inactive"
+            },
+            pipewire
+                .target_node_name
+                .as_deref()
+                .map(|target| format!(" (Game target: {target})"))
+                .unwrap_or_default()
+        );
+        println!(
+            "Routing: proven Game streams are routed automatically to {}",
+            pipewire.virtual_sink_name
+        );
+        if let Some(error) = pipewire.error.as_deref() {
+            println!("Action required: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn commit_equalizer_profile(
+    previous: &equalizer::EqualizerProfile,
+    requested: &equalizer::EqualizerProfile,
+) -> Result<(), String> {
+    pipewire::apply_profile(requested, previous)?;
+    if let Err(error) = equalizer::save(requested) {
+        let rollback = pipewire::apply_profile(previous, requested)
+            .map(|_| "live DSP rolled back".to_owned())
+            .unwrap_or_else(|rollback| format!("DSP rollback also failed: {rollback}"));
+        return Err(format!(
+            "could not persist the equalizer profile ({error}); {rollback}"
+        ));
+    }
+    Ok(())
+}
+
+fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        None => {
+            let profile = equalizer::load()?;
+            print_equalizer(&profile, false)?;
+            Ok(true)
+        }
+        Some("--format") => match args.next().as_deref() {
+            Some("json") if args.next().is_none() => {
+                let profile = equalizer::load()?;
+                print_equalizer(&profile, true)?;
+                Ok(true)
+            }
+            _ => Err("equalizer --format requires exactly `json`".into()),
+        },
+        Some("status") => match args.next().as_deref() {
+            None => {
+                print_equalizer_status(false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_equalizer_status(true)?;
+                Ok(true)
+            }
+            _ => Err("equalizer status accepts only --format json".into()),
+        },
+        Some("enable") if args.next().is_none() => {
+            let profile = equalizer::load()?;
+            let status = pipewire::enable(&profile)?;
+            println!(
+                "automatic PipeWire Game equalizer active at {}",
+                status.virtual_sink_name
+            );
+            Ok(true)
+        }
+        Some("enable") => Err("equalizer enable accepts no value".into()),
+        Some("disable") if args.next().is_none() => {
+            pipewire::disable()?;
+            println!("PipeWire Game equalizer disabled");
+            Ok(true)
+        }
+        Some("disable") => Err("equalizer disable accepts no value".into()),
+        Some("prepare") if args.next().is_none() => {
+            pipewire::prepare(&equalizer::load()?)?;
+            Ok(true)
+        }
+        Some("prepare") => Err("equalizer prepare accepts no value".into()),
+        Some("run") if args.next().is_none() => {
+            pipewire::run(&equalizer::load()?)?;
+            Ok(true)
+        }
+        Some("run") => Err("equalizer run accepts no value".into()),
+        Some("restore") if args.next().is_none() => {
+            pipewire::restore_routes()?;
+            Ok(true)
+        }
+        Some("restore") => Err("equalizer restore accepts no value".into()),
+        Some("set") => {
+            let frequency_hz = args
+                .next()
+                .ok_or("equalizer set requires a frequency in Hz")?
+                .parse::<u32>()
+                .map_err(|_| "equalizer frequency must be an integer in Hz")?;
+            let gain_db = args
+                .next()
+                .ok_or("equalizer set requires a gain in dB")?
+                .parse::<f32>()
+                .map_err(|_| "equalizer gain must be a number in dB")?;
+            if args.next().is_some() {
+                return Err("equalizer set accepts only frequency and gain".into());
+            }
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            let requested = equalizer::updated_profile(&previous, frequency_hz, gain_db)?;
+            commit_equalizer_profile(&previous, &requested)?;
+            print_equalizer(&requested, false)?;
+            Ok(true)
+        }
+        Some("reset") if args.next().is_none() => {
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            let requested = equalizer::reset_profile();
+            commit_equalizer_profile(&previous, &requested)?;
+            print_equalizer(&requested, false)?;
+            Ok(true)
+        }
+        Some("reset") => Err("equalizer reset accepts no value".into()),
+        _ => Err("unknown equalizer command".into()),
+    }
 }
 
 fn main() {
@@ -1380,8 +1600,10 @@ fn main() {
         "monitor" => monitor(args.next().as_deref() == Some("--dry-run")),
         "daemon" => daemon(),
         "status" => parse_status_options(args).and_then(status),
+        "cached-status" => cached_status(args),
         "probe-status" => probe_status(),
         "set" => parse_set_command(args).and_then(set_control),
+        "equalizer" | "eq" => equalizer(args),
         "notify" => notify(args.next().as_deref() == Some("--dry-run")),
         "show" => show(args.next().as_deref() == Some("--dry-run")),
         "export"
@@ -1557,6 +1779,15 @@ mod tests {
         );
         assert!(parse_status_options(["--format"].into_iter().map(String::from)).is_err());
         assert!(parse_status_options(["--xml"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn cached_status_requires_json_format() {
+        assert!(cached_status(std::iter::empty()).is_err());
+        assert!(cached_status(["--format", "text"].into_iter().map(String::from)).is_err());
+        assert!(
+            cached_status(["--format", "json", "extra"].into_iter().map(String::from)).is_err()
+        );
     }
 
     #[test]

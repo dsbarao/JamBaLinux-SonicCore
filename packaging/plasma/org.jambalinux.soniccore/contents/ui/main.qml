@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQml.Models
 
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
@@ -12,6 +13,8 @@ PlasmoidItem {
     id: root
 
     readonly property string command: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore status --format json\""
+    readonly property string cachedCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore cached-status --format json\""
+    readonly property string equalizerCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore equalizer status --format json\""
     readonly property url equipmentImage: Qt.resolvedUrl("../images/jbl-quantum-810.png")
     property int batteryPercent: -1
     property bool charging: false
@@ -42,6 +45,21 @@ PlasmoidItem {
     property int gameChatValue: -1
     property bool controlBusy: false
     property bool updating: false
+    property bool equalizerUpdating: false
+    property bool equalizerBusy: false
+    property int equalizerVisualRevision: 0
+    property bool equalizerPipeWireActive: false
+    property var equalizerServiceActive: null
+    property var equalizerTargetConnected: null
+    property var equalizerDefaultSafe: null
+    property string equalizerTarget: ""
+    property string equalizerError: ""
+    property string pendingEqualizerAction: ""
+    property int pendingEqualizerFrequency: 0
+    property real pendingEqualizerGain: 0
+    readonly property var equalizerFrequencies: [
+        31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
+    ]
     readonly property bool deviceAvailable: batteryPercent >= 0
     readonly property bool daemonAvailable: daemonWatcher.registered
     readonly property color batteryColor: headsetConnected === false
@@ -50,9 +68,13 @@ PlasmoidItem {
         ? "#22d3ee"
         : batteryPercent < 0
         ? Kirigami.Theme.disabledTextColor
-        : batteryPercent >= 60
+            : batteryPercent >= 60
             ? "#35c759"
             : batteryPercent >= 30 ? "#f5c542" : "#ff453a"
+
+    ListModel {
+        id: equalizerBandModel
+    }
 
     Plasmoid.icon: "audio-headphones"
     Plasmoid.status: batteryPercent >= 0 ? PlasmaCore.Types.ActiveStatus : PlasmaCore.Types.PassiveStatus
@@ -63,7 +85,7 @@ PlasmoidItem {
         }
         updating = true
         errorMessage = ""
-        executable.connectSource(command)
+        cachedState.connectSource(cachedCommand)
     }
 
     function runControl(feature, value) {
@@ -73,6 +95,102 @@ PlasmoidItem {
         actionMessage = "Aplicando…"
         const controlCommand = `/bin/sh -lc "$HOME/.cargo/bin/soniccore set ${feature} '${value}'"`
         executable.connectSource(controlCommand)
+    }
+
+    function refreshEqualizer() {
+        if (equalizerUpdating) return
+        equalizerUpdating = true
+        equalizerExecutable.connectSource(equalizerCommand)
+    }
+
+    function setEqualizerBand(frequencyHz, gainDb) {
+        if (equalizerBusy || equalizerUpdating) return
+        equalizerBusy = true
+        const normalizedGain = Math.round(Number(gainDb) * 10) / 10
+        pendingEqualizerAction = "set"
+        pendingEqualizerFrequency = frequencyHz
+        pendingEqualizerGain = normalizedGain
+        const equalizerSetCommand = `/bin/sh -lc "$HOME/.cargo/bin/soniccore equalizer set ${frequencyHz} ${normalizedGain}"`
+        equalizerExecutable.connectSource(equalizerSetCommand)
+    }
+
+    function resetEqualizer() {
+        if (equalizerBusy || equalizerUpdating) return
+        equalizerBusy = true
+        pendingEqualizerAction = "reset"
+        equalizerExecutable.connectSource("/bin/sh -lc \"$HOME/.cargo/bin/soniccore equalizer reset\"")
+    }
+
+    function replaceEqualizerBands(bands) {
+        const gainsByFrequency = {}
+        for (let index = 0; index < bands.length; ++index) {
+            const frequency = Number(bands[index].frequency_hz)
+            const gain = Number(bands[index].gain_db)
+            if (Number.isFinite(frequency) && Number.isFinite(gain))
+                gainsByFrequency[frequency] = gain
+        }
+
+        equalizerBandModel.clear()
+        for (let index = 0; index < equalizerFrequencies.length; ++index) {
+            const frequency = equalizerFrequencies[index]
+            equalizerBandModel.append({
+                "frequencyHz": frequency,
+                "gainDb": Number(gainsByFrequency[frequency] ?? 0)
+            })
+        }
+        equalizerVisualRevision += 1
+    }
+
+    function updateEqualizerBands(frequencyHz, gainDb, reset) {
+        for (let index = 0; index < equalizerBandModel.count; ++index) {
+            const band = equalizerBandModel.get(index)
+            let nextGain = Number(band.gainDb)
+            if (reset) nextGain = 0
+            else if (Number(band.frequencyHz) === frequencyHz) nextGain = gainDb
+            equalizerBandModel.setProperty(index, "gainDb", nextGain)
+        }
+        // A revision forces every handle to resynchronize even when its model
+        // value was already zero and ListModel therefore emitted no role change.
+        equalizerVisualRevision += 1
+    }
+
+    function equalizerStatusText() {
+        if (equalizerDefaultSafe === false)
+            return "Automático · restaurando a saída padrão"
+        if (equalizerError.length > 0)
+            return "Automático · indisponível"
+        if (equalizerPipeWireActive) {
+            return equalizerTarget.length > 0
+                ? `Automático · ativo na rota Game: ${equalizerTarget}`
+                : "Automático · ativo na rota Game"
+        }
+        if (equalizerTargetConnected === false)
+            return "Automático · aguardando a rota Game do headset"
+        if (equalizerServiceActive === true)
+            return "Automático · preparando a rota Game"
+        if (equalizerServiceActive === false)
+            return "Automático · serviço indisponível"
+        return "Automático · verificando o PipeWire"
+    }
+
+    function equalizerProblemText() {
+        if (equalizerDefaultSafe === false) {
+            return "A saída virtual não pode ser a saída padrão. A restauração automática para a saída física está em andamento."
+        }
+        if (equalizerError.length > 0)
+            return equalizerError
+        if (equalizerTargetConnected !== false && equalizerServiceActive === false) {
+            return "O serviço automático do equalizador está inativo. Execute tools/install-user.sh novamente e confira o serviço do usuário."
+        }
+        return ""
+    }
+
+    function equalizerFrequencyLabel(frequencyHz) {
+        return frequencyHz >= 1000 ? `${frequencyHz / 1000} kHz` : `${frequencyHz} Hz`
+    }
+
+    function equalizerCompactFrequencyLabel(frequencyHz) {
+        return frequencyHz >= 1000 ? `${frequencyHz / 1000}k` : `${frequencyHz}`
     }
 
     function ambientLabel(value) {
@@ -307,8 +425,10 @@ PlasmoidItem {
     }
 
     fullRepresentation: ColumnLayout {
+        id: expandedRepresentation
+        readonly property int equalizerColumns: width >= Kirigami.Units.gridUnit * 20 ? 10 : 5
         readonly property real requiredGridHeight: root.openSection === "lighting"
-            ? 52 : root.openSection.length > 0 ? 32 : 25
+            ? 52 : root.openSection === "equalizer" ? 57 : root.openSection.length > 0 ? 32 : 25
 
         Layout.minimumWidth: Kirigami.Units.gridUnit * 19
         Layout.minimumHeight: Kirigami.Units.gridUnit * requiredGridHeight
@@ -319,7 +439,7 @@ PlasmoidItem {
         PlasmaComponents.Label {
             Layout.alignment: Qt.AlignHCenter
             Layout.maximumHeight: implicitHeight
-            text: "JanBaLinux SonicCore"
+            text: "JamBaLinux SonicCore"
             font.bold: true
             font.pixelSize: Kirigami.Units.gridUnit * 1.05
         }
@@ -456,11 +576,10 @@ PlasmoidItem {
             Layout.alignment: Qt.AlignHCenter
             Layout.maximumHeight: implicitHeight
             spacing: Kirigami.Units.smallSpacing
-            enabled: root.deviceAvailable && !root.controlBusy
-
                 PlasmaComponents.Button {
                     text: "Ambiente"
                 icon.name: "audio-headphones-symbolic"
+                enabled: root.deviceAvailable && !root.controlBusy
                 checkable: true
                 checked: root.openSection === "ambient"
                 onClicked: root.openSection = checked ? "ambient" : ""
@@ -469,6 +588,7 @@ PlasmoidItem {
             PlasmaComponents.Button {
                 text: "Luzes"
                 icon.source: Qt.resolvedUrl("../images/light-bulb.svg")
+                enabled: root.deviceAvailable && !root.controlBusy
                 checkable: true
                 checked: root.openSection === "lighting"
                 onClicked: {
@@ -480,9 +600,22 @@ PlasmoidItem {
             PlasmaComponents.Button {
                 text: "Retorno"
                 icon.name: "microphone-sensitivity-high"
+                enabled: root.deviceAvailable && !root.controlBusy
                 checkable: true
                 checked: root.openSection === "sidetone"
                 onClicked: root.openSection = checked ? "sidetone" : ""
+            }
+
+            PlasmaComponents.Button {
+                text: "Equalizador"
+                icon.name: "view-filter"
+                enabled: !root.equalizerBusy
+                checkable: true
+                checked: root.openSection === "equalizer"
+                onClicked: {
+                    root.openSection = checked ? "equalizer" : ""
+                    if (checked) root.refreshEqualizer()
+                }
             }
         }
 
@@ -505,7 +638,9 @@ PlasmoidItem {
                     Layout.alignment: Qt.AlignHCenter
                     text: root.openSection === "ambient"
                         ? "Controle de som ambiente"
-                        : root.openSection === "lighting" ? "Iluminação" : "Retorno do microfone"
+                        : root.openSection === "lighting" ? "Iluminação"
+                        : root.openSection === "equalizer" ? "Equalizador de saída"
+                        : "Retorno do microfone"
                     font.bold: true
                 }
 
@@ -515,6 +650,8 @@ PlasmoidItem {
                         ? `Atual: ${root.ambientLabel(root.ambientMode)}`
                         : root.openSection === "lighting"
                             ? root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
+                            : root.openSection === "equalizer"
+                                ? root.equalizerStatusText()
                             : `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
                     opacity: 0.7
                 }
@@ -526,6 +663,121 @@ PlasmoidItem {
                     PlasmaComponents.Button { text: "Desligado"; checkable: true; checked: root.ambientMode === "off"; onClicked: root.runControl("ambient", "off") }
                     PlasmaComponents.Button { text: "ANC"; checkable: true; checked: root.ambientMode === "anc"; onClicked: root.runControl("ambient", "anc") }
                     PlasmaComponents.Button { text: "TalkThru"; checkable: true; checked: root.ambientMode === "talkthru"; onClicked: root.runControl("ambient", "talkthru") }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: root.openSection === "equalizer"
+                    enabled: !root.equalizerBusy && !root.equalizerUpdating
+                    spacing: Kirigami.Units.smallSpacing
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Kirigami.Units.gridUnit
+                            * (expandedRepresentation.equalizerColumns === 10 ? 14 : 29)
+                        columns: expandedRepresentation.equalizerColumns
+                        columnSpacing: Kirigami.Units.smallSpacing
+                        rowSpacing: Kirigami.Units.largeSpacing
+
+                        Repeater {
+                            model: equalizerBandModel
+
+                            delegate: ColumnLayout {
+                                id: equalizerBand
+                                required property int frequencyHz
+                                required property real gainDb
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: Kirigami.Units.gridUnit * 1.25
+                                Layout.preferredHeight: Kirigami.Units.gridUnit * 14
+                                spacing: Kirigami.Units.smallSpacing
+
+                                function synchronizeHandle() {
+                                    if (!equalizerSlider.pressed)
+                                        equalizerSlider.value = Number(gainDb)
+                                }
+
+                                Component.onCompleted: synchronizeHandle()
+                                onGainDbChanged: synchronizeHandle()
+
+                                Connections {
+                                    target: root
+
+                                    function onEqualizerVisualRevisionChanged() {
+                                        equalizerBand.synchronizeHandle()
+                                    }
+                                }
+
+                                Timer {
+                                    id: equalizerCommit
+                                    interval: 180
+                                    repeat: false
+                                    onTriggered: {
+                                        if (!equalizerSlider.pressed) root.setEqualizerBand(
+                                            equalizerBand.frequencyHz,
+                                            equalizerSlider.value)
+                                    }
+                                }
+
+                                PlasmaComponents.Label {
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    text: `${Number(equalizerSlider.value) >= 0 ? "+" : ""}${Number(equalizerSlider.value).toFixed(0)}`
+                                    font.family: "monospace"
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                }
+
+                                PlasmaComponents.Slider {
+                                    id: equalizerSlider
+                                    Layout.alignment: Qt.AlignHCenter
+                                    Layout.minimumHeight: Kirigami.Units.gridUnit * 8
+                                    Layout.preferredHeight: Kirigami.Units.gridUnit * 10
+                                    orientation: Qt.Vertical
+                                    from: -12
+                                    to: 12
+                                    stepSize: 1
+                                    value: 0
+                                    onMoved: equalizerCommit.restart()
+                                    onPressedChanged: {
+                                        if (!pressed) equalizerCommit.restart()
+                                    }
+                                }
+
+                                PlasmaComponents.Label {
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    text: root.equalizerCompactFrequencyLabel(
+                                        equalizerBand.frequencyHz)
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                }
+                            }
+                        }
+                    }
+
+                    PlasmaComponents.Button {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "Zerar bandas"
+                        icon.name: "edit-clear"
+                        onClicked: root.resetEqualizer()
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        text: root.equalizerPipeWireActive
+                            ? "A rota Game é processada automaticamente; Chat, microfone e a saída padrão permanecem fora da cadeia."
+                            : "O equalizador se conecta automaticamente quando a rota Game fica disponível; Chat e microfone permanecem fora da cadeia."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.7
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.equalizerProblemText().length > 0
+                        text: root.equalizerProblemText()
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.negativeTextColor
+                    }
                 }
 
                 RowLayout {
@@ -893,11 +1145,102 @@ PlasmoidItem {
         }
     }
 
+    Plasma5Support.DataSource {
+        id: cachedState
+        engine: "executable"
+
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            const exitCode = Number(data["exit code"] ?? -1)
+            if (exitCode === 0) {
+                root.updating = false
+                root.applyResult(data)
+                return
+            }
+            // The cache is unavailable only while the daemon starts/stops or
+            // before it has observed the headset. Keep a direct HID read as a
+            // compatibility fallback rather than polling it in normal use.
+            executable.connectSource(root.command)
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: equalizerExecutable
+        engine: "executable"
+
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            const exitCode = Number(data["exit code"] ?? -1)
+            const stdout = String(data.stdout ?? "").trim()
+            const stderr = String(data.stderr ?? "").trim()
+            if (sourceName === root.equalizerCommand) {
+                root.equalizerUpdating = false
+                if (exitCode !== 0) {
+                    root.equalizerPipeWireActive = false
+                    root.equalizerServiceActive = null
+                    root.equalizerTargetConnected = null
+                    root.equalizerDefaultSafe = null
+                    root.equalizerTarget = ""
+                    root.equalizerError = stderr
+                        || "Não foi possível consultar o PipeWire. Verifique se ele está em execução e tente novamente."
+                    return
+                }
+                try {
+                    const profile = JSON.parse(stdout)
+                    const pipewire = profile.pipewire ?? {}
+                    const appliedBands = pipewire.applied_bands
+                        ?? profile.applied_bands ?? profile.bands ?? []
+                    root.replaceEqualizerBands(appliedBands.length === 10
+                        ? appliedBands : profile.bands ?? [])
+                    root.equalizerPipeWireActive = (pipewire.active ?? profile.active) === true
+                    root.equalizerServiceActive = pipewire.service_active
+                        ?? profile.service_active ?? null
+                    root.equalizerTargetConnected = pipewire.target_connected
+                        ?? profile.target_connected ?? null
+                    root.equalizerDefaultSafe = pipewire.default_safe
+                        ?? profile.default_safe ?? null
+                    root.equalizerTarget = String(pipewire.target_node_name
+                        ?? profile.target_node_name ?? "")
+                    root.equalizerError = String(pipewire.error ?? profile.error ?? "")
+                } catch (error) {
+                    root.equalizerPipeWireActive = false
+                    root.equalizerServiceActive = null
+                    root.equalizerTargetConnected = null
+                    root.equalizerDefaultSafe = null
+                    root.equalizerTarget = ""
+                    root.equalizerError = `Resposta inválida do equalizador: ${error}`
+                }
+                return
+            }
+            root.equalizerBusy = false
+            if (exitCode === 0) {
+                if (root.pendingEqualizerAction === "reset") {
+                    root.updateEqualizerBands(0, 0, true)
+                    root.actionMessage = "Bandas zeradas"
+                } else if (root.pendingEqualizerAction === "set") {
+                    root.updateEqualizerBands(root.pendingEqualizerFrequency,
+                        root.pendingEqualizerGain, false)
+                    root.actionMessage = "Equalizador atualizado"
+                }
+                root.pendingEqualizerAction = ""
+                root.equalizerError = ""
+                clearAction.restart()
+                root.refreshEqualizer()
+            } else {
+                root.pendingEqualizerAction = ""
+                root.equalizerError = stderr || "Não foi possível atualizar o equalizador"
+                // Restore the canonical values after a rejected update so a
+                // dragged handle never remains visually detached from DSP.
+                root.refreshEqualizer()
+            }
+        }
+    }
+
     DBus.SignalWatcher {
         busType: DBus.BusType.Session
-        service: "org.janbalinux.soniccore.State"
-        path: "/org/janbalinux/soniccore/State"
-        iface: "org.janbalinux.soniccore.State"
+        service: "org.jambalinux.soniccore.State"
+        path: "/org/jambalinux/soniccore/State"
+        iface: "org.jambalinux.soniccore.State"
         enabled: true
 
         function dbusChanged() {
@@ -908,7 +1251,7 @@ PlasmoidItem {
     DBus.DBusServiceWatcher {
         id: daemonWatcher
         busType: DBus.BusType.Session
-        watchedService: "org.janbalinux.soniccore.State"
+        watchedService: "org.jambalinux.soniccore.State"
 
         onRegisteredChanged: {
             if (registered) root.refresh()
@@ -930,7 +1273,7 @@ PlasmoidItem {
     }
 
     Timer {
-        interval: 60000
+        interval: 300000
         repeat: true
         running: true
         triggeredOnStart: true

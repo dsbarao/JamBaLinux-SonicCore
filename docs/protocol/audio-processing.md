@@ -10,6 +10,87 @@ The equalizer is host-side DSP, not a dongle/headset setting. A Linux
 implementation should use PipeWire filters, EasyEffects-compatible processing,
 or another host DSP layer rather than vendor USB writes.
 
+## JamBaLinux profile and persistent service
+
+JamBaLinux stores a user-owned, versioned 10-band profile under
+`$XDG_CONFIG_HOME/jambalinux-soniccore/equalizer.json` (or
+`~/.config/jambalinux-soniccore/equalizer.json`). The `soniccore equalizer`
+command and Plasma widget let users edit the documented bands within the
+documented -12 dB to +12 dB range. This profile is intentionally independent
+of HID state and does not open a headset device or send any USB report.
+
+The user installation includes the persistent
+`jambalinux-soniccore-equalizer.service`. It starts automatically with the user
+session, waits when the headset is unavailable, and retries discovery rather
+than requiring an activation button. It owns one PipeWire filter-chain and a
+virtual **JamBaLinux Game Equalizer** sink for the lifetime of the service.
+
+`equalizer set` and `equalizer reset` issue updates to the existing node through
+PipeWire's `Props` parameter. Each `Props` update carries all ten controls
+together. A change schedules four updates separated by three 10 ms intervals:
+a nominal 30 ms ramp that excludes `pw-cli` execution and scheduling overhead.
+The command then reads the controls from the same node and object serial before
+saving the profile. On the 2026-09-19 live-graph acceptance run, complete
+commands took about 100 ms and the audio effect was measured independently.
+That end-to-end time is not a sample-accurate measurement of the ramp itself;
+the ramp remains a nominal 30 ms schedule. The update path does not invoke
+`systemctl restart` or deliberately recreate the filter node. If the live
+update or profile save fails, the command reports the failure and attempts to
+restore the preceding control values.
+
+The output is pinned only to the unique Quantum Game PCM: USB playback PCM 0
+with `alsa.components = USB0ecb:2069`. Discovery refuses an absent or ambiguous
+target instead of guessing. The routing loop considers only playback streams
+whose current destination is that proven Game sink. Before moving one to the
+virtual sink, it persists the stream's `pactl` index and restore identifier
+together with the original sink name and `pactl` index. On service shutdown,
+matching live streams are moved back by sink name, with the recorded sink index
+as a fallback.
+
+The virtual sink has zero session and driver priority and is never deliberately
+made the default. The service records the preceding non-virtual default and
+restores it if the virtual sink becomes default. It never selects Chat streams
+or capture nodes, so Chat playback and microphones remain outside the chain.
+Health checks detect links from the equalizer output to the headset's Chat or
+capture nodes and report the chain as unhealthy; they do not remove those
+links.
+
+`soniccore equalizer status` and the widget expose actionable errors for an
+inactive service, unavailable Game output, missing or disconnected filter,
+unsafe default or links, unobservable DSP controls, and a mismatch between the
+live controls and saved profile. They do not present the equalizer as active
+when these checks fail.
+
+The filter shape is an initial Linux approximation: 31 Hz uses a low shelf,
+62 Hz through 8 kHz use peaking biquads, 16 kHz uses a high shelf, and every
+band uses Q=1.0. USB captures confirm only the centers and gain range, not
+QuantumENGINE's Q or filter topology, so this is not claimed to be acoustically
+identical to the Windows implementation. Large positive gains can clip; there
+is currently no automatic preamp.
+
+## Real-system acceptance (2026-09-19)
+
+The recovery implementation was exercised on the maintainer's JBL Quantum 810
+Wireless with PipeWire 1.6.8. These observations validate this host and graph;
+they are not a claim of acoustic parity with QuantumENGINE.
+
+| Criterion | Recorded evidence |
+|---|---|
+| Automatic persistent chain | The user service remained `active/running` with PID `1485189`, `NRestarts=0`, and start timestamp `92705227768`. The filter stayed at node `90`, object serial `8925`, with output serial `8926`. There was no manual activation control. |
+| Ten live controls and measured effect | All ten expected `Props` controls were readable from the same node. At 500 Hz, a +6 dB setting measured -35.58 dBFS versus -42.27 dBFS at 0 dB, a +6.69 dB difference. At the 16 kHz high-shelf corner, +12 dB measured -45.56 dBFS versus -51.61 dBFS at 0 dB, a +6.05 dB difference consistent with the shelf's corner response. |
+| Playback continuity | A local 60-second Chrome video with audio remained `paused=false` and `ended=false`, with time advancing and looping while 500 Hz and 16 kHz values changed. Its proven Game stream was routed through the equalizer during the test. The service PID, restart count, node ID, and object serial did not change. |
+| Nominal ramp and no restart | Four complete ten-control updates were separated by three 10 ms waits, giving the required nominal 30 ms schedule. Observed end-to-end CLI calls were approximately 0.100-0.101 s; this includes process and verification overhead and is not reported as the ramp duration. No band change restarted the service or recreated the node. |
+| One reset action | Clicking the installed widget's **Zerar bandas** control made all ten visible values zero, saved all ten profile values as zero, and read back all ten live DSP gains as zero. PID/node identity stayed unchanged. The maintainer's pre-test 16 kHz +12 dB value was then restored through the widget. |
+| Game-only processing | The chain linked only to the confirmed USB playback PCM 0 Game sink. No equalizer links reached Chat playback or the microphone. The saved and applied profiles stayed synchronized and `chat_isolated=true`. |
+| Safe and reversible routing | Forcing the virtual sink as default was corrected back to the physical Game sink within the next observed routing iteration. A temporary stream that began on proven Game was moved to the equalizer only after its Game destination had been persisted. Moving that stream manually to physical analog sink serial `52` was respected, and its routing record was removed rather than hijacked back. |
+| Physical reconnect | Disconnecting and reconnecting the dongle changed the physical Game object serial from `1820` to `16560`. The service PID, restart count, EQ node `90/8925`, and profile were preserved; the output links and persisted target were rebuilt for Game `16560`. A post-reconnect playback stream was observed as application -> EQ `8925` -> output `8926` -> Game `16560`, with no Chat or microphone link. |
+| Health/error reporting | Final JSON status reported `active`, `service_active`, `target_connected`, `default_safe`, `chat_isolated`, `routing_healthy`, and `profile_synced` as true, with `error=null`. The only reconnect journal warning recorded the expected interval in which Game was physically absent. |
+
+The dongle reconnect itself occurred with no application stream live. It proves
+service, DSP-node, profile, target, and link recovery; the complete application
+path was exercised immediately after reconnection. The browser continuity and
+live-gain criteria were exercised separately while its stream was active.
+
 ## Spatial audio
 
 Disabling and re-enabling spatial audio with DTS Headphone:X v2.0 selected

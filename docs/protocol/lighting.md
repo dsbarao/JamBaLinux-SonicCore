@@ -73,7 +73,7 @@ does not expose a distinct device-side synchronization flag.
 
 ## Linux lighting control
 
-JanBaLinux SonicCore applies a color by writing a complete five-segment Solid
+JamBaLinux SonicCore applies a color by writing a complete five-segment Solid
 profile to both Logo and Ring, followed by global lighting enable. It never
 changes one segment in isolation. The CLI accepts only strict `#RRGGBB` values
 or the six compatibility names blue, cyan, magenta, red, green, and white.
@@ -86,6 +86,6 @@ each of the five segments. Every adjustment reconstructs and writes both
 complete zones, even when the user changes only one segment.
 
 The widget can target both zones, Logo only, or Ring only. Even for an
-independent change, JanBaLinux SonicCore reconstructs and sends both complete zone
+independent change, JamBaLinux SonicCore reconstructs and sends both complete zone
 profiles from its confirmed cache. If the other zone is unknown, it refuses
 the operation and requires a synchronized color first rather than guessing.

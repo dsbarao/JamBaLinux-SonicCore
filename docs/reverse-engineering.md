@@ -21,7 +21,7 @@ The packaged udev rule matches vendor `0ecb`, product `2069`, and USB interface
 seat through systemd-logind rather than making the device world-writable. After
 installation/reload, physically reconnect the dongle so the add event runs the
 complete rule chain. To undo it, remove only
-`/etc/udev/rules.d/70-janbalinux-soniccore.rules`, reload rules, and reconnect.
+`/etc/udev/rules.d/70-jambalinux-soniccore.rules`, reload rules, and reconnect.
 
 ## Phase 1 — controlled vendor observation (later)
 
