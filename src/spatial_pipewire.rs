@@ -20,6 +20,13 @@ use crate::spatial::graph::{SPATIAL_OUTPUT_NODE, SPATIAL_SINK_NODE, TARGET_EQUAL
 
 const CONFIG_NAME: &str = "pipewire-spatial.conf";
 const ROUTE_INTERVAL: Duration = Duration::from_millis(500);
+const GRAPH_READY_ATTEMPTS: usize = 40;
+const GRAPH_READY_INTERVAL: Duration = Duration::from_millis(50);
+
+const SPATIAL_OUTPUT_FL: &str = "jambalinux-soniccore-game-spatial-output:output_FL";
+const SPATIAL_OUTPUT_FR: &str = "jambalinux-soniccore-game-spatial-output:output_FR";
+const EQUALIZER_INPUT_FL: &str = "jambalinux-soniccore-game-equalizer:playback_FL";
+const EQUALIZER_INPUT_FR: &str = "jambalinux-soniccore-game-equalizer:playback_FR";
 
 #[derive(Debug, Clone, PartialEq)]
 struct PulseSink {
@@ -76,6 +83,35 @@ fn pactl_success(args: &[&str]) -> Result<(), String> {
     } else {
         Err(command_failure("pactl", &output))
     }
+}
+
+fn pw_link_success(output_port: &str, input_port: &str) -> Result<(), String> {
+    let output = command_output("pw-link", &["--wait", output_port, input_port])?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure("pw-link", &output))
+    }
+}
+
+fn pw_unlink(output_port: &str, input_port: &str) {
+    let _ = command_output("pw-link", &["--disconnect", output_port, input_port]);
+}
+
+/// Connects the spatial stereo output only to the proven equalizer input.
+///
+/// WirePlumber may ignore `target.object` on a filter-chain output and fall
+/// back to the physical default. The graph disables autoconnect, so these two
+/// explicit links are the only authorized output path. A partial connection is
+/// rolled back before the error is returned.
+fn connect_spatial_output() -> Result<(), String> {
+    ensure_equalizer_target()?;
+    pw_link_success(SPATIAL_OUTPUT_FL, EQUALIZER_INPUT_FL)?;
+    if let Err(error) = pw_link_success(SPATIAL_OUTPUT_FR, EQUALIZER_INPUT_FR) {
+        pw_unlink(SPATIAL_OUTPUT_FL, EQUALIZER_INPUT_FL);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn node_name(node: &Value) -> Option<&str> {
@@ -185,10 +221,14 @@ pub fn restore_streams() -> Result<(), String> {
     // Confirm the target in PipeWire as well as PulseAudio. This prevents a
     // stale PulseAudio name from being used as a routing proof.
     ensure_equalizer_target()?;
-    for input in pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?
+    let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?
         .iter()
         .filter(|input| input.sink == spatial.index)
-    {
+        .cloned()
+        .collect::<Vec<_>>();
+    let input_serials = inputs.iter().map(|input| input.index).collect::<Vec<_>>();
+    crate::pipewire::register_spatial_fallback_streams(&input_serials)?;
+    for input in inputs {
         pactl_success(&["move-sink-input", &input.index.to_string(), &equalizer.name])?;
     }
     Ok(())
@@ -253,6 +293,32 @@ fn spawn_pipewire(config: &Path) -> Result<Child, String> {
         .map_err(|error| format!("could not start the spatial PipeWire graph: {error}"))
 }
 
+fn spawn_connected_pipewire(config: &Path) -> Result<Child, String> {
+    let mut child = spawn_pipewire(config)?;
+    for _ in 0..GRAPH_READY_ATTEMPTS {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not monitor the spatial PipeWire graph: {error}"))?
+        {
+            return Err(format!("spatial PipeWire graph exited with {status}"));
+        }
+        if spatial_graph_exists()? {
+            if let Err(error) = connect_spatial_output() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "could not connect the spatial output to the equalizer: {error}"
+                ));
+            }
+            return Ok(child);
+        }
+        thread::sleep(GRAPH_READY_INTERVAL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err("the spatial PipeWire graph did not become observable in time".into())
+}
+
 fn spatial_graph_exists() -> Result<bool, String> {
     Ok(pw_dump()?.iter().any(|node| {
         matches!(
@@ -287,7 +353,7 @@ pub fn run() -> Result<(), String> {
                         "a spatial graph already exists; refusing to create a second graph".into(),
                     );
                 }
-                child = Some(spawn_pipewire(&write_config(&config)?)?);
+                child = Some(spawn_connected_pipewire(&write_config(&config)?)?);
             }
             (Some(active), Ok(None)) => {
                 stop_graph(active)?;

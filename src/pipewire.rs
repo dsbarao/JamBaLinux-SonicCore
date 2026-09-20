@@ -395,13 +395,19 @@ fn quantum_non_game_node_ids(nodes: &[Value]) -> HashSet<u32> {
         .collect()
 }
 
-fn link_endpoints(link: &Value) -> Option<(u32, u32, bool)> {
+fn link_node_pair(link: &Value) -> Option<(u32, u32)> {
     if link.get("type")?.as_str()? != "PipeWire:Interface:Link" {
         return None;
     }
     let info = link.get("info")?;
     let output = u32::try_from(info.get("output-node-id")?.as_u64()?).ok()?;
     let input = u32::try_from(info.get("input-node-id")?.as_u64()?).ok()?;
+    Some((output, input))
+}
+
+fn link_endpoints(link: &Value) -> Option<(u32, u32, bool)> {
+    let (output, input) = link_node_pair(link)?;
+    let info = link.get("info")?;
     let active = info.get("state").and_then(Value::as_str) == Some("active");
     Some((output, input, active))
 }
@@ -560,14 +566,14 @@ pub fn spatial_status(
                 == Some(2);
 
             if let Some(output_node) = output.as_ref() {
-                let active_links = nodes
+                // Passive filter-chain links are normally `paused` while no
+                // stream is playing. Health describes the graph topology, so
+                // every existing link must count here. This also makes the
+                // safety guard detect an idle link to Chat or capture nodes.
+                let graph_links = nodes.iter().filter_map(link_node_pair).collect::<Vec<_>>();
+                let output_destinations = graph_links
                     .iter()
-                    .filter_map(link_endpoints)
-                    .filter(|(_, _, active)| *active)
-                    .collect::<Vec<_>>();
-                let output_destinations = active_links
-                    .iter()
-                    .filter_map(|(from, to, _)| (*from == output_node.id).then_some(*to))
+                    .filter_map(|(from, to)| (*from == output_node.id).then_some(*to))
                     .collect::<Vec<_>>();
                 let expected_target = target.as_ref().map(|node| node.id);
                 target_equalizer_connected = expected_target.is_some_and(|target_id| {
@@ -588,7 +594,7 @@ pub fn spatial_status(
                 let graph_ids = [input.as_ref().map(|node| node.id), Some(output_node.id)];
                 let mut chat = false;
                 let mut capture = false;
-                for (from, to, _) in active_links {
+                for (from, to) in graph_links {
                     for (graph_id, other_id) in [(from, to), (to, from)] {
                         if graph_ids.contains(&Some(graph_id))
                             && let Some(other) = nodes.iter().find(|node| {
@@ -898,6 +904,74 @@ fn is_equalizer_output(input: &PulseInput) -> bool {
     input.node_name == OUTPUT_NODE || input.media_name == "JamBaLinux Game Equalizer"
 }
 
+fn is_spatial_output(input: &PulseInput) -> bool {
+    input.node_name == SPATIAL_OUTPUT_NODE
+}
+
+fn managed_route_destination(
+    sink_serial: u64,
+    equalizer_serial: u64,
+    spatial_serial: Option<u64>,
+) -> bool {
+    sink_serial == equalizer_serial || spatial_serial == Some(sink_serial)
+}
+
+/// Records streams that the spatial supervisor is about to hand to the
+/// equalizer. Only streams currently attached to the exact spatial sink are
+/// accepted, and their eventual non-EQ fallback is the proven physical Game
+/// endpoint. Registration happens before the move so the equalizer supervisor
+/// cannot quarantine the stream during the handoff.
+pub fn register_spatial_fallback_streams(input_serials: &[u64]) -> Result<(), String> {
+    if input_serials.is_empty() {
+        return Ok(());
+    }
+    let _route_lock = route_lock()?;
+    let sinks_value = pactl_json(&["list", "sinks"])?;
+    let sinks = pulse_sinks(&sinks_value)?;
+    let spatial_matches = sinks
+        .iter()
+        .filter(|sink| sink.name == SPATIAL_SINK_NODE)
+        .collect::<Vec<_>>();
+    let spatial = match spatial_matches.as_slice() {
+        [sink] => *sink,
+        [] => return Err("the spatial sink disappeared before fallback registration".into()),
+        _ => {
+            return Err(
+                "multiple spatial sinks exist; refusing to register fallback streams".into(),
+            );
+        }
+    };
+    let game = pulse_game_sink(&sinks_value)?;
+    let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
+    let mut state = read_state()?.unwrap_or_default();
+
+    for serial in input_serials {
+        let input = inputs
+            .iter()
+            .find(|input| input.object_serial == *serial)
+            .ok_or_else(|| format!("spatial stream {serial} disappeared before fallback"))?;
+        if input.sink_serial != spatial.object_serial {
+            return Err(format!(
+                "stream {serial} is no longer attached to the exact spatial sink; refusing fallback registration"
+            ));
+        }
+        state.unproven_streams.retain(|identity| {
+            identity.object_serial != input.object_serial || identity.stream_key != input.stream_key
+        });
+        if !state.routed_streams.iter().any(|route| {
+            route.object_serial == input.object_serial && route.stream_key == input.stream_key
+        }) {
+            state.routed_streams.push(RoutedStream {
+                object_serial: input.object_serial,
+                stream_key: input.stream_key.clone(),
+                original_sink_name: game.name.clone(),
+                original_sink_serial: game.object_serial,
+            });
+        }
+    }
+    write_state(&state)
+}
+
 fn safe_default_sink<'a>(sinks: &'a [PulseSink], saved: Option<&str>) -> Option<&'a PulseSink> {
     saved
         .and_then(|name| {
@@ -954,12 +1028,20 @@ fn run_route_iteration() -> Result<(), String> {
     }
 
     let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
+    let spatial_sink_serial = sinks
+        .iter()
+        .find(|sink| sink.name == SPATIAL_SINK_NODE)
+        .map(|sink| sink.object_serial);
     let old_len = state.routed_streams.len();
     state.routed_streams.retain(|route| {
         inputs.iter().any(|input| {
             input.object_serial == route.object_serial
                 && input.stream_key == route.stream_key
-                && input.sink_serial == virtual_sink.object_serial
+                && managed_route_destination(
+                    input.sink_serial,
+                    virtual_sink.object_serial,
+                    spatial_sink_serial,
+                )
         })
     });
     changed |= state.routed_streams.len() != old_len;
@@ -979,6 +1061,7 @@ fn run_route_iteration() -> Result<(), String> {
         });
         if input.sink_serial == virtual_sink.object_serial
             && !is_equalizer_output(input)
+            && !is_spatial_output(input)
             && !registered
         {
             if !state.unproven_streams.iter().any(|identity| {
@@ -1239,6 +1322,7 @@ pub fn status(profile: &EqualizerProfile) -> Result<Status, String> {
         pulse_inputs.iter().any(|input| {
             input.sink_serial == target.object_serial
                 && !is_equalizer_output(input)
+                && !is_spatial_output(input)
                 && !registered(input)
         })
     });
@@ -1628,6 +1712,29 @@ mod tests {
         assert!(is_equalizer_output(&input));
     }
 
+    #[test]
+    fn only_the_exact_spatial_output_is_authorized_at_the_equalizer_input() {
+        let mut input = PulseInput {
+            object_serial: 43,
+            sink_serial: 100,
+            stream_key: "key".into(),
+            node_name: SPATIAL_OUTPUT_NODE.into(),
+            media_name: "JamBaLinux Game Spatial".into(),
+        };
+        assert!(is_spatial_output(&input));
+
+        input.node_name = "third-party-spatial-output".into();
+        assert!(!is_spatial_output(&input));
+    }
+
+    #[test]
+    fn managed_routes_survive_only_at_the_equalizer_or_exact_spatial_sink() {
+        assert!(managed_route_destination(100, 100, Some(200)));
+        assert!(managed_route_destination(200, 100, Some(200)));
+        assert!(!managed_route_destination(300, 100, Some(200)));
+        assert!(!managed_route_destination(200, 100, None));
+    }
+
     fn ready_spatial_capability() -> crate::spatial::CapabilityReport {
         crate::spatial::CapabilityReport {
             schema: crate::spatial::SCHEMA,
@@ -1670,6 +1777,21 @@ mod tests {
             routing_healthy: true,
             observation_error: None,
         }
+    }
+
+    #[test]
+    fn paused_passive_link_still_describes_spatial_topology() {
+        let link = serde_json::json!({
+            "type": "PipeWire:Interface:Link",
+            "info": {
+                "output-node-id": 193,
+                "input-node-id": 144,
+                "state": "paused"
+            }
+        });
+
+        assert_eq!(link_node_pair(&link), Some((193, 144)));
+        assert_eq!(link_endpoints(&link), Some((193, 144, false)));
     }
 
     #[test]

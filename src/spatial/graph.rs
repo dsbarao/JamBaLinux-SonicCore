@@ -332,6 +332,8 @@ context.modules = [
             playback.props = {
                 node.name = "{output}"
                 node.passive = true
+                node.autoconnect = false
+                node.dont-fallback = true
                 audio.channels = 2
                 audio.position = [ FL FR ]
                 target.object = "{target}"
@@ -487,6 +489,8 @@ mod tests {
         let config = render();
         assert!(config.contains(&format!("node.name = \"{SPATIAL_OUTPUT_NODE}\"")));
         assert!(config.contains("node.passive = true"));
+        assert!(config.contains("node.autoconnect = false"));
+        assert!(config.contains("node.dont-fallback = true"));
         assert!(config.contains("audio.channels = 2"));
         assert!(config.contains("audio.position = [ FL FR ]"));
         assert!(config.contains("outputs = [ \"mixL:Out\" \"mixR:Out\" ]"));
