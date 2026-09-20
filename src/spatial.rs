@@ -18,6 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+/// Pure PipeWire filter-chain renderer for the spatial sink (Phase 2). Kept as
+/// a child of this module and separate from `crate::pipewire` (the equalizer
+/// backend) so the two never share routing logic.
+pub mod graph;
+
 pub const SCHEMA: u8 = 1;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
