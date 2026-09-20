@@ -240,6 +240,33 @@ healthy. See
 [`docs/protocol/audio-processing.md`](docs/protocol/audio-processing.md) for the
 architecture, acceptance evidence, and measurement boundary.
 
+### Experimental open spatial/binaural foundation (disabled by default)
+
+`soniccore spatial` stores an explicit, disabled-by-default gate for a future
+open spatial/binaural audio feature under
+`$XDG_CONFIG_HOME/jambalinux-soniccore/spatial.json`:
+
+```bash
+soniccore spatial               # show the stored gate and mode
+soniccore spatial preflight     # read-only capability check
+soniccore spatial status --format json
+soniccore spatial enable        # requires a passing preflight; still applies no processing
+soniccore spatial disable
+```
+
+This is currently a foundation only: it validates and persists configuration
+and runs a read-only preflight that reports whether a `pipewire` binary, a
+PipeWire filter-chain module, and a user-provided open HRTF/binaural dataset
+under `spatial/hrtf/` in the configuration directory are present. `enable`
+refuses with an actionable error when any of these is missing. Even when the
+gate is recorded as enabled, this build performs no PipeWire connection,
+routing, default-sink change, or DSP processing; `status` always reports
+`active: false`. The Plasma widget only displays this state and the preflight
+result under an **Espacial** section; it has no control that can turn spatial
+audio on. Only the open, vendor-neutral name `binaural-stereo` is used for the
+one defined mode; vendor names such as DTS or Quantum Spatial are intentionally
+never used.
+
 For real-time state tracking, install and enable the user service:
 
 ```bash
@@ -324,9 +351,11 @@ the processing policy. Its current filters are a Linux approximation, not a
 claim of QuantumENGINE parity. Real PipeWire/headset acceptance on 2026-09-19
 covered browser continuity, measured gain changes, widget/profile/DSP reset,
 Game-only isolation, default-route recovery, reversible routing, and a physical
-dongle reconnect. Software Game/Chat mixing and spatial audio remain future
-work. This work adds no device-side audio functionality and does not change
-USB/HID safety boundaries.
+dongle reconnect. Software Game/Chat mixing remain future work; open
+spatial/binaural audio has only a disabled-by-default configuration, gate, and
+capability preflight so far, with no processing implemented yet. This work
+adds no device-side audio functionality and does not change USB/HID safety
+boundaries.
 
 ## Scope
 

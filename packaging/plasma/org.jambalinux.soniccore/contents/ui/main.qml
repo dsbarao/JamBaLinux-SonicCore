@@ -15,6 +15,7 @@ PlasmoidItem {
     readonly property string command: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore status --format json\""
     readonly property string cachedCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore cached-status --format json\""
     readonly property string equalizerCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore equalizer status --format json\""
+    readonly property string spatialCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial status --format json\""
     readonly property url equipmentImage: Qt.resolvedUrl("../images/jbl-quantum-810.png")
     property int batteryPercent: -1
     property bool charging: false
@@ -57,6 +58,11 @@ PlasmoidItem {
     property string pendingEqualizerAction: ""
     property int pendingEqualizerFrequency: 0
     property real pendingEqualizerGain: 0
+    property bool spatialUpdating: false
+    property bool spatialEnabled: false
+    property string spatialMode: "off"
+    property bool spatialReady: false
+    property string spatialError: ""
     readonly property var equalizerFrequencies: [
         31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
     ]
@@ -101,6 +107,23 @@ PlasmoidItem {
         if (equalizerUpdating) return
         equalizerUpdating = true
         equalizerExecutable.connectSource(equalizerCommand)
+    }
+
+    // Read-only: this only queries the experimental spatial/binaural gate and
+    // capability preflight. It never enables, disables, or configures spatial
+    // audio, and the widget exposes no control that could.
+    function refreshSpatial() {
+        if (spatialUpdating) return
+        spatialUpdating = true
+        spatialExecutable.connectSource(spatialCommand)
+    }
+
+    function spatialStatusText() {
+        if (!root.spatialEnabled)
+            return "Desativado por padrão (experimental)"
+        if (!root.spatialReady)
+            return "Ativado na configuração · capacidade indisponível"
+        return `Ativado na configuração · modo ${root.spatialMode} · sem processamento de áudio`
     }
 
     function setEqualizerBand(frequencyHz, gainDb) {
@@ -617,6 +640,17 @@ PlasmoidItem {
                     if (checked) root.refreshEqualizer()
                 }
             }
+
+            PlasmaComponents.Button {
+                text: "Espacial"
+                icon.name: "audio-speakers-symbolic"
+                checkable: true
+                checked: root.openSection === "spatial"
+                onClicked: {
+                    root.openSection = checked ? "spatial" : ""
+                    if (checked) root.refreshSpatial()
+                }
+            }
         }
 
         Rectangle {
@@ -640,6 +674,7 @@ PlasmoidItem {
                         ? "Controle de som ambiente"
                         : root.openSection === "lighting" ? "Iluminação"
                         : root.openSection === "equalizer" ? "Equalizador de saída"
+                        : root.openSection === "spatial" ? "Áudio espacial / binaural (experimental)"
                         : "Retorno do microfone"
                     font.bold: true
                 }
@@ -652,6 +687,8 @@ PlasmoidItem {
                             ? root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
                             : root.openSection === "equalizer"
                                 ? root.equalizerStatusText()
+                            : root.openSection === "spatial"
+                                ? root.spatialStatusText()
                             : `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
                     opacity: 0.7
                 }
@@ -1093,6 +1130,49 @@ PlasmoidItem {
                     PlasmaComponents.Button { text: "Médio"; checkable: true; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
                     PlasmaComponents.Button { text: "Alto"; checkable: true; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
                 }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: root.openSection === "spatial"
+                    spacing: Kirigami.Units.smallSpacing
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        text: "Recurso experimental e desativado por padrão. Este painel é somente leitura: nenhuma opção aqui liga áudio espacial/binaural."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.7
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        text: root.spatialReady
+                            ? "Capacidade: componentes necessários detectados"
+                            : "Capacidade: indisponível (ver soniccore spatial preflight)"
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: root.spatialReady
+                            ? Kirigami.Theme.positiveTextColor
+                            : Kirigami.Theme.neutralTextColor
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.spatialError.length > 0
+                        text: root.spatialError
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.negativeTextColor
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        text: "Use a CLI `soniccore spatial` para consultar ou alterar a configuração fora deste widget."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.6
+                    }
+                }
             }
         }
 
@@ -1232,6 +1312,42 @@ PlasmoidItem {
                 // Restore the canonical values after a rejected update so a
                 // dragged handle never remains visually detached from DSP.
                 root.refreshEqualizer()
+            }
+        }
+    }
+
+    // Read-only status query for the experimental spatial/binaural gate. This
+    // DataSource only ever runs `soniccore spatial status --format json`; it
+    // has no write/set counterpart and cannot enable anything.
+    Plasma5Support.DataSource {
+        id: spatialExecutable
+        engine: "executable"
+
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            root.spatialUpdating = false
+            const exitCode = Number(data["exit code"] ?? -1)
+            const stdout = String(data.stdout ?? "").trim()
+            const stderr = String(data.stderr ?? "").trim()
+            if (exitCode !== 0) {
+                root.spatialEnabled = false
+                root.spatialMode = "off"
+                root.spatialReady = false
+                root.spatialError = stderr || "Não foi possível consultar o estado espacial"
+                return
+            }
+            try {
+                const result = JSON.parse(stdout)
+                root.spatialEnabled = result.enabled === true
+                root.spatialMode = String(result.mode ?? "off")
+                const capability = result.capability ?? {}
+                root.spatialReady = capability.ready === true
+                root.spatialError = String(capability.error ?? "")
+            } catch (error) {
+                root.spatialEnabled = false
+                root.spatialMode = "off"
+                root.spatialReady = false
+                root.spatialError = `Resposta inválida do estado espacial: ${error}`
             }
         }
     }

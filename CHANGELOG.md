@@ -24,6 +24,12 @@
 - migrate the previous synchronized color state without guessing unknown
   hardware values.
 
+- add a disabled-by-default configuration, explicit gate, and read-only
+  capability preflight for an experimental, open spatial/binaural audio
+  foundation (`soniccore spatial`); it performs no PipeWire connection,
+  routing, default-sink change, or DSP processing, and the widget only
+  displays its state without any control that can activate it.
+
 ## 0.1.1 — 2026-09-17
 
 - reserve enough popup height to display all solid-color controls without

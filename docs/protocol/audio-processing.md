@@ -102,3 +102,19 @@ Selecting Quantum Spatial from DTS, changing room size from large to medium to
 small, and changing head diameter from 25 to 20 to 15 cm also generated no USB
 traffic (EVT-036). Mode selection and personalization geometry are therefore
 host-side DSP parameters as well.
+
+### Open spatial/binaural foundation
+
+JamBaLinux implements only an open, vendor-neutral spatial/binaural feature —
+never the vendor's DTS or Quantum Spatial names or files, which stay
+documented above solely as evidence about vendor software behavior. `src/spatial.rs`
+stores a disabled-by-default gate and mode (`off` or `binaural-stereo`) under
+`$XDG_CONFIG_HOME/jambalinux-soniccore/spatial.json` and exposes a read-only
+capability preflight that checks, without executing or connecting to
+PipeWire, for a `pipewire` binary on `PATH`, a known filter-chain module path
+on disk, and a user-supplied dataset under `spatial/hrtf/` in the
+configuration directory. `soniccore spatial enable` fails with an actionable
+error unless the preflight reports readiness. No PipeWire connection,
+default-sink change, routing, link, or DSP graph is created by any of this;
+`soniccore spatial status` always reports `active: false`. This is a
+foundation for future work, not an implementation of spatial audio.

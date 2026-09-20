@@ -16,6 +16,10 @@ use serde::{Serialize, Serializer};
 mod equalizer;
 mod hid;
 mod pipewire;
+// The spatial foundation is called only by the optional CLI subcommand. Keep
+// it available to the binary while the feature deliberately remains inert.
+#[allow(dead_code)]
+mod spatial;
 mod state;
 
 const USB_ROOT: &str = "/sys/bus/usb/devices";
@@ -1410,7 +1414,10 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|reset]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+    );
+    eprintln!(
+        "spatial is an experimental, disabled-by-default open binaural foundation; it applies no audio processing"
     );
     eprintln!(
         "set permits only confirmed controls and complete lighting profiles from the built-in allowlist"
@@ -1590,6 +1597,149 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
     }
 }
 
+fn print_spatial(profile: &spatial::SpatialProfile, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(profile).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("Experimental spatial/binaural audio (foundation only, no processing applied):");
+        println!("  enabled: {}", profile.enabled);
+        println!("  mode: {}", profile.mode.as_str());
+    }
+    Ok(())
+}
+
+fn print_spatial_preflight(json: bool) -> Result<(), String> {
+    let capability = spatial::preflight()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&capability).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "pipewire binary present: {}",
+            capability.pipewire_binary_present
+        );
+        println!(
+            "filter-chain module present: {}",
+            capability.filter_chain_module_present
+        );
+        println!(
+            "open HRTF/binaural dataset present: {}",
+            capability.hrtf_dataset_present
+        );
+        println!("ready: {}", capability.ready);
+        if let Some(error) = capability.error.as_deref() {
+            println!("Action required: {error}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SpatialStatusOutput {
+    schema: u8,
+    enabled: bool,
+    mode: spatial::SpatialMode,
+    active: bool,
+    experimental: bool,
+    capability: spatial::CapabilityReport,
+}
+
+fn print_spatial_status(json: bool) -> Result<(), String> {
+    let profile = spatial::load()?;
+    let capability = spatial::preflight()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&SpatialStatusOutput {
+                schema: profile.schema,
+                enabled: profile.enabled,
+                mode: profile.mode,
+                active: false,
+                experimental: true,
+                capability,
+            })
+            .map_err(|error| error.to_string())?
+        );
+    } else {
+        print_spatial(&profile, false)?;
+        println!("active: false (experimental foundation; no audio graph changes are applied)");
+        if let Some(error) = capability.error.as_deref() {
+            println!("Action required: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        None => {
+            print_spatial(&spatial::load()?, false)?;
+            Ok(true)
+        }
+        Some("--format") => match args.next().as_deref() {
+            Some("json") if args.next().is_none() => {
+                print_spatial(&spatial::load()?, true)?;
+                Ok(true)
+            }
+            _ => Err("spatial --format requires exactly `json`".into()),
+        },
+        Some("status") => match args.next().as_deref() {
+            None => {
+                print_spatial_status(false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_spatial_status(true)?;
+                Ok(true)
+            }
+            _ => Err("spatial status accepts only --format json".into()),
+        },
+        Some("preflight") => match args.next().as_deref() {
+            None => {
+                print_spatial_preflight(false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_spatial_preflight(true)?;
+                Ok(true)
+            }
+            _ => Err("spatial preflight accepts only --format json".into()),
+        },
+        Some("mode") => {
+            let value = args.next().ok_or("spatial mode requires a value")?;
+            if args.next().is_some() {
+                return Err("spatial mode accepts only one value".into());
+            }
+            let mode = spatial::SpatialMode::parse(&value)?;
+            let profile = spatial::set_mode(mode)?;
+            print_spatial(&profile, false)?;
+            Ok(true)
+        }
+        Some("enable") if args.next().is_none() => {
+            let profile = spatial::set_enabled(true)?;
+            println!(
+                "spatial gate recorded as enabled (mode: {}); this build applies no audio \
+                 processing yet — see docs/protocol/audio-processing.md",
+                profile.mode.as_str()
+            );
+            Ok(true)
+        }
+        Some("enable") => Err("spatial enable accepts no value".into()),
+        Some("disable") if args.next().is_none() => {
+            spatial::set_enabled(false)?;
+            println!("spatial gate disabled");
+            Ok(true)
+        }
+        Some("disable") => Err("spatial disable accepts no value".into()),
+        _ => Err("unknown spatial command".into()),
+    }
+}
+
 fn main() {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "scan".into());
@@ -1604,6 +1754,7 @@ fn main() {
         "probe-status" => probe_status(),
         "set" => parse_set_command(args).and_then(set_control),
         "equalizer" | "eq" => equalizer(args),
+        "spatial" => spatial(args),
         "notify" => notify(args.next().as_deref() == Some("--dry-run")),
         "show" => show(args.next().as_deref() == Some("--dry-run")),
         "export"
