@@ -68,6 +68,39 @@ QuantumENGINE's Q or filter topology, so this is not claimed to be acoustically
 identical to the Windows implementation. Large positive gains can clip; there
 is currently no automatic preamp.
 
+### Captured predefined profiles
+
+The maintainer supplied screenshots from the original software for 17 output
+equalizer profiles under `ExemploEqualizadoresPreDefinidos/`. All screenshots
+use the same ten documented center frequencies and show integer-dB handle
+positions. JamBaLinux transcribes those positions as complete, atomic profiles:
+
+| Profile | 31 | 62 | 125 | 250 | 500 | 1k | 2k | 4k | 8k | 16k |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Flat | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Bass Boost | 6 | 6 | 4 | 2 | 0 | 0 | 0 | 2 | 1 | 0 |
+| Cinematic | 4 | 3 | 2 | 0 | -1 | 1 | 2 | -1 | -2 | -2 |
+| FPS | -5 | -3 | -1 | 0 | -1 | 1 | 4 | 2 | -1 | 0 |
+| MOBA | 3 | 4 | 2 | 1 | -1 | -1 | 1 | 2 | -3 | -3 |
+| RPG | 3 | 3 | 3 | 0 | -2 | -2 | -2 | 1 | 2 | -2 |
+| Apex Legends | -6 | 3 | 2 | -3 | 2 | 1 | 2 | 4 | 1 | -4 |
+| CS2 | -6 | -4 | -3 | -2 | 2 | 3 | 4 | 4 | 3 | 0 |
+| Dota 2 | 4 | 3 | 1 | -4 | -1 | 3 | 4 | 1 | 3 | -4 |
+| Fortnite | -4 | 3 | 2 | -3 | -4 | 3 | 3 | 4 | 2 | -4 |
+| GTA 5 | -1 | 1 | 2 | -3 | 3 | 4 | 3 | 3 | 2 | -2 |
+| LoL | 2 | 3 | 1 | -3 | -4 | 1 | 2 | 4 | 1 | -3 |
+| PUBG | -1 | -2 | -1 | -1 | 2 | 3 | 0 | 5 | 4 | -2 |
+| WoW | 3 | 2 | 2 | -1 | -2 | -1 | 1 | 3 | -2 | -2 |
+| Escape from Tarkov | -4 | 3 | -3 | 6 | 3 | 1 | 3 | 6 | 2 | 1 |
+| LN3 Immersion | 4 | 5 | 4 | 1 | -3 | -2 | 1 | 3 | 1 | -2 |
+| LN3 Thrill | 1 | 0 | -1 | -5 | 2 | 1 | 3 | 4 | 2 | 1 |
+
+Selecting one profile updates all ten bands in one normal live-DSP transaction.
+Any band set that does not exactly match a captured profile is reported as
+custom. These gain values reproduce the visible control points, but acoustic
+parity is not claimed because the original software's Q values and filter
+topology remain unknown.
+
 ## Real-system acceptance (2026-09-19)
 
 The recovery implementation was exercised on the maintainer's JBL Quantum 810

@@ -1414,7 +1414,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <id>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural foundation; it applies no audio processing"
@@ -1440,6 +1440,12 @@ fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<
             };
             println!("  {frequency:>6}: {:+.1}", band.gain_db);
         }
+        println!(
+            "Preset: {}",
+            equalizer::matching_preset(profile)
+                .map(|preset| preset.name)
+                .unwrap_or("Custom")
+        );
     }
     Ok(())
 }
@@ -1448,18 +1454,21 @@ fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<
 struct EqualizerStatusOutput {
     schema: u8,
     bands: Vec<equalizer::Band>,
+    preset: Option<&'static str>,
     pipewire: pipewire::Status,
 }
 
 fn print_equalizer_status(json: bool) -> Result<(), String> {
     let profile = equalizer::load()?;
     let pipewire = pipewire::status(&profile)?;
+    let preset = equalizer::matching_preset(&profile).map(|preset| preset.id);
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&EqualizerStatusOutput {
                 schema: profile.schema,
                 bands: profile.bands,
+                preset,
                 pipewire,
             })
             .map_err(|error| error.to_string())?
@@ -1580,6 +1589,18 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             let _mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load()?;
             let requested = equalizer::updated_profile(&previous, frequency_hz, gain_db)?;
+            commit_equalizer_profile(&previous, &requested)?;
+            print_equalizer(&requested, false)?;
+            Ok(true)
+        }
+        Some("preset") => {
+            let id = args.next().ok_or("equalizer preset requires a preset id")?;
+            if args.next().is_some() {
+                return Err("equalizer preset accepts exactly one preset id".into());
+            }
+            let requested = equalizer::preset_profile(&id)?;
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
             commit_equalizer_profile(&previous, &requested)?;
             print_equalizer(&requested, false)?;
             Ok(true)

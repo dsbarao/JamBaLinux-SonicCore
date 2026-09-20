@@ -17,6 +17,102 @@ pub const BANDS_HZ: [u32; 10] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_0
 pub const MIN_GAIN_DB: f32 = -12.0;
 pub const MAX_GAIN_DB: f32 = 12.0;
 
+/// A complete 10-band profile transcribed from the original software UI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqualizerPreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub gains_db: [f32; 10],
+}
+
+pub const PRESETS: [EqualizerPreset; 17] = [
+    EqualizerPreset {
+        id: "flat",
+        name: "Flat",
+        gains_db: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    },
+    EqualizerPreset {
+        id: "bass-boost",
+        name: "Bass Boost",
+        gains_db: [6.0, 6.0, 4.0, 2.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.0],
+    },
+    EqualizerPreset {
+        id: "cinematic",
+        name: "Cinematic",
+        gains_db: [4.0, 3.0, 2.0, 0.0, -1.0, 1.0, 2.0, -1.0, -2.0, -2.0],
+    },
+    EqualizerPreset {
+        id: "fps",
+        name: "FPS",
+        gains_db: [-5.0, -3.0, -1.0, 0.0, -1.0, 1.0, 4.0, 2.0, -1.0, 0.0],
+    },
+    EqualizerPreset {
+        id: "moba",
+        name: "MOBA",
+        gains_db: [3.0, 4.0, 2.0, 1.0, -1.0, -1.0, 1.0, 2.0, -3.0, -3.0],
+    },
+    EqualizerPreset {
+        id: "rpg",
+        name: "RPG",
+        gains_db: [3.0, 3.0, 3.0, 0.0, -2.0, -2.0, -2.0, 1.0, 2.0, -2.0],
+    },
+    EqualizerPreset {
+        id: "apex-legends",
+        name: "Apex Legends",
+        gains_db: [-6.0, 3.0, 2.0, -3.0, 2.0, 1.0, 2.0, 4.0, 1.0, -4.0],
+    },
+    EqualizerPreset {
+        id: "cs2",
+        name: "CS2",
+        gains_db: [-6.0, -4.0, -3.0, -2.0, 2.0, 3.0, 4.0, 4.0, 3.0, 0.0],
+    },
+    EqualizerPreset {
+        id: "dota-2",
+        name: "Dota 2",
+        gains_db: [4.0, 3.0, 1.0, -4.0, -1.0, 3.0, 4.0, 1.0, 3.0, -4.0],
+    },
+    EqualizerPreset {
+        id: "fortnite",
+        name: "Fortnite",
+        gains_db: [-4.0, 3.0, 2.0, -3.0, -4.0, 3.0, 3.0, 4.0, 2.0, -4.0],
+    },
+    EqualizerPreset {
+        id: "gta-5",
+        name: "GTA 5",
+        gains_db: [-1.0, 1.0, 2.0, -3.0, 3.0, 4.0, 3.0, 3.0, 2.0, -2.0],
+    },
+    EqualizerPreset {
+        id: "lol",
+        name: "LoL",
+        gains_db: [2.0, 3.0, 1.0, -3.0, -4.0, 1.0, 2.0, 4.0, 1.0, -3.0],
+    },
+    EqualizerPreset {
+        id: "pubg",
+        name: "PUBG",
+        gains_db: [-1.0, -2.0, -1.0, -1.0, 2.0, 3.0, 0.0, 5.0, 4.0, -2.0],
+    },
+    EqualizerPreset {
+        id: "wow",
+        name: "WoW",
+        gains_db: [3.0, 2.0, 2.0, -1.0, -2.0, -1.0, 1.0, 3.0, -2.0, -2.0],
+    },
+    EqualizerPreset {
+        id: "escape-from-tarkov",
+        name: "Escape from Tarkov",
+        gains_db: [-4.0, 3.0, -3.0, 6.0, 3.0, 1.0, 3.0, 6.0, 2.0, 1.0],
+    },
+    EqualizerPreset {
+        id: "ln3-immersion",
+        name: "LN3 Immersion",
+        gains_db: [4.0, 5.0, 4.0, 1.0, -3.0, -2.0, 1.0, 3.0, 1.0, -2.0],
+    },
+    EqualizerPreset {
+        id: "ln3-thrill",
+        name: "LN3 Thrill",
+        gains_db: [1.0, 0.0, -1.0, -5.0, 2.0, 1.0, 3.0, 4.0, 2.0, 1.0],
+    },
+];
+
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MUTATION_LOCK_NAME: &str = "equalizer.lock";
 
@@ -205,6 +301,39 @@ pub fn reset_profile() -> EqualizerProfile {
     EqualizerProfile::default()
 }
 
+/// Builds one of the complete profiles transcribed from the reference images.
+pub fn preset_profile(id: &str) -> Result<EqualizerProfile, String> {
+    let preset = PRESETS
+        .iter()
+        .find(|preset| preset.id == id)
+        .ok_or_else(|| format!("unknown equalizer preset `{id}`"))?;
+    Ok(EqualizerProfile {
+        schema: 1,
+        bands: BANDS_HZ
+            .into_iter()
+            .zip(preset.gains_db)
+            .map(|(frequency_hz, gain_db)| Band {
+                frequency_hz,
+                gain_db,
+            })
+            .collect(),
+    })
+}
+
+/// Identifies a profile without persisting a separate, stale preset id.
+pub fn matching_preset(profile: &EqualizerProfile) -> Option<&'static EqualizerPreset> {
+    if profile.schema != 1 || profile.bands.len() != BANDS_HZ.len() {
+        return None;
+    }
+    PRESETS.iter().find(|preset| {
+        profile.bands.iter().zip(BANDS_HZ).zip(preset.gains_db).all(
+            |((band, frequency_hz), gain_db)| {
+                band.frequency_hz == frequency_hz && (band.gain_db - gain_db).abs() < 0.05
+            },
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +427,31 @@ mod tests {
 
         assert_eq!(existing.bands[4].gain_db, 6.0);
         assert!(reset.bands.iter().all(|band| band.gain_db == 0.0));
+    }
+
+    #[test]
+    fn presets_have_documented_shape_and_can_be_identified() {
+        assert_eq!(PRESETS.len(), 17);
+        for preset in PRESETS {
+            let profile = preset_profile(preset.id).expect("build preset profile");
+            assert_eq!(profile.bands.len(), BANDS_HZ.len());
+            assert_eq!(
+                matching_preset(&profile).map(|match_| match_.id),
+                Some(preset.id)
+            );
+        }
+
+        assert_eq!(
+            preset_profile("bass-boost").expect("bass boost").bands[0].gain_db,
+            6.0
+        );
+        assert!(preset_profile("not-a-preset").is_err());
+    }
+
+    #[test]
+    fn a_manual_band_change_is_not_reported_as_a_preset() {
+        let custom = updated_profile(&reset_profile(), 31, 1.0).expect("custom profile");
+        assert!(matching_preset(&custom).is_none());
     }
 
     #[test]

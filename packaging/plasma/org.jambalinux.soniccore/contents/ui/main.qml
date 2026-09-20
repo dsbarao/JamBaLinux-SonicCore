@@ -56,6 +56,7 @@ PlasmoidItem {
     property string equalizerTarget: ""
     property string equalizerError: ""
     property string pendingEqualizerAction: ""
+    property string equalizerPresetId: "custom"
     property int pendingEqualizerFrequency: 0
     property real pendingEqualizerGain: 0
     property bool spatialUpdating: false
@@ -80,6 +81,27 @@ PlasmoidItem {
 
     ListModel {
         id: equalizerBandModel
+    }
+
+    ListModel {
+        id: equalizerPresetModel
+        ListElement { label: "Flat"; presetId: "flat" }
+        ListElement { label: "Bass Boost"; presetId: "bass-boost" }
+        ListElement { label: "Cinematic"; presetId: "cinematic" }
+        ListElement { label: "FPS"; presetId: "fps" }
+        ListElement { label: "MOBA"; presetId: "moba" }
+        ListElement { label: "RPG"; presetId: "rpg" }
+        ListElement { label: "Apex Legends"; presetId: "apex-legends" }
+        ListElement { label: "CS2"; presetId: "cs2" }
+        ListElement { label: "Dota 2"; presetId: "dota-2" }
+        ListElement { label: "Fortnite"; presetId: "fortnite" }
+        ListElement { label: "GTA 5"; presetId: "gta-5" }
+        ListElement { label: "LoL"; presetId: "lol" }
+        ListElement { label: "PUBG"; presetId: "pubg" }
+        ListElement { label: "WoW"; presetId: "wow" }
+        ListElement { label: "Escape from Tarkov"; presetId: "escape-from-tarkov" }
+        ListElement { label: "LN3 Immersion"; presetId: "ln3-immersion" }
+        ListElement { label: "LN3 Thrill"; presetId: "ln3-thrill" }
     }
 
     Plasmoid.icon: "audio-headphones"
@@ -133,8 +155,25 @@ PlasmoidItem {
         pendingEqualizerAction = "set"
         pendingEqualizerFrequency = frequencyHz
         pendingEqualizerGain = normalizedGain
+        equalizerPresetId = "custom"
         const equalizerSetCommand = `/bin/sh -lc "$HOME/.cargo/bin/soniccore equalizer set ${frequencyHz} ${normalizedGain}"`
         equalizerExecutable.connectSource(equalizerSetCommand)
+    }
+
+    function applyEqualizerPreset(presetId) {
+        if (equalizerBusy || equalizerUpdating) return
+        equalizerBusy = true
+        pendingEqualizerAction = "preset"
+        equalizerExecutable.connectSource(
+            `/bin/sh -lc "$HOME/.cargo/bin/soniccore equalizer preset '${presetId}'"`)
+    }
+
+    function equalizerPresetIndex(presetId) {
+        for (let index = 0; index < equalizerPresetModel.count; ++index) {
+            if (equalizerPresetModel.get(index).presetId === presetId)
+                return index
+        }
+        return -1
     }
 
     function resetEqualizer() {
@@ -708,6 +747,19 @@ PlasmoidItem {
                     enabled: !root.equalizerBusy && !root.equalizerUpdating
                     spacing: Kirigami.Units.smallSpacing
 
+                    PlasmaComponents.ComboBox {
+                        id: equalizerPresetSelector
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 14
+                        model: equalizerPresetModel
+                        textRole: "label"
+                        valueRole: "presetId"
+                        currentIndex: root.equalizerPresetIndex(root.equalizerPresetId)
+                        displayText: root.equalizerPresetId === "custom"
+                            ? "Personalizado" : currentText
+                        onActivated: root.applyEqualizerPreset(currentValue)
+                    }
+
                     GridLayout {
                         Layout.fillWidth: true
                         Layout.preferredHeight: Kirigami.Units.gridUnit
@@ -1272,6 +1324,7 @@ PlasmoidItem {
                         ?? profile.applied_bands ?? profile.bands ?? []
                     root.replaceEqualizerBands(appliedBands.length === 10
                         ? appliedBands : profile.bands ?? [])
+                    root.equalizerPresetId = String(profile.preset ?? "custom")
                     root.equalizerPipeWireActive = (pipewire.active ?? profile.active) === true
                     root.equalizerServiceActive = pipewire.service_active
                         ?? profile.service_active ?? null
@@ -1301,6 +1354,8 @@ PlasmoidItem {
                     root.updateEqualizerBands(root.pendingEqualizerFrequency,
                         root.pendingEqualizerGain, false)
                     root.actionMessage = "Equalizador atualizado"
+                } else if (root.pendingEqualizerAction === "preset") {
+                    root.actionMessage = "Perfil de equalização aplicado"
                 }
                 root.pendingEqualizerAction = ""
                 root.equalizerError = ""

@@ -228,7 +228,8 @@ sources, including the microphone, remain outside the chain. The virtual
 equalizer sink is never selected as the default; if it appears as the default,
 the service restores the recorded non-virtual default.
 
-Band changes and **Zerar bandas** issue four `Props` updates to the existing
+Band changes, predefined profile selection, and **Zerar bandas** issue four
+`Props` updates to the existing
 PipeWire filter, separated by three nominal 10 ms intervals. The resulting
 30 ms ramp excludes command and scheduling overhead. Real-system validation on
 2026-09-19 measured the live audio effect and about 100 ms end-to-end command
