@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 pub const BANDS_HZ: [u32; 10] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000];
 pub const MIN_GAIN_DB: f32 = -12.0;
 pub const MAX_GAIN_DB: f32 = 12.0;
+pub const PROFILE_SCHEMA: u8 = 2;
+pub const MAX_CUSTOM_PROFILE_NAME_LENGTH: usize = 64;
 
 /// A complete 10-band profile transcribed from the original software UI.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,16 +124,32 @@ pub struct Band {
     pub gain_db: f32,
 }
 
+/// A user-owned named profile. Factory presets are deliberately not represented
+/// here: they remain the immutable [`PRESETS`] table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomEqualizerProfile {
+    pub id: String,
+    pub name: String,
+    pub bands: Vec<Band>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EqualizerProfile {
     pub schema: u8,
+    /// The bands consumed directly by the PipeWire DSP.
     pub bands: Vec<Band>,
+    /// Factory or custom profile currently selected, or `None` for unsaved
+    /// manual settings.
+    #[serde(default)]
+    pub active_profile_id: Option<String>,
+    #[serde(default)]
+    pub custom_profiles: Vec<CustomEqualizerProfile>,
 }
 
 impl Default for EqualizerProfile {
     fn default() -> Self {
         Self {
-            schema: 1,
+            schema: PROFILE_SCHEMA,
             bands: BANDS_HZ
                 .into_iter()
                 .map(|frequency_hz| Band {
@@ -139,6 +157,8 @@ impl Default for EqualizerProfile {
                     gain_db: 0.0,
                 })
                 .collect(),
+            active_profile_id: Some("flat".into()),
+            custom_profiles: Vec::new(),
         }
     }
 }
@@ -185,16 +205,127 @@ fn normalized_gain(gain_db: f32) -> Result<f32, String> {
     Ok((gain_db * 10.0).round() / 10.0)
 }
 
-fn validate(profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
-    if profile.schema != 1 || profile.bands.len() != BANDS_HZ.len() {
-        return Err("unsupported equalizer profile".into());
+fn validate_bands(bands: &mut [Band]) -> Result<(), String> {
+    if bands.len() != BANDS_HZ.len() {
+        return Err("equalizer profile must contain exactly ten bands".into());
     }
-    let mut normalized = profile;
-    for (band, expected_frequency) in normalized.bands.iter_mut().zip(BANDS_HZ) {
+    for (band, expected_frequency) in bands.iter_mut().zip(BANDS_HZ) {
         if band.frequency_hz != expected_frequency {
             return Err("equalizer profile has unsupported bands".into());
         }
         band.gain_db = normalized_gain(band.gain_db)?;
+    }
+    Ok(())
+}
+
+fn bands_match(left: &[Band], right: &[Band]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.frequency_hz == right.frequency_hz && (left.gain_db - right.gain_db).abs() < 0.05
+        })
+}
+
+fn normalize_name(name: &str) -> Result<String, String> {
+    if name.chars().any(char::is_control) {
+        return Err("custom equalizer profile name cannot contain control characters".into());
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("custom equalizer profile name cannot be empty".into());
+    }
+    if name.chars().count() > MAX_CUSTOM_PROFILE_NAME_LENGTH {
+        return Err(format!(
+            "custom equalizer profile name must be at most {MAX_CUSTOM_PROFILE_NAME_LENGTH} characters"
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn name_key(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Returns whether an identifier belongs to an immutable built-in preset.
+pub fn is_factory_profile_id(id: &str) -> bool {
+    PRESETS.iter().any(|preset| preset.id == id)
+}
+
+fn preset_bands(preset: &EqualizerPreset) -> Vec<Band> {
+    BANDS_HZ
+        .into_iter()
+        .zip(preset.gains_db)
+        .map(|(frequency_hz, gain_db)| Band {
+            frequency_hz,
+            gain_db,
+        })
+        .collect()
+}
+
+fn profile_bands_by_id(profile: &EqualizerProfile, id: &str) -> Option<Vec<Band>> {
+    PRESETS
+        .iter()
+        .find(|preset| preset.id == id)
+        .map(preset_bands)
+        .or_else(|| {
+            profile
+                .custom_profiles
+                .iter()
+                .find(|custom| custom.id == id)
+                .map(|custom| custom.bands.clone())
+        })
+}
+
+fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
+    validate_bands(&mut profile.bands)?;
+    let preset = PRESETS
+        .iter()
+        .find(|preset| bands_match(&profile.bands, &preset_bands(preset)));
+    let migrated = EqualizerProfile {
+        schema: PROFILE_SCHEMA,
+        bands: profile.bands,
+        active_profile_id: preset.map(|preset| preset.id.to_owned()),
+        custom_profiles: Vec::new(),
+    };
+    if preset.is_some() {
+        Ok(migrated)
+    } else {
+        // The generated identifier is persisted with the migrated profile,
+        // making it stable while avoiding a collision with a user-created ID.
+        create_custom_profile(&migrated, "Personalizado")
+    }
+}
+
+fn validate(profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
+    if profile.schema == 1 {
+        return migrate_schema_one(profile);
+    }
+    if profile.schema != PROFILE_SCHEMA {
+        return Err("unsupported equalizer profile schema".into());
+    }
+
+    let mut normalized = profile;
+    validate_bands(&mut normalized.bands)?;
+    let mut names = std::collections::HashSet::new();
+    let mut ids = std::collections::HashSet::new();
+    for custom in &mut normalized.custom_profiles {
+        if custom.id.is_empty()
+            || is_factory_profile_id(&custom.id)
+            || !ids.insert(custom.id.clone())
+        {
+            return Err("custom equalizer profile has an invalid or duplicate id".into());
+        }
+        custom.name = normalize_name(&custom.name)?;
+        if !names.insert(name_key(&custom.name)) {
+            return Err("custom equalizer profile names must be unique".into());
+        }
+        validate_bands(&mut custom.bands)?;
+    }
+    if let Some(id) = normalized.active_profile_id.as_deref() {
+        let expected = profile_bands_by_id(&normalized, id)
+            .ok_or("active equalizer profile id does not exist")?;
+        if !bands_match(&normalized.bands, &expected) {
+            return Err("active equalizer profile bands do not match the selected profile".into());
+        }
     }
     Ok(normalized)
 }
@@ -286,13 +417,33 @@ pub fn updated_profile(
     gain_db: f32,
 ) -> Result<EqualizerProfile, String> {
     let gain_db = normalized_gain(gain_db)?;
-    let mut profile = validate(profile.clone())?;
+    let mut candidate = profile.clone();
+    if candidate
+        .active_profile_id
+        .as_deref()
+        .and_then(|id| profile_bands_by_id(&candidate, id))
+        .is_some_and(|expected| !bands_match(&candidate.bands, &expected))
+    {
+        candidate.active_profile_id = None;
+    }
+    let mut profile = validate(candidate)?;
+    let stored_profile = profile.clone();
     let band = profile
         .bands
         .iter_mut()
         .find(|band| band.frequency_hz == frequency_hz)
         .ok_or("unsupported equalizer frequency")?;
     band.gain_db = gain_db;
+    if let Some(id) = profile.active_profile_id.clone()
+        && profile.custom_profiles.iter().any(|custom| custom.id == id)
+    {
+        let bands = profile.bands.clone();
+        return update_custom_profile(&stored_profile, &id, bands);
+    }
+
+    // A changed factory preset becomes unsaved manual settings rather than
+    // changing the immutable preset definition.
+    profile.active_profile_id = None;
     Ok(profile)
 }
 
@@ -303,26 +454,12 @@ pub fn reset_profile() -> EqualizerProfile {
 
 /// Builds one of the complete profiles transcribed from the reference images.
 pub fn preset_profile(id: &str) -> Result<EqualizerProfile, String> {
-    let preset = PRESETS
-        .iter()
-        .find(|preset| preset.id == id)
-        .ok_or_else(|| format!("unknown equalizer preset `{id}`"))?;
-    Ok(EqualizerProfile {
-        schema: 1,
-        bands: BANDS_HZ
-            .into_iter()
-            .zip(preset.gains_db)
-            .map(|(frequency_hz, gain_db)| Band {
-                frequency_hz,
-                gain_db,
-            })
-            .collect(),
-    })
+    select_profile(&EqualizerProfile::default(), id)
 }
 
 /// Identifies a profile without persisting a separate, stale preset id.
 pub fn matching_preset(profile: &EqualizerProfile) -> Option<&'static EqualizerPreset> {
-    if profile.schema != 1 || profile.bands.len() != BANDS_HZ.len() {
+    if profile.bands.len() != BANDS_HZ.len() {
         return None;
     }
     PRESETS.iter().find(|preset| {
@@ -332,6 +469,127 @@ pub fn matching_preset(profile: &EqualizerProfile) -> Option<&'static EqualizerP
             },
         )
     })
+}
+
+fn generated_custom_id(profile: &EqualizerProfile) -> String {
+    loop {
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let id = format!("custom-{}-{sequence}", std::process::id());
+        if !profile
+            .custom_profiles
+            .iter()
+            .any(|custom| custom.id == id || name_key(&custom.name) == name_key(&id))
+        {
+            return id;
+        }
+    }
+}
+
+fn custom_profile_index(profile: &EqualizerProfile, id: &str) -> Result<usize, String> {
+    if is_factory_profile_id(id) {
+        return Err("factory equalizer presets are immutable".into());
+    }
+    profile
+        .custom_profiles
+        .iter()
+        .position(|custom| custom.id == id)
+        .ok_or_else(|| format!("unknown custom equalizer profile `{id}`"))
+}
+
+/// Adds a named custom profile from the currently active DSP bands and selects it.
+pub fn create_custom_profile(
+    profile: &EqualizerProfile,
+    name: &str,
+) -> Result<EqualizerProfile, String> {
+    let mut profile = validate(profile.clone())?;
+    let id = generated_custom_id(&profile);
+    profile.custom_profiles.push(CustomEqualizerProfile {
+        id: id.clone(),
+        // Set a temporary unique, valid name so the shared rename path can
+        // perform all final name normalization and duplicate checks.
+        name: id.clone(),
+        bands: profile.bands.clone(),
+    });
+    let mut profile = rename_custom_profile(&profile, &id, name)?;
+    profile.active_profile_id = Some(id);
+    Ok(profile)
+}
+
+/// Selects an immutable factory preset or a user-owned custom profile.
+pub fn select_profile(profile: &EqualizerProfile, id: &str) -> Result<EqualizerProfile, String> {
+    let mut profile = validate(profile.clone())?;
+    let bands = profile_bands_by_id(&profile, id)
+        .ok_or_else(|| format!("unknown equalizer profile `{id}`"))?;
+    profile.bands = bands;
+    profile.active_profile_id = Some(id.to_owned());
+    Ok(profile)
+}
+
+/// Replaces a custom profile's complete ten-band definition. Factory presets
+/// cannot be updated through this API.
+pub fn update_custom_profile(
+    profile: &EqualizerProfile,
+    id: &str,
+    bands: Vec<Band>,
+) -> Result<EqualizerProfile, String> {
+    let profile = validate(profile.clone())?;
+    let index = custom_profile_index(&profile, id)?;
+    let mut bands = bands;
+    validate_bands(&mut bands)?;
+    let name = profile.custom_profiles[index].name.clone();
+    let was_active = profile.active_profile_id.as_deref() == Some(id);
+
+    // Reuse the deletion path so all mutations share factory-ID rejection and
+    // active-selection cleanup before replacing the immutable ID in place.
+    let mut profile = delete_custom_profile(&profile, id)?;
+    profile.custom_profiles.insert(
+        index,
+        CustomEqualizerProfile {
+            id: id.to_owned(),
+            name,
+            bands: bands.clone(),
+        },
+    );
+    if was_active {
+        profile.active_profile_id = Some(id.to_owned());
+        profile.bands = bands;
+    }
+    Ok(profile)
+}
+
+/// Renames a custom profile. Name comparisons are case-insensitive.
+pub fn rename_custom_profile(
+    profile: &EqualizerProfile,
+    id: &str,
+    name: &str,
+) -> Result<EqualizerProfile, String> {
+    let mut profile = validate(profile.clone())?;
+    let index = custom_profile_index(&profile, id)?;
+    let name = normalize_name(name)?;
+    if profile
+        .custom_profiles
+        .iter()
+        .enumerate()
+        .any(|(other, custom)| other != index && name_key(&custom.name) == name_key(&name))
+    {
+        return Err("a custom equalizer profile with that name already exists".into());
+    }
+    profile.custom_profiles[index].name = name;
+    Ok(profile)
+}
+
+/// Deletes a user-owned custom profile. Factory preset IDs are rejected.
+pub fn delete_custom_profile(
+    profile: &EqualizerProfile,
+    id: &str,
+) -> Result<EqualizerProfile, String> {
+    let mut profile = validate(profile.clone())?;
+    let index = custom_profile_index(&profile, id)?;
+    profile.custom_profiles.remove(index);
+    if profile.active_profile_id.as_deref() == Some(id) {
+        profile.active_profile_id = None;
+    }
+    Ok(profile)
 }
 
 #[cfg(test)]
@@ -390,7 +648,7 @@ mod tests {
     #[test]
     fn validation_rejects_unknown_schema_shape_and_band_order() {
         let profile = EqualizerProfile {
-            schema: 2,
+            schema: PROFILE_SCHEMA + 1,
             ..EqualizerProfile::default()
         };
         assert!(validate(profile).is_err());
@@ -452,6 +710,105 @@ mod tests {
     fn a_manual_band_change_is_not_reported_as_a_preset() {
         let custom = updated_profile(&reset_profile(), 31, 1.0).expect("custom profile");
         assert!(matching_preset(&custom).is_none());
+        assert_eq!(custom.active_profile_id, None);
+    }
+
+    #[test]
+    fn schema_one_custom_profile_migrates_without_losing_its_gains() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.profile_path();
+        let legacy = r#"{
+  "schema": 1,
+  "bands": [
+    {"frequency_hz":31,"gain_db":3.0}, {"frequency_hz":62,"gain_db":0.0},
+    {"frequency_hz":125,"gain_db":0.0}, {"frequency_hz":250,"gain_db":0.0},
+    {"frequency_hz":500,"gain_db":-2.0}, {"frequency_hz":1000,"gain_db":0.0},
+    {"frequency_hz":2000,"gain_db":0.0}, {"frequency_hz":4000,"gain_db":0.0},
+    {"frequency_hz":8000,"gain_db":0.0}, {"frequency_hz":16000,"gain_db":1.0}
+  ]
+}"#;
+        fs::write(&path, legacy).expect("write legacy profile");
+
+        let migrated = load_from_path(&path).expect("migrate legacy profile");
+        assert_eq!(migrated.schema, PROFILE_SCHEMA);
+        assert_eq!(
+            migrated.active_profile_id.as_deref(),
+            Some(migrated.custom_profiles[0].id.as_str())
+        );
+        assert_eq!(migrated.custom_profiles.len(), 1);
+        assert_eq!(migrated.custom_profiles[0].name, "Personalizado");
+        assert_eq!(migrated.custom_profiles[0].bands, migrated.bands);
+        assert_eq!(migrated.bands[0].gain_db, 3.0);
+        assert_eq!(migrated.bands[4].gain_db, -2.0);
+
+        save_to_path(&migrated, &path).expect("persist migrated profile");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read persisted migration"))
+                .expect("parse persisted migration");
+        assert_eq!(persisted["schema"], PROFILE_SCHEMA);
+    }
+
+    #[test]
+    fn schema_one_factory_preset_migrates_to_its_factory_id() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.profile_path();
+        let legacy = r#"{
+  "schema": 1,
+  "bands": [
+    {"frequency_hz":31,"gain_db":6.0}, {"frequency_hz":62,"gain_db":6.0},
+    {"frequency_hz":125,"gain_db":4.0}, {"frequency_hz":250,"gain_db":2.0},
+    {"frequency_hz":500,"gain_db":0.0}, {"frequency_hz":1000,"gain_db":0.0},
+    {"frequency_hz":2000,"gain_db":0.0}, {"frequency_hz":4000,"gain_db":2.0},
+    {"frequency_hz":8000,"gain_db":1.0}, {"frequency_hz":16000,"gain_db":0.0}
+  ]
+}"#;
+        fs::write(&path, legacy).expect("write legacy preset");
+
+        let migrated = load_from_path(&path).expect("migrate factory preset");
+        assert_eq!(migrated.active_profile_id.as_deref(), Some("bass-boost"));
+        assert!(migrated.custom_profiles.is_empty());
+        assert_eq!(migrated.bands, preset_bands(&PRESETS[1]));
+    }
+
+    #[test]
+    fn custom_names_are_normalized_unique_and_safe() {
+        let profile = create_custom_profile(&reset_profile(), "  Meu Perfil  ")
+            .expect("create named profile");
+        assert_eq!(profile.custom_profiles[0].name, "Meu Perfil");
+        assert!(create_custom_profile(&profile, "meu perfil").is_err());
+        assert!(create_custom_profile(&profile, "\nunsafe").is_err());
+        assert!(create_custom_profile(&profile, "   ").is_err());
+        assert!(
+            create_custom_profile(&profile, &"a".repeat(MAX_CUSTOM_PROFILE_NAME_LENGTH + 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn custom_profile_crud_preserves_factory_immutability() {
+        let created = create_custom_profile(&reset_profile(), "Jogos").expect("create profile");
+        let id = created.custom_profiles[0].id.clone();
+        let edited_bands = updated_profile(&created, 500, 4.0)
+            .expect("edit active bands")
+            .bands;
+        let updated = update_custom_profile(&created, &id, edited_bands).expect("update custom");
+        let selected = select_profile(&updated, &id).expect("select custom");
+        assert_eq!(selected.active_profile_id.as_deref(), Some(id.as_str()));
+        assert_eq!(selected.bands[4].gain_db, 4.0);
+
+        let renamed = rename_custom_profile(&selected, &id, "Competitivo").expect("rename custom");
+        assert_eq!(renamed.custom_profiles[0].name, "Competitivo");
+        let deleted = delete_custom_profile(&renamed, &id).expect("delete custom");
+        assert!(deleted.custom_profiles.is_empty());
+        assert_eq!(deleted.active_profile_id, None);
+
+        for operation in [
+            update_custom_profile(&created, "flat", created.bands.clone()),
+            rename_custom_profile(&created, "flat", "Nope"),
+            delete_custom_profile(&created, "flat"),
+        ] {
+            assert!(operation.is_err());
+        }
     }
 
     #[test]
@@ -468,6 +825,7 @@ mod tests {
         let mut old_file = fs::File::open(&path).expect("open original profile");
         let mut changed = original.clone();
         changed.bands[4].gain_db = 3.17;
+        changed.active_profile_id = None;
         save_to_path(&changed, &path).expect("atomically replace profile");
 
         let loaded = load_from_path(&path).expect("load replacement profile");
@@ -502,6 +860,18 @@ mod tests {
 
         assert_eq!(
             fs::read(&path).expect("read preserved profile"),
+            original_content
+        );
+
+        let mut invalid_custom = EqualizerProfile::default();
+        invalid_custom.custom_profiles.push(CustomEqualizerProfile {
+            id: "custom-invalid".into(),
+            name: "\u{7}bad".into(),
+            bands: reset_profile().bands,
+        });
+        assert!(save_to_path(&invalid_custom, &path).is_err());
+        assert_eq!(
+            fs::read(&path).expect("read preserved profile after invalid custom"),
             original_content
         );
     }
