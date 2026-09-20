@@ -66,6 +66,9 @@ Entregáveis mínimos:
 - enable/disable reversível, sem alterar o default;
 - integração `spatial -> equalizer -> Quantum Game`;
 - widget com controle apenas depois do backend comprovado;
+- não remover mensagens da interface nem implementar perfis personalizados do
+  equalizador durante as fases 1–7; esses itens estão engatilhados no plano
+  para uma rodada separada após a validação do áudio espacial;
 - testes de canais, escaping, falhas, isolamento, rollback e reconnect;
 - documentação das limitações e roteiro de aceitação real.
 

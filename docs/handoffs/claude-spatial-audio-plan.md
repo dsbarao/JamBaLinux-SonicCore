@@ -206,6 +206,23 @@ Realizar somente depois dos testes e com autorização do mantenedor:
 - processamento de Chat ou microfone;
 - perfis 5.1, 7.1.4, Atmos ou SOFA antes de o MVP 7.1 estar medido.
 
+## Trabalho engatilhado após as fases de áudio espacial
+
+Não implementar os itens abaixo durante as fases 1–7. Eles formam uma rodada
+separada de acabamento da interface e evolução do equalizador, iniciada apenas
+depois da conclusão e validação do áudio espacial:
+
+1. Remover da interface as duas mensagens informativas redundantes:
+   - `Automático · ativo na rota Game: <nome-da-rota>`;
+   - `A rota Game é processada automaticamente; Chat, microfone e a saída padrão permanecem fora da cadeia.`
+2. Permitir que uma configuração manual do equalizador seja salva como perfil
+   personalizado com nome escolhido pelo usuário.
+3. Permitir renomear/editar e excluir perfis personalizados, preservando os
+   perfis predefinidos do aplicativo.
+4. Antes de implementar, definir persistência, validação de nomes, tratamento
+   de duplicatas, confirmação de exclusão e migração compatível do formato já
+   salvo.
+
 ## Proibições de segurança
 
 - Não alterar VID/PID, matching USB/HID, allowlists ou protocolo do headset.
