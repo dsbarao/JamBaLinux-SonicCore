@@ -136,18 +136,34 @@ small, and changing head diameter from 25 to 20 to 15 cm also generated no USB
 traffic (EVT-036). Mode selection and personalization geometry are therefore
 host-side DSP parameters as well.
 
-### Open spatial/binaural foundation
+### Open spatial/binaural processing
 
-JamBaLinux implements only an open, vendor-neutral spatial/binaural feature —
-never the vendor's DTS or Quantum Spatial names or files, which stay
-documented above solely as evidence about vendor software behavior. `src/spatial.rs`
-stores a disabled-by-default gate and mode (`off` or `binaural-stereo`) under
-`$XDG_CONFIG_HOME/jambalinux-soniccore/spatial.json` and exposes a read-only
-capability preflight that checks, without executing or connecting to
-PipeWire, for a `pipewire` binary on `PATH`, a known filter-chain module path
-on disk, and a user-supplied dataset under `spatial/hrtf/` in the
-configuration directory. `soniccore spatial enable` fails with an actionable
-error unless the preflight reports readiness. No PipeWire connection,
-default-sink change, routing, link, or DSP graph is created by any of this;
-`soniccore spatial status` always reports `active: false`. This is a
-foundation for future work, not an implementation of spatial audio.
+JamBaLinux implements an experimental open, vendor-neutral spatial/binaural
+processor — never the vendor's DTS or Quantum Spatial names or files, which
+stay documented above solely as evidence about vendor software behavior.
+`src/spatial.rs` stores a disabled-by-default gate and mode (`off` or
+`binaural-stereo`) under
+`$XDG_CONFIG_HOME/jambalinux-soniccore/spatial.json`. Its read-only capability
+preflight validates the PipeWire executable and filter-chain module plus a
+user-supplied 14-channel HRIR dataset under `spatial/hrtf/` in the
+configuration directory. Technical validation does not grant legal clearance
+for a third-party HRIR dataset.
+
+When explicitly enabled, the persistent spatial supervisor creates one 7.1
+virtual sink and convolves its eight inputs through sixteen HRIR paths into a
+stereo output. That output disables session-manager autoconnection and is
+linked explicitly, channel by channel, only to the existing equalizer input;
+the complete authorized path is `application -> Spatial -> EQ -> Quantum
+Game`. The spatial sink cannot become the default, and health fails closed if
+the target, stereo links, Chat isolation, capture isolation, formats, or
+dataset cannot be proven. Before removing a live graph, the supervisor
+registers and transfers its streams to the exact EQ sink so playback can
+continue without bypassing the equalizer.
+
+The hardware acceptance on 2026-09-20 used a locally generated synthetic HRIR
+fixture. It correlated all eight input channels digitally, measured the EQ
+inside the chain, ran for 605 seconds with PipeWire `ERR=0`, exercised live
+fallback, and recovered automatically after physical dongle reconnection.
+Full measurements and the remaining legal boundary for a distributable HRIR
+are recorded in
+[`validation_reports/spatial-hardware-validation.md`](validation_reports/spatial-hardware-validation.md).

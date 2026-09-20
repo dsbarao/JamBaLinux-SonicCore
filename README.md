@@ -241,32 +241,32 @@ healthy. See
 [`docs/protocol/audio-processing.md`](docs/protocol/audio-processing.md) for the
 architecture, acceptance evidence, and measurement boundary.
 
-### Experimental open spatial/binaural foundation (disabled by default)
+### Experimental open spatial/binaural processing (disabled by default)
 
-`soniccore spatial` stores an explicit, disabled-by-default gate for a future
-open spatial/binaural audio feature under
+`soniccore spatial` controls an explicit, disabled-by-default open
+spatial/binaural audio processor. Its profile is stored under
 `$XDG_CONFIG_HOME/jambalinux-soniccore/spatial.json`:
 
 ```bash
 soniccore spatial               # show the stored gate and mode
 soniccore spatial preflight     # read-only capability check
 soniccore spatial status --format json
-soniccore spatial enable        # requires a passing preflight; still applies no processing
+soniccore spatial enable        # requires a passing preflight and proven EQ target
 soniccore spatial disable
 ```
 
-This is currently a foundation only: it validates and persists configuration
-and runs a read-only preflight that reports whether a `pipewire` binary, a
-PipeWire filter-chain module, and a user-provided open HRTF/binaural dataset
-under `spatial/hrtf/` in the configuration directory are present. `enable`
-refuses with an actionable error when any of these is missing. Even when the
-gate is recorded as enabled, this build performs no PipeWire connection,
-routing, default-sink change, or DSP processing; `status` always reports
-`active: false`. The Plasma widget only displays this state and the preflight
-result under an **Espacial** section; it has no control that can turn spatial
-audio on. Only the open, vendor-neutral name `binaural-stereo` is used for the
-one defined mode; vendor names such as DTS or Quantum Spatial are intentionally
-never used.
+The read-only preflight validates the `pipewire` binary, filter-chain module,
+and a user-provided 14-channel HRIR dataset (`manifest.json` plus `hrir.wav`)
+under `spatial/hrtf/` in the configuration directory. `enable` refuses with an
+actionable error when readiness or the existing equalizer target cannot be
+proven. When enabled, a supervised 7.1 input is convolved to stereo and linked
+only through the existing chain `Spatial -> EQ -> Quantum Game`; it never
+becomes the default sink, and Chat and capture nodes remain excluded. Disabling
+moves live spatial streams to the proven EQ before removing the graph. The
+Plasma **Espacial** section exposes the same gate and health state. Only the
+open, vendor-neutral mode name `binaural-stereo` is used; vendor names or files
+are intentionally never used. Technical hardware acceptance is recorded in
+[`docs/protocol/validation_reports/spatial-hardware-validation.md`](docs/protocol/validation_reports/spatial-hardware-validation.md).
 
 For real-time state tracking, install and enable the user service:
 
@@ -352,11 +352,12 @@ the processing policy. Its current filters are a Linux approximation, not a
 claim of QuantumENGINE parity. Real PipeWire/headset acceptance on 2026-09-19
 covered browser continuity, measured gain changes, widget/profile/DSP reset,
 Game-only isolation, default-route recovery, reversible routing, and a physical
-dongle reconnect. Software Game/Chat mixing remain future work; open
-spatial/binaural audio has only a disabled-by-default configuration, gate, and
-capability preflight so far, with no processing implemented yet. This work
-adds no device-side audio functionality and does not change USB/HID safety
-boundaries.
+dongle reconnect. Software Game/Chat mixing remain future work. Experimental
+open spatial/binaural processing is implemented as a disabled-by-default,
+host-side 7.1-to-stereo PipeWire chain feeding the existing EQ; its synthetic
+HRIR hardware validation covered per-channel correlation, EQ effect, ten-minute
+stability, safe fallback, and physical dongle reconnection. This work adds no
+device-side audio functionality and does not change USB/HID safety boundaries.
 
 ## Scope
 

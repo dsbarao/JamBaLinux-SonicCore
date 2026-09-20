@@ -1415,7 +1415,7 @@ fn usage() {
         "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <id>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
-        "spatial is an experimental, disabled-by-default open binaural foundation; it applies no audio processing"
+        "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
     );
     eprintln!(
         "set permits only confirmed controls and complete lighting profiles from the built-in allowlist"
