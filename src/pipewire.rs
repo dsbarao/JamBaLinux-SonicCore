@@ -1627,4 +1627,90 @@ mod tests {
         };
         assert!(is_equalizer_output(&input));
     }
+
+    fn ready_spatial_capability() -> crate::spatial::CapabilityReport {
+        crate::spatial::CapabilityReport {
+            schema: crate::spatial::SCHEMA,
+            pipewire_binary_present: true,
+            filter_chain_module_present: true,
+            hrtf_dataset_present: true,
+            dataset: crate::spatial::DatasetReport {
+                schema: crate::spatial::DATASET_SCHEMA,
+                manifest_path: Some("/dataset/manifest.json".into()),
+                hrir_path: Some("/dataset/hrir.wav".into()),
+                format: Some(crate::spatial::SUPPORTED_DATASET_FORMAT.into()),
+                name: Some("Open test HRIR".into()),
+                license: Some("test-only".into()),
+                source_url: Some("https://example.invalid/hrir".into()),
+                expected_sha256: Some("0".repeat(64)),
+                observed_sha256: Some("0".repeat(64)),
+                channels: Some(crate::spatial::REQUIRED_HRIR_CHANNELS),
+                sample_rate: Some(48_000),
+                legal_review_required: true,
+                valid: true,
+                error: None,
+            },
+            ready: true,
+            error: None,
+        }
+    }
+
+    fn otherwise_healthy_spatial_graph() -> SpatialHealth<'static> {
+        SpatialHealth {
+            service_active: true,
+            configured: true,
+            enabled: true,
+            graph_observable: true,
+            input_format_7_1: true,
+            output_format_stereo: true,
+            target_equalizer_connected: true,
+            default_safe: true,
+            chat_isolated: true,
+            capture_isolated: true,
+            routing_healthy: true,
+            observation_error: None,
+        }
+    }
+
+    #[test]
+    fn spatial_health_rejects_links_to_chat_or_capture_nodes() {
+        let capability = ready_spatial_capability();
+
+        let mut chat_link = otherwise_healthy_spatial_graph();
+        chat_link.chat_isolated = false;
+        assert_eq!(
+            spatial_error(&chat_link, &capability).as_deref(),
+            Some("unsafe spatial route detected to Chat or a capture node")
+        );
+
+        let mut capture_link = otherwise_healthy_spatial_graph();
+        capture_link.capture_isolated = false;
+        assert_eq!(
+            spatial_error(&capture_link, &capability).as_deref(),
+            Some("unsafe spatial route detected to Chat or a capture node")
+        );
+    }
+
+    #[test]
+    fn spatial_route_guard_classifies_chat_and_capture_nodes() {
+        let chat = node(
+            200,
+            2_000,
+            serde_json::json!({
+                "media.class": "Audio/Sink",
+                "node.name": "alsa_output.usb_quantum.chat"
+            }),
+        );
+        assert_eq!(node_is_chat_or_capture(&chat), (true, false));
+
+        let microphone = node(
+            201,
+            2_001,
+            serde_json::json!({
+                "media.class": "Audio/Source",
+                "node.name": "alsa_input.usb_quantum.microphone"
+            }),
+        );
+        assert_eq!(node_is_chat_or_capture(&microphone), (false, true));
+    }
 }

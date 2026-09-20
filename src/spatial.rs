@@ -1689,6 +1689,29 @@ mod tests {
         assert!(report.error.as_deref().unwrap().contains("symbolic link"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn manifest_path_that_escapes_the_dataset_directory_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        let digest = sha256_hex(&wav);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+
+        // The manifest is deliberately outside the dataset directory.  A
+        // symlink must not turn the fixed manifest name into an escape hatch.
+        let outside_manifest = directory.0.join("outside-manifest.json");
+        fs::write(&outside_manifest, manifest_json(&digest)).expect("write outside manifest");
+        symlink(&outside_manifest, directory.0.join(MANIFEST_FILE_NAME))
+            .expect("create manifest symlink");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("symbolic link"));
+        assert!(report.manifest_path.is_none());
+    }
+
     #[test]
     fn ieee_float_format_tag_is_accepted() {
         // Hand-build a 14-channel IEEE-float (tag 3) WAV and confirm the
