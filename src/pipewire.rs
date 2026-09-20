@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::equalizer::{BANDS_HZ, Band, EqualizerProfile};
+use crate::spatial::graph::{SPATIAL_OUTPUT_NODE, SPATIAL_SINK_NODE, TARGET_EQUALIZER_SINK};
 
 const UNIT_NAME: &str = "jambalinux-soniccore-equalizer.service";
+const SPATIAL_UNIT_NAME: &str = "jambalinux-soniccore-spatial.service";
 const CONFIG_NAME: &str = "pipewire-game-equalizer.conf";
 const STATE_NAME: &str = "pipewire-game-equalizer.json";
 const LOCK_NAME: &str = "pipewire-game-equalizer.lock";
@@ -116,6 +118,52 @@ pub struct Status {
     pub error: Option<String>,
 }
 
+/// Read-only health report for the optional spatial graph. Every false field
+/// is intentional: absence, ambiguity, an unreadable graph, or an unsafe
+/// route must never be promoted to an active renderer.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpatialStatus {
+    pub configured: bool,
+    pub enabled: bool,
+    pub active: bool,
+    pub service_active: bool,
+    pub dataset_valid: bool,
+    pub target_equalizer_connected: bool,
+    pub default_safe: bool,
+    pub chat_isolated: bool,
+    pub capture_isolated: bool,
+    pub routing_healthy: bool,
+    pub graph_observable: bool,
+    pub input_format_7_1: bool,
+    pub output_format_stereo: bool,
+    pub input_node_id: Option<u32>,
+    pub input_object_serial: Option<u64>,
+    pub output_node_id: Option<u32>,
+    pub output_object_serial: Option<u64>,
+    pub target_equalizer_node_id: Option<u32>,
+    pub target_equalizer_object_serial: Option<u64>,
+    pub target_equalizer_node_name: &'static str,
+    pub error: Option<String>,
+}
+
+/// Inputs that collectively determine whether the spatial graph is safe to
+/// advertise as active. Keeping these observations together makes it harder
+/// to accidentally omit a safety gate when the health policy evolves.
+struct SpatialHealth<'a> {
+    service_active: bool,
+    configured: bool,
+    enabled: bool,
+    graph_observable: bool,
+    input_format_7_1: bool,
+    output_format_stereo: bool,
+    target_equalizer_connected: bool,
+    default_safe: bool,
+    chat_isolated: bool,
+    capture_isolated: bool,
+    routing_healthy: bool,
+    observation_error: Option<&'a str>,
+}
+
 fn path(name: &str) -> Result<PathBuf, String> {
     Ok(crate::equalizer::config_directory()?.join(name))
 }
@@ -168,8 +216,8 @@ fn systemctl(args: &[&str]) -> Result<Output, String> {
     command_output("systemctl", &all_args)
 }
 
-fn service_active() -> Result<bool, String> {
-    let output = systemctl(&["is-active", "--quiet", UNIT_NAME])?;
+fn named_service_active(unit: &str) -> Result<bool, String> {
+    let output = systemctl(&["is-active", "--quiet", unit])?;
     if output.status.success() {
         return Ok(true);
     }
@@ -177,6 +225,10 @@ fn service_active() -> Result<bool, String> {
         Some(3 | 4) => Ok(false),
         _ => Err(command_failure("systemctl --user is-active", &output)),
     }
+}
+
+fn service_active() -> Result<bool, String> {
+    named_service_active(UNIT_NAME)
 }
 
 fn pw_dump() -> Result<Vec<Value>, String> {
@@ -352,6 +404,262 @@ fn link_endpoints(link: &Value) -> Option<(u32, u32, bool)> {
     let input = u32::try_from(info.get("input-node-id")?.as_u64()?).ok()?;
     let active = info.get("state").and_then(Value::as_str) == Some("active");
     Some((output, input, active))
+}
+
+fn nodes_named(nodes: &[Value], name: &str) -> Vec<Target> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            (props(node)?.get("node.name")?.as_str()? == name)
+                .then(|| target_from_node(node))
+                .flatten()
+        })
+        .collect()
+}
+
+fn single_named_node(nodes: &[Value], name: &str) -> Option<Target> {
+    let matches = nodes_named(nodes, name);
+    (matches.len() == 1)
+        .then(|| matches.into_iter().next())
+        .flatten()
+}
+
+fn single_named_audio_sink(nodes: &[Value], name: &str) -> Option<Target> {
+    let matches = nodes_named(nodes, name)
+        .into_iter()
+        .filter(|target| {
+            nodes.iter().any(|node| {
+                node.get("id").and_then(Value::as_u64) == Some(u64::from(target.id))
+                    && props(node)
+                        .and_then(|properties| properties.get("media.class"))
+                        .and_then(Value::as_str)
+                        == Some("Audio/Sink")
+            })
+        })
+        .collect::<Vec<_>>();
+    (matches.len() == 1)
+        .then(|| matches.into_iter().next())
+        .flatten()
+}
+
+fn audio_channels(nodes: &[Value], node_id: u32) -> Option<i64> {
+    nodes.iter().find_map(|node| {
+        (node.get("id")?.as_u64() == Some(u64::from(node_id)))
+            .then(|| property_i64(props(node)?, "audio.channels"))
+            .flatten()
+    })
+}
+
+fn node_is_chat_or_capture(node: &Value) -> (bool, bool) {
+    let Some(properties) = props(node) else {
+        return (false, false);
+    };
+    let name = properties
+        .get("node.name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let media_class = properties
+        .get("media.class")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    (
+        contains_word(name, "chat"),
+        media_class.contains("Source") || contains_word(name, "capture"),
+    )
+}
+
+fn spatial_error(
+    health: &SpatialHealth<'_>,
+    capability: &crate::spatial::CapabilityReport,
+) -> Option<String> {
+    if !health.configured {
+        return Some("spatial mode is not configured for binaural-stereo".into());
+    }
+    if !health.enabled {
+        return Some("the spatial gate is disabled".into());
+    }
+    if !capability.dataset.valid {
+        return Some(
+            capability
+                .dataset
+                .error
+                .clone()
+                .unwrap_or_else(|| "the spatial HRTF dataset is invalid".into()),
+        );
+    }
+    if !capability.ready {
+        return capability.error.clone();
+    }
+    if !health.service_active {
+        return Some(format!(
+            "spatial lifecycle service is inactive: {SPATIAL_UNIT_NAME}"
+        ));
+    }
+    if let Some(error) = health.observation_error {
+        return Some(format!("spatial graph cannot be observed: {error}"));
+    }
+    if !health.graph_observable {
+        return Some("the spatial input/output nodes are absent or ambiguous".into());
+    }
+    if !health.input_format_7_1 || !health.output_format_stereo {
+        return Some(
+            "the spatial graph does not expose 7.1 input and stereo output formats".into(),
+        );
+    }
+    if !health.target_equalizer_connected {
+        return Some("the spatial stereo output is not linked to both equalizer channels".into());
+    }
+    if !health.default_safe {
+        return Some("the spatial virtual sink became the default sink".into());
+    }
+    if !health.chat_isolated || !health.capture_isolated {
+        return Some("unsafe spatial route detected to Chat or a capture node".into());
+    }
+    if !health.routing_healthy {
+        return Some("spatial routing contains an unexpected active link".into());
+    }
+    None
+}
+
+/// Inspects the spatial lifecycle and graph without changing PipeWire state.
+/// Command failures become a fail-closed status report instead of hiding the
+/// health fields from scripts and the widget.
+pub fn spatial_status(
+    profile: &crate::spatial::SpatialProfile,
+    capability: &crate::spatial::CapabilityReport,
+) -> SpatialStatus {
+    let configured = profile.mode == crate::spatial::SpatialMode::BinauralStereo;
+    let enabled = profile.enabled;
+    let service = named_service_active(SPATIAL_UNIT_NAME).unwrap_or(false);
+    let mut observation_error = None;
+    let mut input = None;
+    let mut output = None;
+    let mut target = None;
+    let mut input_format_7_1 = false;
+    let mut output_format_stereo = false;
+    let mut target_equalizer_connected = false;
+    // With an observable PipeWire graph, absence of a spatial link is itself
+    // isolation; graph_observable/routing_healthy separately state that the
+    // required graph and route exist.
+    let mut chat_isolated = true;
+    let mut capture_isolated = true;
+    let mut routing_healthy = false;
+
+    match pw_dump() {
+        Ok(nodes) => {
+            input = single_named_node(&nodes, SPATIAL_SINK_NODE);
+            output = single_named_node(&nodes, SPATIAL_OUTPUT_NODE);
+            target = single_named_audio_sink(&nodes, TARGET_EQUALIZER_SINK);
+            input_format_7_1 = input
+                .as_ref()
+                .and_then(|node| audio_channels(&nodes, node.id))
+                == Some(8);
+            output_format_stereo = output
+                .as_ref()
+                .and_then(|node| audio_channels(&nodes, node.id))
+                == Some(2);
+
+            if let Some(output_node) = output.as_ref() {
+                let active_links = nodes
+                    .iter()
+                    .filter_map(link_endpoints)
+                    .filter(|(_, _, active)| *active)
+                    .collect::<Vec<_>>();
+                let output_destinations = active_links
+                    .iter()
+                    .filter_map(|(from, to, _)| (*from == output_node.id).then_some(*to))
+                    .collect::<Vec<_>>();
+                let expected_target = target.as_ref().map(|node| node.id);
+                target_equalizer_connected = expected_target.is_some_and(|target_id| {
+                    output_destinations
+                        .iter()
+                        .filter(|destination| **destination == target_id)
+                        .count()
+                        == 2
+                });
+                routing_healthy = target_equalizer_connected
+                    && output_destinations.len() == 2
+                    && expected_target.is_some_and(|target_id| {
+                        output_destinations
+                            .iter()
+                            .all(|destination| *destination == target_id)
+                    });
+
+                let graph_ids = [input.as_ref().map(|node| node.id), Some(output_node.id)];
+                let mut chat = false;
+                let mut capture = false;
+                for (from, to, _) in active_links {
+                    for (graph_id, other_id) in [(from, to), (to, from)] {
+                        if graph_ids.contains(&Some(graph_id))
+                            && let Some(other) = nodes.iter().find(|node| {
+                                node.get("id").and_then(Value::as_u64) == Some(u64::from(other_id))
+                            })
+                        {
+                            let (is_chat, is_capture) = node_is_chat_or_capture(other);
+                            chat |= is_chat;
+                            capture |= is_capture;
+                        }
+                    }
+                }
+                chat_isolated = !chat;
+                capture_isolated = !capture;
+            }
+        }
+        Err(error) => {
+            observation_error = Some(error);
+            chat_isolated = false;
+            capture_isolated = false;
+        }
+    }
+
+    let default_safe = match pactl_default_sink() {
+        Ok(default) => default != SPATIAL_SINK_NODE && default != SPATIAL_OUTPUT_NODE,
+        Err(error) => {
+            observation_error.get_or_insert(error);
+            false
+        }
+    };
+    let graph_observable = input.is_some() && output.is_some() && target.is_some();
+    let health = SpatialHealth {
+        service_active: service,
+        configured,
+        enabled,
+        graph_observable,
+        input_format_7_1,
+        output_format_stereo,
+        target_equalizer_connected,
+        default_safe,
+        chat_isolated,
+        capture_isolated,
+        routing_healthy,
+        observation_error: observation_error.as_deref(),
+    };
+    let error = spatial_error(&health, capability);
+    let active = error.is_none();
+
+    SpatialStatus {
+        configured,
+        enabled,
+        active,
+        service_active: service,
+        dataset_valid: capability.dataset.valid,
+        target_equalizer_connected,
+        default_safe,
+        chat_isolated,
+        capture_isolated,
+        routing_healthy,
+        graph_observable,
+        input_format_7_1,
+        output_format_stereo,
+        input_node_id: input.as_ref().map(|node| node.id),
+        input_object_serial: input.as_ref().map(|node| node.object_serial),
+        output_node_id: output.as_ref().map(|node| node.id),
+        output_object_serial: output.as_ref().map(|node| node.object_serial),
+        target_equalizer_node_id: target.as_ref().map(|node| node.id),
+        target_equalizer_object_serial: target.as_ref().map(|node| node.object_serial),
+        target_equalizer_node_name: TARGET_EQUALIZER_SINK,
+        error,
+    }
 }
 
 fn route_health(nodes: &[Value], output: Option<&Target>, game: Option<&Target>) -> (bool, bool) {

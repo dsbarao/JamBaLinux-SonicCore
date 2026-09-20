@@ -1661,33 +1661,41 @@ fn print_spatial_preflight(json: bool) -> Result<(), String> {
 #[derive(Serialize)]
 struct SpatialStatusOutput {
     schema: u8,
-    enabled: bool,
     mode: spatial::SpatialMode,
-    active: bool,
     experimental: bool,
+    #[serde(flatten)]
+    health: pipewire::SpatialStatus,
     capability: spatial::CapabilityReport,
 }
 
 fn print_spatial_status(json: bool) -> Result<(), String> {
     let profile = spatial::load()?;
     let capability = spatial::preflight()?;
+    let health = pipewire::spatial_status(&profile, &capability);
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&SpatialStatusOutput {
                 schema: profile.schema,
-                enabled: profile.enabled,
                 mode: profile.mode,
-                active: false,
                 experimental: true,
+                health: health.clone(),
                 capability,
             })
             .map_err(|error| error.to_string())?
         );
     } else {
         print_spatial(&profile, false)?;
-        println!("active: false (the lifecycle supervisor owns the optional audio graph)");
-        if let Some(error) = capability.error.as_deref() {
+        println!("configured: {}", health.configured);
+        println!("active: {}", health.active);
+        println!("service active: {}", health.service_active);
+        println!("dataset valid: {}", health.dataset_valid);
+        println!(
+            "target equalizer connected: {}",
+            health.target_equalizer_connected
+        );
+        println!("routing healthy: {}", health.routing_healthy);
+        if let Some(error) = health.error.as_deref() {
             println!("Action required: {error}");
         }
     }
