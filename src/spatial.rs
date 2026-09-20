@@ -1,12 +1,9 @@
 //! Experimental open spatial/binaural audio: configuration, state, and gate.
 //!
-//! This module is intentionally a foundation only. It stores the user's
-//! opt-in intent and performs a read-only capability preflight so a future
-//! PipeWire-based implementation has somewhere safe to start. It never opens
-//! a HID/USB device, connects to a real PipeWire instance, changes the
-//! default sink, creates links, or spawns a DSP graph — see
-//! `docs/protocol/audio-processing.md` and `AGENTS.md` for the boundaries
-//! this module must not cross. The only supported mode name is the open,
+//! This module stores the user's opt-in intent and performs the capability
+//! preflight used by the lifecycle supervisor. It never opens a HID/USB
+//! device; the separate `crate::spatial_pipewire` backend owns the optional
+//! PipeWire graph and its narrowly-scoped routing. The only supported mode name is the open,
 //! vendor-neutral "binaural-stereo"; vendor names such as DTS or Quantum
 //! Spatial must never appear here.
 
@@ -1094,8 +1091,8 @@ fn moded_profile(profile: &SpatialProfile, mode: SpatialMode) -> Result<SpatialP
 }
 
 /// Sets the explicit spatial gate. Enabling requires the capability preflight
-/// to report readiness; this only records intent in the profile and performs
-/// no PipeWire connection, routing change, or DSP setup of any kind.
+/// to report readiness; this records only intent. The persistent lifecycle
+/// supervisor observes that intent and owns any later PipeWire work.
 pub fn set_enabled(enabled: bool) -> Result<SpatialProfile, String> {
     let _lock = mutation_lock()?;
     let profile = load()?;

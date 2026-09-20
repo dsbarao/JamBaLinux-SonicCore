@@ -16,10 +16,8 @@ use serde::{Serialize, Serializer};
 mod equalizer;
 mod hid;
 mod pipewire;
-// The spatial foundation is called only by the optional CLI subcommand. Keep
-// it available to the binary while the feature deliberately remains inert.
-#[allow(dead_code)]
 mod spatial;
+mod spatial_pipewire;
 mod state;
 
 const USB_ROOT: &str = "/sys/bus/usb/devices";
@@ -1625,7 +1623,7 @@ fn print_spatial(profile: &spatial::SpatialProfile, json: bool) -> Result<(), St
             serde_json::to_string_pretty(profile).map_err(|error| error.to_string())?
         );
     } else {
-        println!("Experimental spatial/binaural audio (foundation only, no processing applied):");
+        println!("Experimental spatial/binaural audio:");
         println!("  enabled: {}", profile.enabled);
         println!("  mode: {}", profile.mode.as_str());
     }
@@ -1688,7 +1686,7 @@ fn print_spatial_status(json: bool) -> Result<(), String> {
         );
     } else {
         print_spatial(&profile, false)?;
-        println!("active: false (experimental foundation; no audio graph changes are applied)");
+        println!("active: false (the lifecycle supervisor owns the optional audio graph)");
         if let Some(error) = capability.error.as_deref() {
             println!("Action required: {error}");
         }
@@ -1744,8 +1742,8 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
         Some("enable") if args.next().is_none() => {
             let profile = spatial::set_enabled(true)?;
             println!(
-                "spatial gate recorded as enabled (mode: {}); this build applies no audio \
-                 processing yet — see docs/protocol/audio-processing.md",
+                "spatial gate enabled (mode: {}); the persistent supervisor will create the \
+                 graph only while the equalizer target and preflight remain valid",
                 profile.mode.as_str()
             );
             Ok(true)
@@ -1757,6 +1755,16 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             Ok(true)
         }
         Some("disable") => Err("spatial disable accepts no value".into()),
+        Some("run") if args.next().is_none() => {
+            spatial_pipewire::run()?;
+            Ok(true)
+        }
+        Some("run") => Err("spatial run accepts no value".into()),
+        Some("restore") if args.next().is_none() => {
+            spatial_pipewire::restore_streams()?;
+            Ok(true)
+        }
+        Some("restore") => Err("spatial restore accepts no value".into()),
         _ => Err("unknown spatial command".into()),
     }
 }
