@@ -12,7 +12,7 @@
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -77,6 +77,7 @@ pub struct CapabilityReport {
     pub pipewire_binary_present: bool,
     pub filter_chain_module_present: bool,
     pub hrtf_dataset_present: bool,
+    pub dataset: DatasetReport,
     pub ready: bool,
     pub error: Option<String>,
 }
@@ -93,10 +94,798 @@ pub fn config_directory() -> Result<PathBuf, String> {
 }
 
 /// The user-provided open HRTF/binaural dataset directory. This build never
-/// downloads, generates, or bundles a dataset here; the directory is only
-/// inspected for presence.
+/// downloads, generates, or bundles a dataset here; it only reads the manifest
+/// and HRIR the user placed here and validates them (see
+/// [`validate_dataset_directory`]).
 pub fn hrtf_dataset_directory() -> Result<PathBuf, String> {
     Ok(config_directory()?.join("spatial").join("hrtf"))
+}
+
+// ---------------------------------------------------------------------------
+// Open HRIR dataset contract and validation (Phase 1)
+//
+// The dataset directory must provide (at least) these two regular files, which
+// are the only entries this build reads; any other files present are ignored:
+//   - `manifest.json`: neutral, vendor-free metadata plus the expected SHA-256;
+//   - `hrir.wav`: a 14-channel WAV compatible with the layout used by the
+//     official PipeWire `sink-virtual-surround-7.1-hesuvi.conf` example.
+//
+// Everything here is a pure function of bytes or of a caller-supplied
+// directory path, so it is exercised entirely with synthetic temporary files
+// in tests. Validation never opens a PipeWire connection, spawns a graph,
+// downloads anything, or mutates the dataset. Reads are size-bounded so a
+// hostile or corrupt file cannot exhaust memory.
+//
+// Two orthogonal notions of "trust" live in the report and must not be
+// conflated:
+//   - `CapabilityReport::ready` is a purely *technical* gate: PipeWire, the
+//     filter-chain module, and a structurally valid, hash-verified dataset are
+//     all present. Only `ready` gates enabling the feature.
+//   - `DatasetReport::legal_review_required` is always `true`: passing the
+//     technical checks says nothing about whether the HRIR's `license` and
+//     `source_url` actually permit use or redistribution. That determination is
+//     a human/legal responsibility this code neither makes nor clears. A
+//     dataset can therefore be `ready` while its licensing still awaits human
+//     review.
+
+/// Manifest schema version. Bumped only on incompatible contract changes.
+pub const DATASET_SCHEMA: u8 = 1;
+
+/// The single dataset layout accepted by this MVP: a 14-channel surround HRIR
+/// WAV. The token is deliberately vendor-neutral and describes the layout, not
+/// any tool or product.
+pub const SUPPORTED_DATASET_FORMAT: &str = "surround-7.1-14ch-wav";
+
+/// Exact channel count required in `hrir.wav` (matches the official 7.1 HeSuVi
+/// convolver layout: 7 pairs + FC/LFE handling encoded across 14 responses).
+pub const REQUIRED_HRIR_CHANNELS: u16 = 14;
+
+/// Sample rates accepted by the MVP. Restricted to the two rates the target
+/// hardware and the reference HeSuVi datasets actually use; broaden only with
+/// evidence that another rate is needed and verified end to end.
+pub const SUPPORTED_SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
+
+const MANIFEST_FILE_NAME: &str = "manifest.json";
+const HRIR_FILE_NAME: &str = "hrir.wav";
+
+/// Upper bound for `manifest.json`. It is a tiny metadata file; anything larger
+/// is treated as hostile or corrupt rather than parsed.
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+
+/// Upper bound for `hrir.wav`. A 14-channel HRIR is a short set of impulse
+/// responses (a few MB at most); 64 MiB is a generous ceiling that still
+/// prevents loading an arbitrarily large file into memory.
+const MAX_HRIR_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Substrings that must never appear in a dataset's descriptive metadata, so
+/// the product never ships or references proprietary vendor branding. Mirrors
+/// the vendor-neutrality guard applied to spatial mode names.
+const BANNED_METADATA_SUBSTRINGS: [&str; 4] = ["dts", "dolby", "atmos", "quantum spatial"];
+
+/// User-authored metadata that must sit next to `hrir.wav`. All fields are
+/// required; `license` and `source_url` capture provenance for the mandatory
+/// human legal review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetManifest {
+    pub schema: u8,
+    pub format: String,
+    pub name: String,
+    pub sha256: String,
+    pub license: String,
+    pub source_url: String,
+}
+
+/// Result of validating the dataset directory. Fields are filled in
+/// progressively so the preflight/status can report exactly how far validation
+/// reached and the first actionable error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetReport {
+    pub schema: u8,
+    pub manifest_path: Option<String>,
+    pub hrir_path: Option<String>,
+    pub format: Option<String>,
+    pub name: Option<String>,
+    pub license: Option<String>,
+    pub source_url: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub observed_sha256: Option<String>,
+    pub channels: Option<u16>,
+    pub sample_rate: Option<u32>,
+    /// Always `true`, independent of `valid`/`ready`. Technical validity (a
+    /// well-formed, hash-matched WAV) is orthogonal to legal clearance of the
+    /// dataset's `license`/`source_url`, which only a human can determine. This
+    /// flag exists so no caller mistakes "passed validation" for "cleared for
+    /// use or redistribution".
+    pub legal_review_required: bool,
+    pub valid: bool,
+    pub error: Option<String>,
+}
+
+impl DatasetReport {
+    fn empty() -> Self {
+        Self {
+            schema: DATASET_SCHEMA,
+            manifest_path: None,
+            hrir_path: None,
+            format: None,
+            name: None,
+            license: None,
+            source_url: None,
+            expected_sha256: None,
+            observed_sha256: None,
+            channels: None,
+            sample_rate: None,
+            legal_review_required: true,
+            valid: false,
+            error: None,
+        }
+    }
+}
+
+/// Standard WAV format tags, plus the extensible sentinel.
+const WAVE_FORMAT_PCM: u16 = 1;
+const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+
+/// Trailing 14 bytes shared by both KSDATAFORMAT_SUBTYPE GUIDs. Only the first
+/// two bytes of a SubFormat GUID vary (they mirror the base format tag); the
+/// remaining bytes are fixed. Layout: Data1 high half (2), Data2 (2), Data3
+/// (2), Data4 (8) = `0000-0010-8000-00aa00389b71`.
+const KSDATAFORMAT_SUBTYPE_TAIL: [u8; 14] = [
+    0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+];
+
+/// Minimal WAV `fmt`/`data` facts needed to gate the convolver input.
+#[derive(Debug, Clone, PartialEq)]
+struct WavInfo {
+    /// Effective format tag: for `WAVE_FORMAT_EXTENSIBLE` this is the tag
+    /// resolved from the SubFormat GUID, not the `0xFFFE` sentinel.
+    format_tag: u16,
+    channels: u16,
+    sample_rate: u32,
+    byte_rate: u32,
+    block_align: u16,
+    bits_per_sample: u16,
+    data_bytes: u64,
+}
+
+/// Resolves `<dataset_dir>/<file_name>` to a canonical regular-file path,
+/// rejecting symlinks and any path that escapes the dataset directory.
+fn resolve_regular_file(dataset_dir: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let canonical_dir = fs::canonicalize(dataset_dir)
+        .map_err(|error| format!("{}: {error}", dataset_dir.display()))?;
+    let candidate = canonical_dir.join(file_name);
+
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("{}: {error}", candidate.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{} must be a regular file, not a symbolic link",
+            candidate.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", candidate.display()));
+    }
+
+    // Defense in depth: after resolving, the file must still live directly in
+    // the dataset directory. This rejects any link or path that escapes it.
+    let resolved = fs::canonicalize(&candidate)
+        .map_err(|error| format!("{}: {error}", candidate.display()))?;
+    if resolved.parent() != Some(canonical_dir.as_path()) {
+        return Err(format!(
+            "{} resolves outside the dataset directory",
+            candidate.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Validates that `source_url` is an HTTP(S) URL with a usable host. The
+/// authority (everything after the scheme up to the first `/`, `?`, or `#`) must
+/// be non-empty, free of whitespace and control characters, and — after
+/// dropping any `userinfo@` prefix and `:port` suffix — must still contain a
+/// non-empty host.
+fn validate_source_url(source_url: &str) -> Result<(), String> {
+    let invalid =
+        || "manifest `source_url` must be an http:// or https:// URL with a host".to_string();
+
+    let rest = source_url
+        .strip_prefix("https://")
+        .or_else(|| source_url.strip_prefix("http://"))
+        .ok_or_else(invalid)?;
+
+    // Authority ends at the path/query/fragment delimiter.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return Err(invalid());
+    }
+    if authority
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(invalid());
+    }
+
+    // Drop optional `userinfo@`, then an optional `:port` (leaving bracketed
+    // IPv6 literals intact), and require a non-empty host.
+    let after_userinfo = authority.rsplit('@').next().unwrap_or("");
+    let host = if after_userinfo.starts_with('[') {
+        after_userinfo
+    } else {
+        after_userinfo.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return Err(invalid());
+    }
+
+    Ok(())
+}
+
+fn validate_manifest(manifest: &DatasetManifest) -> Result<(), String> {
+    if manifest.schema != DATASET_SCHEMA {
+        return Err(format!(
+            "unsupported manifest schema {}; this build expects {DATASET_SCHEMA}",
+            manifest.schema
+        ));
+    }
+
+    let digest = manifest.sha256.trim().to_ascii_lowercase();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("manifest `sha256` must be a 64-character hexadecimal SHA-256 digest".into());
+    }
+
+    for (field, value) in [
+        ("format", &manifest.format),
+        ("name", &manifest.name),
+        ("license", &manifest.license),
+        ("source_url", &manifest.source_url),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "manifest field `{field}` is required and must not be empty"
+            ));
+        }
+    }
+
+    if manifest.format.trim() != SUPPORTED_DATASET_FORMAT {
+        return Err(format!(
+            "manifest `format` must be `{SUPPORTED_DATASET_FORMAT}`; found `{}`",
+            manifest.format.trim()
+        ));
+    }
+
+    // `source_url` documents provenance for the mandatory human legal review, so
+    // it must be a fetchable HTTP(S) URL whose authority contains a real host.
+    validate_source_url(manifest.source_url.trim())?;
+
+    let haystack = format!("{} {}", manifest.name, manifest.format).to_ascii_lowercase();
+    for banned in BANNED_METADATA_SUBSTRINGS {
+        if haystack.contains(banned) {
+            return Err(format!(
+                "manifest metadata must stay vendor-neutral; `{banned}` is not allowed"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([
+        *bytes.get(offset)?,
+        *bytes.get(offset + 1)?,
+    ]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *bytes.get(offset)?,
+        *bytes.get(offset + 1)?,
+        *bytes.get(offset + 2)?,
+        *bytes.get(offset + 3)?,
+    ]))
+}
+
+/// Resolves the effective format tag from a `fmt ` chunk body, fully
+/// validating a `WAVE_FORMAT_EXTENSIBLE` SubFormat GUID when present.
+fn effective_format_tag(bytes: &[u8], body: usize, size: usize) -> Result<u16, String> {
+    let base_tag = read_u16_le(bytes, body).ok_or("truncated WAV `fmt ` chunk")?;
+    if base_tag != WAVE_FORMAT_EXTENSIBLE {
+        return Ok(base_tag);
+    }
+
+    // WAVE_FORMAT_EXTENSIBLE: WAVEFORMATEX (16) + cbSize (2) + 22-byte
+    // extension (validBits 2, channelMask 4, SubFormat GUID 16).
+    if size < 40 {
+        return Err("WAV `fmt ` chunk declares WAVE_FORMAT_EXTENSIBLE but is too short".into());
+    }
+    let cb_size = read_u16_le(bytes, body + 16).ok_or("truncated WAV extension header")?;
+    if cb_size < 22 {
+        return Err("WAVE_FORMAT_EXTENSIBLE extension size (cbSize) must be at least 22".into());
+    }
+    // The declared extension must fit inside the `fmt ` chunk: the 16-byte
+    // WAVEFORMATEX plus the 2-byte cbSize plus cbSize bytes of extension.
+    if 18 + usize::from(cb_size) > size {
+        return Err(format!(
+            "WAVE_FORMAT_EXTENSIBLE cbSize ({cb_size}) overflows the {size}-byte `fmt ` chunk"
+        ));
+    }
+    let valid_bits = read_u16_le(bytes, body + 18).ok_or("truncated WAV extension header")?;
+    let container_bits = read_u16_le(bytes, body + 14).ok_or("truncated WAV `fmt ` chunk")?;
+    if valid_bits == 0 || valid_bits > container_bits {
+        return Err(format!(
+            "WAVE_FORMAT_EXTENSIBLE valid-bits-per-sample ({valid_bits}) must be in 1..={container_bits}"
+        ));
+    }
+
+    let guid = bytes
+        .get(body + 24..body + 40)
+        .ok_or("truncated WAVE_FORMAT_EXTENSIBLE SubFormat GUID")?;
+    if guid[2..16] != KSDATAFORMAT_SUBTYPE_TAIL {
+        return Err(
+            "WAVE_FORMAT_EXTENSIBLE SubFormat GUID is not a recognized KSDATAFORMAT_SUBTYPE".into(),
+        );
+    }
+    let sub_tag = u16::from_le_bytes([guid[0], guid[1]]);
+    if !matches!(sub_tag, WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT) {
+        return Err(format!(
+            "WAVE_FORMAT_EXTENSIBLE SubFormat tag {sub_tag} is neither PCM nor IEEE float"
+        ));
+    }
+    Ok(sub_tag)
+}
+
+/// Parses just enough of a canonical RIFF/WAVE file to gate the convolver: the
+/// `fmt ` chunk (including a full `WAVE_FORMAT_EXTENSIBLE` GUID) and the size
+/// of a non-empty `data` chunk. Structural/semantic checks live in
+/// [`validate_wav_format`].
+fn parse_wav(bytes: &[u8]) -> Result<WavInfo, String> {
+    if bytes.len() < 12 {
+        return Err("file is too small to be a WAV".into());
+    }
+    if &bytes[0..4] != b"RIFF" {
+        return Err("missing RIFF header; not a WAV file".into());
+    }
+    if &bytes[8..12] != b"WAVE" {
+        return Err("missing WAVE marker; not a WAV file".into());
+    }
+
+    let mut offset = 12usize;
+    let mut fmt: Option<WavInfo> = None;
+    let mut data_bytes: Option<u64> = None;
+
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = read_u32_le(bytes, offset + 4).ok_or("truncated chunk header")? as usize;
+        let body = offset + 8;
+        // Guard the addition itself against overflow on a hostile size field.
+        if body.checked_add(size).is_none_or(|end| end > bytes.len()) {
+            return Err(format!(
+                "chunk `{}` claims {size} bytes but the file is truncated",
+                String::from_utf8_lossy(id)
+            ));
+        }
+
+        if id == b"fmt " {
+            if size < 16 {
+                return Err("WAV `fmt ` chunk is too small".into());
+            }
+            fmt = Some(WavInfo {
+                format_tag: effective_format_tag(bytes, body, size)?,
+                channels: read_u16_le(bytes, body + 2).unwrap(),
+                sample_rate: read_u32_le(bytes, body + 4).unwrap(),
+                byte_rate: read_u32_le(bytes, body + 8).unwrap(),
+                block_align: read_u16_le(bytes, body + 12).unwrap(),
+                bits_per_sample: read_u16_le(bytes, body + 14).unwrap(),
+                data_bytes: 0,
+            });
+        } else if id == b"data" {
+            data_bytes = Some(size as u64);
+        }
+
+        // Chunks are word-aligned: bodies of odd length carry a pad byte.
+        offset = body + size + (size & 1);
+    }
+
+    let mut info = fmt.ok_or("WAV is missing its `fmt ` chunk")?;
+    let data = data_bytes.ok_or("WAV is missing its `data` chunk")?;
+    if data == 0 {
+        return Err("WAV `data` chunk is empty".into());
+    }
+    info.data_bytes = data;
+    Ok(info)
+}
+
+/// Enforces internal consistency of a parsed WAV and that its format/bit-depth
+/// combination is one the PipeWire builtin convolver can read.
+fn validate_wav_format(info: &WavInfo) -> Result<(), String> {
+    if info.channels == 0 {
+        return Err("hrir.wav declares zero channels".into());
+    }
+    if !SUPPORTED_SAMPLE_RATES.contains(&info.sample_rate) {
+        return Err(format!(
+            "hrir.wav sample rate ({} Hz) is unsupported; this MVP accepts only {:?} Hz",
+            info.sample_rate, SUPPORTED_SAMPLE_RATES
+        ));
+    }
+    if info.bits_per_sample == 0 || !info.bits_per_sample.is_multiple_of(8) {
+        return Err(format!(
+            "hrir.wav bit depth ({}) must be a non-zero multiple of 8",
+            info.bits_per_sample
+        ));
+    }
+    let bytes_per_sample = u32::from(info.bits_per_sample / 8);
+
+    // block_align must describe one interleaved frame across all channels.
+    let expected_block_align = u32::from(info.channels) * bytes_per_sample;
+    if u32::from(info.block_align) != expected_block_align {
+        return Err(format!(
+            "hrir.wav block align ({}) does not match {} channels * {} bytes/sample ({expected_block_align})",
+            info.block_align, info.channels, bytes_per_sample
+        ));
+    }
+
+    // byte_rate must equal sample_rate * block_align.
+    let expected_byte_rate = u64::from(info.sample_rate) * u64::from(info.block_align);
+    if u64::from(info.byte_rate) != expected_byte_rate {
+        return Err(format!(
+            "hrir.wav byte rate ({}) does not match sample rate {} * block align {} ({expected_byte_rate})",
+            info.byte_rate, info.sample_rate, info.block_align
+        ));
+    }
+
+    // data must contain a whole number of frames, and at least one.
+    if !info.data_bytes.is_multiple_of(u64::from(info.block_align)) {
+        return Err(format!(
+            "hrir.wav data length ({} bytes) is not a whole number of {}-byte frames",
+            info.data_bytes, info.block_align
+        ));
+    }
+    if info.data_bytes / u64::from(info.block_align) == 0 {
+        return Err("hrir.wav contains no audio frames".into());
+    }
+
+    match info.format_tag {
+        WAVE_FORMAT_PCM if matches!(info.bits_per_sample, 8 | 16 | 24 | 32) => Ok(()),
+        WAVE_FORMAT_IEEE_FLOAT if matches!(info.bits_per_sample, 32 | 64) => Ok(()),
+        WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT => Err(format!(
+            "hrir.wav format tag {} with {}-bit samples is not a valid PCM/float combination",
+            info.format_tag, info.bits_per_sample
+        )),
+        other => Err(format!(
+            "hrir.wav uses WAV format tag {other} which the PipeWire convolver cannot read; \
+             provide PCM or IEEE-float WAV"
+        )),
+    }
+}
+
+/// Reads a regular file into memory, refusing to load more than `max` bytes.
+/// The size is checked from metadata first, then the read itself is capped so a
+/// file that grows between the two steps still cannot exceed the bound.
+fn read_file_limited(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if metadata.len() > max {
+        return Err(format!(
+            "{} is {} bytes, exceeding the {max}-byte limit",
+            path.display(),
+            metadata.len()
+        ));
+    }
+
+    let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    // Read one byte past the limit so an oversized file is detected rather than
+    // silently truncated.
+    let mut buffer = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if buffer.len() as u64 > max {
+        return Err(format!(
+            "{} exceeds the {max}-byte limit while reading",
+            path.display()
+        ));
+    }
+    Ok(buffer)
+}
+
+/// Validates the dataset directory end to end, capturing the first actionable
+/// error rather than returning `Err`, so callers always get a full report.
+fn validate_dataset_directory(dataset_dir: &Path) -> DatasetReport {
+    let mut report = DatasetReport::empty();
+    match validate_dataset_into(dataset_dir, &mut report) {
+        Ok(()) => report.valid = true,
+        Err(error) => {
+            report.valid = false;
+            report.error = Some(error);
+        }
+    }
+    report
+}
+
+fn validate_dataset_into(dataset_dir: &Path, report: &mut DatasetReport) -> Result<(), String> {
+    let manifest_path = resolve_regular_file(dataset_dir, MANIFEST_FILE_NAME)?;
+    report.manifest_path = Some(manifest_path.display().to_string());
+    let manifest_bytes = read_file_limited(&manifest_path, MAX_MANIFEST_BYTES)?;
+    let manifest: DatasetManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    validate_manifest(&manifest)?;
+
+    let expected = manifest.sha256.trim().to_ascii_lowercase();
+    report.format = Some(manifest.format.clone());
+    report.name = Some(manifest.name.clone());
+    report.license = Some(manifest.license.clone());
+    report.source_url = Some(manifest.source_url.clone());
+    report.expected_sha256 = Some(expected.clone());
+
+    let hrir_path = resolve_regular_file(dataset_dir, HRIR_FILE_NAME)?;
+    report.hrir_path = Some(hrir_path.display().to_string());
+    let hrir_bytes = read_file_limited(&hrir_path, MAX_HRIR_BYTES)?;
+
+    let observed = sha256_hex(&hrir_bytes);
+    report.observed_sha256 = Some(observed.clone());
+    if observed != expected {
+        return Err(format!(
+            "hrir.wav SHA-256 mismatch: manifest expects {expected}, file hashes to {observed}"
+        ));
+    }
+
+    let wav = parse_wav(&hrir_bytes)?;
+    report.channels = Some(wav.channels);
+    report.sample_rate = Some(wav.sample_rate);
+
+    if wav.channels != REQUIRED_HRIR_CHANNELS {
+        return Err(format!(
+            "hrir.wav must have exactly {REQUIRED_HRIR_CHANNELS} channels; found {}",
+            wav.channels
+        ));
+    }
+    validate_wav_format(&wav)?;
+
+    Ok(())
+}
+
+const SHA256_H0: [u32; 8] = [
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
+];
+
+const SHA256_K: [u32; 64] = [
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
+];
+
+/// Incremental SHA-256 (FIPS 180-4). Kept in-tree rather than pulling in an
+/// external crate because this round of work is constrained to `src/spatial.rs`
+/// only (a dependency needs a `Cargo.toml` change). The hasher itself is
+/// incremental — data is absorbed a block at a time via [`Sha256::update`] — but
+/// note the dataset flow currently hashes the HRIR from a single in-memory
+/// buffer (already size-bounded to `MAX_HRIR_BYTES`), not by streaming it from
+/// disk. The incremental API keeps a future switch to chunked file reads a
+/// local change.
+struct Sha256 {
+    state: [u32; 8],
+    /// Bytes not yet forming a full 64-byte block.
+    block: [u8; 64],
+    block_len: usize,
+    total_len: u64,
+}
+
+impl Sha256 {
+    fn new() -> Self {
+        Self {
+            state: SHA256_H0,
+            block: [0u8; 64],
+            block_len: 0,
+            total_len: 0,
+        }
+    }
+
+    fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
+        let mut w = [0u32; 64];
+        for (index, word) in w.iter_mut().take(16).enumerate() {
+            let base = index * 4;
+            *word = u32::from_be_bytes([
+                block[base],
+                block[base + 1],
+                block[base + 2],
+                block[base + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = w[index - 15].rotate_right(7)
+                ^ w[index - 15].rotate_right(18)
+                ^ (w[index - 15] >> 3);
+            let s1 = w[index - 2].rotate_right(17)
+                ^ w[index - 2].rotate_right(19)
+                ^ (w[index - 2] >> 10);
+            w[index] = w[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = state[0];
+        let mut b = state[1];
+        let mut c = state[2];
+        let mut d = state[3];
+        let mut e = state[4];
+        let mut f = state[5];
+        let mut g = state[6];
+        let mut h = state[7];
+
+        for index in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(SHA256_K[index])
+                .wrapping_add(w[index]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.total_len = self.total_len.wrapping_add(data.len() as u64);
+
+        // Top off a partially filled block first.
+        if self.block_len > 0 {
+            let need = 64 - self.block_len;
+            let take = need.min(data.len());
+            self.block[self.block_len..self.block_len + take].copy_from_slice(&data[..take]);
+            self.block_len += take;
+            data = &data[take..];
+            if self.block_len < 64 {
+                // Still not a full block; keep it buffered for the next call.
+                return;
+            }
+            let block = self.block;
+            Self::compress(&mut self.state, &block);
+            self.block_len = 0;
+        }
+
+        // Consume whole blocks straight from the input.
+        let (blocks, remainder) = data.as_chunks::<64>();
+        for block in blocks {
+            Self::compress(&mut self.state, block);
+        }
+
+        // Stash the remainder for the next update/finalize.
+        self.block[..remainder.len()].copy_from_slice(remainder);
+        self.block_len = remainder.len();
+    }
+
+    fn finalize(mut self) -> [u8; 32] {
+        let bit_length = self.total_len.wrapping_mul(8);
+
+        // Append the 0x80 terminator; block_len is always < 64 here.
+        self.block[self.block_len] = 0x80;
+        self.block_len += 1;
+
+        if self.block_len > 56 {
+            self.block[self.block_len..].fill(0);
+            let block = self.block;
+            Self::compress(&mut self.state, &block);
+            self.block = [0u8; 64];
+        } else {
+            self.block[self.block_len..56].fill(0);
+        }
+
+        self.block[56..64].copy_from_slice(&bit_length.to_be_bytes());
+        let block = self.block;
+        Self::compress(&mut self.state, &block);
+
+        let mut digest = [0u8; 32];
+        for (index, word) in self.state.iter().enumerate() {
+            digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Convenience one-shot wrapper over the incremental [`Sha256`].
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex_encode(&hasher.finalize())
 }
 
 /// Serializes the complete load -> validate -> save transaction.
@@ -142,9 +931,7 @@ fn load_from_path(path: &Path) -> Result<SpatialProfile, String> {
 }
 
 fn temporary_path(path: &Path, sequence: u64) -> Result<PathBuf, String> {
-    let directory = path
-        .parent()
-        .ok_or("invalid spatial configuration path")?;
+    let directory = path.parent().ok_or("invalid spatial configuration path")?;
     let file_name = path
         .file_name()
         .ok_or("invalid spatial configuration path")?;
@@ -155,9 +942,7 @@ fn temporary_path(path: &Path, sequence: u64) -> Result<PathBuf, String> {
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
-    let directory = path
-        .parent()
-        .ok_or("invalid spatial configuration path")?;
+    let directory = path.parent().ok_or("invalid spatial configuration path")?;
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
 
     let (temporary_path, mut temporary_file) = loop {
@@ -220,29 +1005,28 @@ fn filter_chain_module_present() -> bool {
         .any(|candidate| Path::new(candidate).is_file())
 }
 
-fn hrtf_dataset_present_at(directory: &Path) -> bool {
-    fs::read_dir(directory)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false)
-}
-
 fn capability_report(
     pipewire_binary_present: bool,
     filter_chain_module_present: bool,
-    hrtf_dataset_present: bool,
+    dataset: DatasetReport,
 ) -> CapabilityReport {
-    let mut missing = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     if !pipewire_binary_present {
-        missing.push("the `pipewire` binary was not found on PATH");
+        missing.push("the `pipewire` binary was not found on PATH".into());
     }
     if !filter_chain_module_present {
-        missing.push("no PipeWire filter-chain module was found under the known module directories");
-    }
-    if !hrtf_dataset_present {
         missing.push(
-            "no open HRTF/binaural dataset was found under the spatial configuration directory",
+            "no PipeWire filter-chain module was found under the known module directories".into(),
         );
     }
+    if !dataset.valid {
+        missing.push(dataset.error.clone().unwrap_or_else(|| {
+            "the open HRTF/binaural dataset under the spatial configuration directory is missing \
+             or invalid"
+                .into()
+        }));
+    }
+    let hrtf_dataset_present = dataset.valid;
     let ready = missing.is_empty();
     let error = if ready {
         None
@@ -258,6 +1042,7 @@ fn capability_report(
         pipewire_binary_present,
         filter_chain_module_present,
         hrtf_dataset_present,
+        dataset,
         ready,
         error,
     }
@@ -267,11 +1052,11 @@ fn capability_report(
 /// filesystem locations only; it never opens a PipeWire connection, executes
 /// `pipewire`/`pw-cli`, or touches the default sink, routing, or DSP graph.
 pub fn preflight() -> Result<CapabilityReport, String> {
-    let hrtf_dataset_present = hrtf_dataset_present_at(&hrtf_dataset_directory()?);
+    let dataset = validate_dataset_directory(&hrtf_dataset_directory()?);
     Ok(capability_report(
         binary_present("pipewire"),
         filter_chain_module_present(),
-        hrtf_dataset_present,
+        dataset,
     ))
 }
 
@@ -356,6 +1141,167 @@ mod tests {
         }
     }
 
+    fn valid_dataset_report() -> DatasetReport {
+        DatasetReport {
+            valid: true,
+            ..DatasetReport::empty()
+        }
+    }
+
+    fn invalid_dataset_report() -> DatasetReport {
+        DatasetReport::empty()
+    }
+
+    /// Builds a well-formed 14-channel PCM WAV with a Dirac impulse in the
+    /// first frame of every channel. Synthetic only — it validates channels
+    /// and structure, never binaural quality.
+    fn synthetic_hrir_wav(channels: u16, sample_rate: u32) -> Vec<u8> {
+        const BITS: u16 = 16;
+        const FRAMES: usize = 4;
+        let block_align = channels * (BITS / 8);
+        let data_len = FRAMES * block_align as usize;
+
+        let mut data = vec![0u8; data_len];
+        for channel in 0..channels as usize {
+            let offset = channel * (BITS / 8) as usize;
+            // 0x7FFF: full-scale positive impulse in frame 0.
+            data[offset] = 0xFF;
+            data[offset + 1] = 0x7F;
+        }
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        let riff_size = 4 + (8 + 16) + (8 + data_len);
+        wav.extend_from_slice(&(riff_size as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * block_align as u32;
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&BITS.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        wav
+    }
+
+    fn manifest_json(sha256: &str) -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": DATASET_SCHEMA,
+            "format": SUPPORTED_DATASET_FORMAT,
+            "name": "Open synthetic surround HRIR",
+            "sha256": sha256,
+            "license": "CC-BY-4.0",
+            "source_url": "https://example.org/open-hrir",
+        }))
+        .expect("serialize manifest")
+    }
+
+    /// Writes an arbitrary `hrir.wav` plus a manifest whose SHA-256 matches it,
+    /// and returns that digest.
+    fn install_dataset_with_wav(dir: &Path, wav: &[u8]) -> String {
+        let digest = sha256_hex(wav);
+        fs::write(dir.join(HRIR_FILE_NAME), wav).expect("write hrir.wav");
+        fs::write(dir.join(MANIFEST_FILE_NAME), manifest_json(&digest)).expect("write manifest");
+        digest
+    }
+
+    /// Writes a fully valid dataset (manifest + matching 14-channel WAV) into
+    /// `dir` and returns the WAV's SHA-256.
+    fn install_valid_dataset(dir: &Path) -> String {
+        install_dataset_with_wav(dir, &synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000))
+    }
+
+    /// Wraps a caller-built `fmt ` chunk body and `data` payload into a RIFF
+    /// container, so tests can craft precise (and deliberately malformed) WAVs.
+    fn assemble_wav(fmt_body: &[u8], data: &[u8]) -> Vec<u8> {
+        let fmt_pad = fmt_body.len() & 1;
+        let data_pad = data.len() & 1;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        let riff_size = 4 + (8 + fmt_body.len() + fmt_pad) + (8 + data.len() + data_pad);
+        wav.extend_from_slice(&(riff_size as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(fmt_body);
+        if fmt_pad == 1 {
+            wav.push(0);
+        }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(data);
+        if data_pad == 1 {
+            wav.push(0);
+        }
+        wav
+    }
+
+    /// Builds a 16-byte WAVEFORMATEX `fmt ` body with fully explicit fields.
+    #[allow(clippy::too_many_arguments)]
+    fn pcm_fmt_body(
+        format_tag: u16,
+        channels: u16,
+        sample_rate: u32,
+        byte_rate: u32,
+        block_align: u16,
+        bits: u16,
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&format_tag.to_le_bytes());
+        body.extend_from_slice(&channels.to_le_bytes());
+        body.extend_from_slice(&sample_rate.to_le_bytes());
+        body.extend_from_slice(&byte_rate.to_le_bytes());
+        body.extend_from_slice(&block_align.to_le_bytes());
+        body.extend_from_slice(&bits.to_le_bytes());
+        body
+    }
+
+    /// Builds a 40-byte WAVE_FORMAT_EXTENSIBLE `fmt ` body with a caller-chosen
+    /// SubFormat GUID (first two bytes plus the 14-byte tail).
+    fn extensible_fmt_body(
+        channels: u16,
+        sample_rate: u32,
+        bits: u16,
+        sub_tag: [u8; 2],
+        guid_tail: [u8; 14],
+    ) -> Vec<u8> {
+        let block_align = channels * (bits / 8);
+        let byte_rate = sample_rate * block_align as u32;
+        let mut body = pcm_fmt_body(
+            WAVE_FORMAT_EXTENSIBLE,
+            channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bits,
+        );
+        body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+        body.extend_from_slice(&bits.to_le_bytes()); // wValidBitsPerSample
+        body.extend_from_slice(&0x0000_063Fu32.to_le_bytes()); // dwChannelMask (7.1)
+        body.extend_from_slice(&sub_tag);
+        body.extend_from_slice(&guid_tail);
+        body
+    }
+
+    /// A valid 14-channel WAVE_FORMAT_EXTENSIBLE PCM WAV.
+    fn extensible_pcm_wav(channels: u16, sample_rate: u32, bits: u16) -> Vec<u8> {
+        let fmt = extensible_fmt_body(
+            channels,
+            sample_rate,
+            bits,
+            [WAVE_FORMAT_PCM as u8, 0],
+            KSDATAFORMAT_SUBTYPE_TAIL,
+        );
+        let block_align = channels as usize * (bits / 8) as usize;
+        let data = vec![0u8; block_align * 4];
+        assemble_wav(&fmt, &data)
+    }
+
     #[test]
     fn default_profile_is_off_and_disabled() {
         let profile = SpatialProfile::default();
@@ -409,53 +1355,41 @@ mod tests {
 
     #[test]
     fn capability_report_is_ready_only_when_everything_is_present() {
-        let ready = capability_report(true, true, true);
+        let ready = capability_report(true, true, valid_dataset_report());
         assert!(ready.ready);
         assert!(ready.error.is_none());
+        assert!(ready.hrtf_dataset_present);
 
-        let missing_pipewire = capability_report(false, true, true);
+        let missing_pipewire = capability_report(false, true, valid_dataset_report());
         assert!(!missing_pipewire.ready);
-        assert!(missing_pipewire
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("pipewire"));
+        assert!(
+            missing_pipewire
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("pipewire")
+        );
 
-        let missing_module = capability_report(true, false, true);
+        let missing_module = capability_report(true, false, valid_dataset_report());
         assert!(!missing_module.ready);
-        assert!(missing_module
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("filter-chain"));
+        assert!(
+            missing_module
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("filter-chain")
+        );
 
-        let missing_dataset = capability_report(true, true, false);
+        let missing_dataset = capability_report(true, true, invalid_dataset_report());
         assert!(!missing_dataset.ready);
-        assert!(missing_dataset
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("HRTF"));
-    }
-
-    #[test]
-    fn hrtf_dataset_presence_reflects_the_filesystem_only() {
-        let directory = TemporaryDirectory::new();
-        let dataset_directory = directory.0.join("hrtf");
-        assert!(!hrtf_dataset_present_at(&dataset_directory));
-
-        fs::create_dir_all(&dataset_directory).expect("create dataset directory");
-        assert!(!hrtf_dataset_present_at(&dataset_directory));
-
-        fs::write(dataset_directory.join("left.wav"), b"placeholder")
-            .expect("write placeholder dataset file");
-        assert!(hrtf_dataset_present_at(&dataset_directory));
+        assert!(!missing_dataset.hrtf_dataset_present);
+        assert!(missing_dataset.error.as_deref().unwrap().contains("HRTF"));
     }
 
     #[test]
     fn enabling_without_capability_returns_an_actionable_error_and_does_not_change_the_profile() {
         let profile = SpatialProfile::default();
-        let not_ready = capability_report(false, false, false);
+        let not_ready = capability_report(false, false, invalid_dataset_report());
         let error = enabled_profile(&profile, true, &not_ready)
             .expect_err("enabling without capability must fail");
         assert!(error.contains("spatial capability unavailable"));
@@ -465,7 +1399,7 @@ mod tests {
     #[test]
     fn enabling_with_capability_selects_the_open_binaural_mode() {
         let profile = SpatialProfile::default();
-        let ready = capability_report(true, true, true);
+        let ready = capability_report(true, true, valid_dataset_report());
         let next = enabled_profile(&profile, true, &ready).expect("enable with capability");
         assert!(next.enabled);
         assert_eq!(next.mode, SpatialMode::BinauralStereo);
@@ -478,7 +1412,7 @@ mod tests {
             enabled: true,
             mode: SpatialMode::BinauralStereo,
         };
-        let not_ready = capability_report(false, false, false);
+        let not_ready = capability_report(false, false, invalid_dataset_report());
         let next = enabled_profile(&profile, false, &not_ready).expect("disable always succeeds");
         assert!(!next.enabled);
     }
@@ -550,6 +1484,536 @@ mod tests {
     fn missing_profile_file_loads_the_disabled_default() {
         let directory = TemporaryDirectory::new();
         let path = directory.profile_path();
-        assert_eq!(load_from_path(&path).expect("default profile"), SpatialProfile::default());
+        assert_eq!(
+            load_from_path(&path).expect("default profile"),
+            SpatialProfile::default()
+        );
+    }
+
+    #[test]
+    fn sha256_matches_known_answers() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn valid_dataset_is_accepted_and_flags_human_legal_review() {
+        let directory = TemporaryDirectory::new();
+        let digest = install_valid_dataset(&directory.0);
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(
+            report.valid,
+            "expected valid dataset, got: {:?}",
+            report.error
+        );
+        assert_eq!(report.channels, Some(REQUIRED_HRIR_CHANNELS));
+        assert_eq!(report.sample_rate, Some(48_000));
+        assert_eq!(report.expected_sha256.as_deref(), Some(digest.as_str()));
+        assert_eq!(report.observed_sha256.as_deref(), Some(digest.as_str()));
+        assert_eq!(report.license.as_deref(), Some("CC-BY-4.0"));
+        assert_eq!(
+            report.source_url.as_deref(),
+            Some("https://example.org/open-hrir")
+        );
+        // License/provenance clearance is never satisfied automatically.
+        assert!(report.legal_review_required);
+    }
+
+    #[test]
+    fn missing_manifest_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("manifest.json"));
+    }
+
+    #[test]
+    fn missing_hrir_file_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        let digest = sha256_hex(&wav);
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest_json(&digest))
+            .expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("hrir.wav"));
+    }
+
+    #[test]
+    fn malformed_manifest_json_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        install_valid_dataset(&directory.0);
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), b"{ not json").expect("corrupt manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+    }
+
+    #[test]
+    fn manifest_missing_required_field_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        let digest = sha256_hex(&wav);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+        let manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "schema": DATASET_SCHEMA,
+            "format": SUPPORTED_DATASET_FORMAT,
+            "name": "Open synthetic surround HRIR",
+            "sha256": digest,
+            "license": "   ",
+            "source_url": "https://example.org/open-hrir",
+        }))
+        .expect("serialize manifest");
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest).expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("license"));
+    }
+
+    #[test]
+    fn manifest_vendor_branding_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        let digest = sha256_hex(&wav);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+        let manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "schema": DATASET_SCHEMA,
+            "format": SUPPORTED_DATASET_FORMAT,
+            "name": "DTS Headphone X clone",
+            "sha256": digest,
+            "license": "CC-BY-4.0",
+            "source_url": "https://example.org/open-hrir",
+        }))
+        .expect("serialize manifest");
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest).expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("vendor-neutral"));
+    }
+
+    #[test]
+    fn sha256_mismatch_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+        let wrong = "0".repeat(64);
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest_json(&wrong))
+            .expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("SHA-256"));
+        // Both the expected and observed digests are surfaced for diagnosis.
+        assert!(report.observed_sha256.is_some());
+    }
+
+    #[test]
+    fn wrong_channel_count_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(8, 48_000);
+        let digest = sha256_hex(&wav);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest_json(&digest))
+            .expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert_eq!(report.channels, Some(8));
+        assert!(report.error.as_deref().unwrap().contains("14 channels"));
+    }
+
+    #[test]
+    fn non_wav_payload_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let junk = b"this is definitely not a wav file".to_vec();
+        let digest = sha256_hex(&junk);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &junk).expect("write hrir.wav");
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest_json(&digest))
+            .expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("RIFF"));
+    }
+
+    #[test]
+    fn missing_dataset_directory_reports_actionable_error() {
+        let directory = TemporaryDirectory::new();
+        let absent = directory.0.join("does-not-exist");
+        let report = validate_dataset_directory(&absent);
+        assert!(!report.valid);
+        assert!(report.error.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_hrir_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        // Real WAV lives outside the dataset dir; only a symlink points in.
+        let outside = directory.0.join("outside.wav");
+        fs::write(&outside, &wav).expect("write outside wav");
+        let digest = sha256_hex(&wav);
+        symlink(&outside, directory.0.join(HRIR_FILE_NAME)).expect("create symlink");
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest_json(&digest))
+            .expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("symbolic link"));
+    }
+
+    #[test]
+    fn ieee_float_format_tag_is_accepted() {
+        // Hand-build a 14-channel IEEE-float (tag 3) WAV and confirm the
+        // convolver-readability gate accepts it.
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let bits: u16 = 32;
+        let frames = 2usize;
+        let block_align = channels * (bits / 8);
+        let data_len = frames * block_align as usize;
+        let data = vec![0u8; data_len];
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        let riff_size = 4 + (8 + 16) + (8 + data_len);
+        wav.extend_from_slice(&(riff_size as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        let byte_rate = 48_000u32 * block_align as u32;
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+
+        let info = parse_wav(&wav).expect("parse float wav");
+        assert_eq!(info.format_tag, 3);
+        assert_eq!(info.channels, channels);
+        validate_wav_format(&info).expect("float wav is a valid combination");
+    }
+
+    #[test]
+    fn sha256_multi_block_matches_known_answers() {
+        // 56-byte message: padding overflows into a second compression block.
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // One million 'a': thousands of blocks (classic NIST vector).
+        let million = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha256_hex(&million),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn sha256_incremental_matches_one_shot() {
+        let data: Vec<u8> = (0..1000u32).map(|value| (value % 251) as u8).collect();
+        let one_shot = sha256_hex(&data);
+        for chunk in [1usize, 7, 31, 63, 64, 65, 128] {
+            let mut hasher = Sha256::new();
+            for piece in data.chunks(chunk) {
+                hasher.update(piece);
+            }
+            assert_eq!(
+                hex_encode(&hasher.finalize()),
+                one_shot,
+                "incremental hashing with chunk size {chunk} must match one-shot"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_extensible_pcm_dataset_is_accepted() {
+        let directory = TemporaryDirectory::new();
+        let wav = extensible_pcm_wav(REQUIRED_HRIR_CHANNELS, 48_000, 16);
+        install_dataset_with_wav(&directory.0, &wav);
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(
+            report.valid,
+            "expected valid dataset, got: {:?}",
+            report.error
+        );
+        assert_eq!(report.channels, Some(REQUIRED_HRIR_CHANNELS));
+        assert_eq!(report.sample_rate, Some(48_000));
+    }
+
+    #[test]
+    fn extensible_float_subformat_is_recognized() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let bits = 32u16;
+        let fmt = extensible_fmt_body(
+            channels,
+            48_000,
+            bits,
+            [WAVE_FORMAT_IEEE_FLOAT as u8, 0],
+            KSDATAFORMAT_SUBTYPE_TAIL,
+        );
+        let data = vec![0u8; channels as usize * (bits / 8) as usize * 2];
+        let wav = assemble_wav(&fmt, &data);
+
+        let info = parse_wav(&wav).expect("parse extensible float wav");
+        assert_eq!(info.format_tag, WAVE_FORMAT_IEEE_FLOAT);
+        validate_wav_format(&info).expect("extensible float is valid");
+    }
+
+    #[test]
+    fn extensible_with_unknown_subformat_guid_is_rejected() {
+        let mut tail = KSDATAFORMAT_SUBTYPE_TAIL;
+        tail[13] ^= 0xFF; // corrupt the final GUID byte
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let bits = 16u16;
+        let fmt = extensible_fmt_body(channels, 48_000, bits, [WAVE_FORMAT_PCM as u8, 0], tail);
+        let data = vec![0u8; channels as usize * (bits / 8) as usize * 4];
+        let wav = assemble_wav(&fmt, &data);
+
+        let error = parse_wav(&wav).expect_err("unknown SubFormat GUID must be rejected");
+        assert!(error.contains("SubFormat GUID"));
+    }
+
+    #[test]
+    fn wav_block_align_mismatch_is_rejected() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let good_block_align = channels * 2;
+        let byte_rate = 48_000 * good_block_align as u32;
+        let fmt = pcm_fmt_body(
+            WAVE_FORMAT_PCM,
+            channels,
+            48_000,
+            byte_rate,
+            good_block_align + 2, // wrong
+            16,
+        );
+        let data = vec![0u8; good_block_align as usize * 4];
+        let info = parse_wav(&assemble_wav(&fmt, &data)).expect("parse");
+        let error = validate_wav_format(&info).expect_err("bad block align");
+        assert!(error.contains("block align"));
+    }
+
+    #[test]
+    fn wav_byte_rate_mismatch_is_rejected() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let block_align = channels * 2;
+        let fmt = pcm_fmt_body(
+            WAVE_FORMAT_PCM,
+            channels,
+            48_000,
+            48_000 * block_align as u32 + 1, // wrong
+            block_align,
+            16,
+        );
+        let data = vec![0u8; block_align as usize * 4];
+        let info = parse_wav(&assemble_wav(&fmt, &data)).expect("parse");
+        let error = validate_wav_format(&info).expect_err("bad byte rate");
+        assert!(error.contains("byte rate"));
+    }
+
+    #[test]
+    fn wav_partial_frame_data_is_rejected() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let block_align = channels * 2;
+        let fmt = pcm_fmt_body(
+            WAVE_FORMAT_PCM,
+            channels,
+            48_000,
+            48_000 * block_align as u32,
+            block_align,
+            16,
+        );
+        // One byte more than a whole number of frames.
+        let data = vec![0u8; block_align as usize + 1];
+        let info = parse_wav(&assemble_wav(&fmt, &data)).expect("parse");
+        let error = validate_wav_format(&info).expect_err("partial frame");
+        assert!(error.contains("whole number"));
+    }
+
+    #[test]
+    fn wav_invalid_format_bit_depth_combination_is_rejected() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let bits = 16u16; // invalid for IEEE float
+        let block_align = channels * (bits / 8);
+        let fmt = pcm_fmt_body(
+            WAVE_FORMAT_IEEE_FLOAT,
+            channels,
+            48_000,
+            48_000 * block_align as u32,
+            block_align,
+            bits,
+        );
+        let data = vec![0u8; block_align as usize * 2];
+        let info = parse_wav(&assemble_wav(&fmt, &data)).expect("parse");
+        let error = validate_wav_format(&info).expect_err("float must be 32/64-bit");
+        assert!(error.contains("PCM/float combination"));
+    }
+
+    #[test]
+    fn wav_odd_bit_depth_is_rejected() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let fmt = pcm_fmt_body(WAVE_FORMAT_PCM, channels, 48_000, 48_000, 1, 12);
+        let data = vec![0u8; 32];
+        let info = parse_wav(&assemble_wav(&fmt, &data)).expect("parse");
+        let error = validate_wav_format(&info).expect_err("bit depth must be a multiple of 8");
+        assert!(error.contains("multiple of 8"));
+    }
+
+    #[test]
+    fn read_file_limited_enforces_the_bound() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.0.join("payload.bin");
+        fs::write(&path, vec![0u8; 100]).expect("write payload");
+
+        assert!(read_file_limited(&path, 50).is_err());
+        assert_eq!(
+            read_file_limited(&path, 100)
+                .expect("exactly at limit")
+                .len(),
+            100
+        );
+        assert_eq!(
+            read_file_limited(&path, 200).expect("under limit").len(),
+            100
+        );
+    }
+
+    #[test]
+    fn oversized_manifest_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        install_valid_dataset(&directory.0);
+        fs::write(
+            directory.0.join(MANIFEST_FILE_NAME),
+            vec![b' '; (MAX_MANIFEST_BYTES + 1) as usize],
+        )
+        .expect("write oversized manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("limit"));
+    }
+
+    #[test]
+    fn extensible_cbsize_overflowing_chunk_is_rejected() {
+        let channels = REQUIRED_HRIR_CHANNELS;
+        let mut fmt = extensible_fmt_body(
+            channels,
+            48_000,
+            16,
+            [WAVE_FORMAT_PCM as u8, 0],
+            KSDATAFORMAT_SUBTYPE_TAIL,
+        );
+        // Claim a 40-byte extension while the chunk only holds 22 bytes of it.
+        fmt[16..18].copy_from_slice(&40u16.to_le_bytes());
+        let data = vec![0u8; channels as usize * 2 * 4];
+        let wav = assemble_wav(&fmt, &data);
+
+        let error = parse_wav(&wav).expect_err("cbSize overflowing the chunk must be rejected");
+        assert!(error.contains("cbSize"));
+    }
+
+    #[test]
+    fn manifest_non_http_source_url_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        let digest = sha256_hex(&wav);
+        fs::write(directory.0.join(HRIR_FILE_NAME), &wav).expect("write hrir.wav");
+        let manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "schema": DATASET_SCHEMA,
+            "format": SUPPORTED_DATASET_FORMAT,
+            "name": "Open synthetic surround HRIR",
+            "sha256": digest,
+            "license": "CC-BY-4.0",
+            "source_url": "ftp://example.org/hrir",
+        }))
+        .expect("serialize manifest");
+        fs::write(directory.0.join(MANIFEST_FILE_NAME), manifest).expect("write manifest");
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert!(report.error.as_deref().unwrap().contains("source_url"));
+    }
+
+    #[test]
+    fn source_url_validation_requires_a_real_host() {
+        for good in [
+            "https://example.org/open-hrir",
+            "http://example.org",
+            "https://example.org",
+            "https://host.example:8443/path?q=1#frag",
+            "https://user@host.example/path",
+            "https://[2001:db8::1]:8443/path",
+        ] {
+            assert!(validate_source_url(good).is_ok(), "{good} should be valid");
+        }
+
+        for bad in [
+            "https://?query",
+            "https://#fragment",
+            "https:///path",
+            "https://   /hrir.wav", // authority is only spaces
+            "https:// ",
+            "https://\t/x",
+            "https://exa mple.org",
+            "https://user@", // userinfo but empty host
+            "https://:8443/path",
+            "ftp://example.org",
+            "example.org",
+            "",
+        ] {
+            assert!(
+                validate_source_url(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_sample_rate_is_rejected() {
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 96_000);
+        install_dataset_with_wav(&directory.0, &wav);
+
+        let report = validate_dataset_directory(&directory.0);
+        assert!(!report.valid);
+        assert_eq!(report.sample_rate, Some(96_000));
+        assert!(report.error.as_deref().unwrap().contains("sample rate"));
+    }
+
+    #[test]
+    fn supported_sample_rates_are_accepted() {
+        for rate in SUPPORTED_SAMPLE_RATES {
+            let directory = TemporaryDirectory::new();
+            let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, rate);
+            install_dataset_with_wav(&directory.0, &wav);
+
+            let report = validate_dataset_directory(&directory.0);
+            assert!(
+                report.valid,
+                "{rate} Hz should be valid: {:?}",
+                report.error
+            );
+            assert_eq!(report.sample_rate, Some(rate));
+        }
     }
 }
