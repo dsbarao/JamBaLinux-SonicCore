@@ -239,25 +239,6 @@ PlasmoidItem {
         equalizerVisualRevision += 1
     }
 
-    function equalizerStatusText() {
-        if (equalizerDefaultSafe === false)
-            return "Automático · restaurando a saída padrão"
-        if (equalizerError.length > 0)
-            return "Automático · indisponível"
-        if (equalizerPipeWireActive) {
-            return equalizerTarget.length > 0
-                ? `Automático · ativo na rota Game: ${equalizerTarget}`
-                : "Automático · ativo na rota Game"
-        }
-        if (equalizerTargetConnected === false)
-            return "Automático · aguardando a rota Game do headset"
-        if (equalizerServiceActive === true)
-            return "Automático · preparando a rota Game"
-        if (equalizerServiceActive === false)
-            return "Automático · serviço indisponível"
-        return "Automático · verificando o PipeWire"
-    }
-
     function equalizerProblemText() {
         if (equalizerDefaultSafe === false) {
             return "A saída virtual não pode ser a saída padrão. A restauração automática para a saída física está em andamento."
@@ -743,12 +724,11 @@ PlasmoidItem {
 
                 PlasmaComponents.Label {
                     Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection !== "equalizer"
                     text: root.openSection === "ambient"
                         ? `Atual: ${root.ambientLabel(root.ambientMode)}`
                         : root.openSection === "lighting"
                             ? root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
-                            : root.openSection === "equalizer"
-                                ? root.equalizerStatusText()
                             : root.openSection === "spatial"
                                 ? root.spatialStatusText()
                             : `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
@@ -870,16 +850,6 @@ PlasmoidItem {
                         text: "Zerar bandas"
                         icon.name: "edit-clear"
                         onClicked: root.resetEqualizer()
-                    }
-
-                    PlasmaComponents.Label {
-                        Layout.fillWidth: true
-                        text: root.equalizerPipeWireActive
-                            ? "A rota Game é processada automaticamente; Chat, microfone e a saída padrão permanecem fora da cadeia."
-                            : "O equalizador se conecta automaticamente quando a rota Game fica disponível; Chat e microfone permanecem fora da cadeia."
-                        wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
-                        opacity: 0.7
                     }
 
                     PlasmaComponents.Label {
