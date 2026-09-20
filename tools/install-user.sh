@@ -10,6 +10,8 @@ readonly SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore.ser
 readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service"
 readonly EQUALIZER_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore-equalizer.service"
 readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
+readonly SPATIAL_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore-spatial.service"
+readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore.desktop"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 
@@ -34,6 +36,7 @@ check_prerequisites() {
     [[ -f "$PLASMOID_SOURCE/metadata.json" ]] || fail "pacote Plasma não encontrado"
     [[ -f "$SERVICE_SOURCE" ]] || fail "serviço systemd não encontrado"
     [[ -f "$EQUALIZER_SERVICE_SOURCE" ]] || fail "serviço systemd do equalizador não encontrado"
+    [[ -f "$SPATIAL_SERVICE_SOURCE" ]] || fail "serviço systemd espacial não encontrado"
     [[ -f "$LAUNCHER_SOURCE" ]] || fail "lançador KDE não encontrado"
 }
 
@@ -57,15 +60,18 @@ fi
 
 install -Dm644 "$SERVICE_SOURCE" "$SERVICE_TARGET"
 install -Dm644 "$EQUALIZER_SERVICE_SOURCE" "$EQUALIZER_SERVICE_TARGET"
+install -Dm644 "$SPATIAL_SERVICE_SOURCE" "$SPATIAL_SERVICE_TARGET"
 install -Dm644 "$LAUNCHER_SOURCE" "$LAUNCHER_TARGET"
 systemctl --user daemon-reload
 systemctl --user enable jambalinux-soniccore.service
 systemctl --user enable jambalinux-soniccore-equalizer.service
+systemctl --user enable jambalinux-soniccore-spatial.service
 # Installation is the controlled deployment boundary: restart once here so an
 # already-running service cannot keep an older binary. Band changes never use
 # systemctl and update the persistent equalizer node in place.
 systemctl --user restart jambalinux-soniccore.service
 systemctl --user restart jambalinux-soniccore-equalizer.service
+systemctl --user restart jambalinux-soniccore-spatial.service
 
 printf '\nJamBaLinux SonicCore instalado para o usuário atual.\n'
 printf 'O Plasma não foi reiniciado automaticamente.\n'

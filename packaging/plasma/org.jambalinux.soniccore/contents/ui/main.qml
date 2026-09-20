@@ -16,6 +16,8 @@ PlasmoidItem {
     readonly property string cachedCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore cached-status --format json\""
     readonly property string equalizerCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore equalizer status --format json\""
     readonly property string spatialCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial status --format json\""
+    readonly property string spatialEnableCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial enable\""
+    readonly property string spatialDisableCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial disable\""
     readonly property url equipmentImage: Qt.resolvedUrl("../images/jbl-quantum-810.png")
     property int batteryPercent: -1
     property bool charging: false
@@ -60,10 +62,15 @@ PlasmoidItem {
     property int pendingEqualizerFrequency: 0
     property real pendingEqualizerGain: 0
     property bool spatialUpdating: false
+    property bool spatialBusy: false
     property bool spatialEnabled: false
     property string spatialMode: "off"
     property bool spatialReady: false
+    property bool spatialDatasetValid: false
+    property bool spatialActive: false
+    property bool spatialServiceActive: false
     property string spatialError: ""
+    property string spatialActionMessage: ""
     readonly property var equalizerFrequencies: [
         31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
     ]
@@ -131,21 +138,37 @@ PlasmoidItem {
         equalizerExecutable.connectSource(equalizerCommand)
     }
 
-    // Read-only: this only queries the experimental spatial/binaural gate and
-    // capability preflight. It never enables, disables, or configures spatial
-    // audio, and the widget exposes no control that could.
     function refreshSpatial() {
-        if (spatialUpdating) return
+        if (spatialUpdating || spatialBusy) return
         spatialUpdating = true
         spatialExecutable.connectSource(spatialCommand)
     }
 
+    function setSpatialEnabled(enabled) {
+        if (spatialBusy || spatialUpdating) return
+        // The CLI repeats this check before persisting the gate. Keeping the
+        // action unavailable here avoids a misleading optimistic toggle.
+        if (enabled && !spatialReady) {
+            spatialError = "A capacidade espacial não está pronta; instale manualmente um dataset HRIR válido e execute a pré-verificação."
+            return
+        }
+        spatialBusy = true
+        spatialActionMessage = enabled ? "Preparando o áudio espacial…" : "Desativando o áudio espacial…"
+        spatialControlExecutable.connectSource(enabled ? spatialEnableCommand : spatialDisableCommand)
+    }
+
     function spatialStatusText() {
+        if (root.spatialBusy)
+            return root.spatialActionMessage
+        if (!root.spatialDatasetValid)
+            return "Dataset HRIR ausente ou inválido"
         if (!root.spatialEnabled)
-            return "Desativado por padrão (experimental)"
-        if (!root.spatialReady)
-            return "Ativado na configuração · capacidade indisponível"
-        return `Ativado na configuração · modo ${root.spatialMode} · sem processamento de áudio`
+            return "Desativado"
+        if (root.spatialActive)
+            return `Ativo · modo ${root.spatialMode}`
+        if (root.spatialError.length > 0)
+            return "Erro · áudio espacial não está ativo"
+        return root.spatialServiceActive ? "Preparando o processamento espacial" : "Preparando o serviço espacial"
     }
 
     function setEqualizerBand(frequencyHz, gainDb) {
@@ -1190,22 +1213,46 @@ PlasmoidItem {
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        text: "Recurso experimental e desativado por padrão. Este painel é somente leitura: nenhuma opção aqui liga áudio espacial/binaural."
+                        text: "Recurso experimental. Ative somente após instalar manualmente um dataset HRIR válido; o widget nunca baixa arquivos."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
                         opacity: 0.7
                     }
 
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+
+                        PlasmaComponents.Switch {
+                            id: spatialToggle
+                            text: "Ativar áudio espacial"
+                            checked: root.spatialEnabled
+                            enabled: !root.spatialBusy && !root.spatialUpdating
+                                && (root.spatialEnabled || root.spatialReady)
+                            onClicked: root.setSpatialEnabled(checked)
+                        }
+
+                        PlasmaComponents.BusyIndicator {
+                            running: root.spatialBusy || root.spatialUpdating
+                            visible: running
+                        }
+                    }
+
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        text: root.spatialReady
-                            ? "Capacidade: componentes necessários detectados"
-                            : "Capacidade: indisponível (ver soniccore spatial preflight)"
+                        text: !root.spatialDatasetValid
+                            ? "Dataset: ausente ou inválido — adicione-o manualmente em spatial/hrtf/"
+                            : root.spatialActive
+                                ? "Estado: ativo e saudável"
+                                : root.spatialEnabled
+                                    ? "Estado: preparando; aguardando um caminho saudável"
+                                    : "Estado: desativado"
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
-                        color: root.spatialReady
+                        color: root.spatialActive
                             ? Kirigami.Theme.positiveTextColor
-                            : Kirigami.Theme.neutralTextColor
+                            : root.spatialError.length > 0
+                                ? Kirigami.Theme.negativeTextColor
+                                : Kirigami.Theme.neutralTextColor
                     }
 
                     PlasmaComponents.Label {
@@ -1219,7 +1266,7 @@ PlasmoidItem {
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        text: "Use a CLI `soniccore spatial` para consultar ou alterar a configuração fora deste widget."
+                        text: "No jogo, selecione a saída espacial JamBaLinux. A saída de áudio padrão do sistema nunca é alterada."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
                         opacity: 0.6
@@ -1371,9 +1418,6 @@ PlasmoidItem {
         }
     }
 
-    // Read-only status query for the experimental spatial/binaural gate. This
-    // DataSource only ever runs `soniccore spatial status --format json`; it
-    // has no write/set counterpart and cannot enable anything.
     Plasma5Support.DataSource {
         id: spatialExecutable
         engine: "executable"
@@ -1388,6 +1432,9 @@ PlasmoidItem {
                 root.spatialEnabled = false
                 root.spatialMode = "off"
                 root.spatialReady = false
+                root.spatialDatasetValid = false
+                root.spatialActive = false
+                root.spatialServiceActive = false
                 root.spatialError = stderr || "Não foi possível consultar o estado espacial"
                 return
             }
@@ -1395,15 +1442,39 @@ PlasmoidItem {
                 const result = JSON.parse(stdout)
                 root.spatialEnabled = result.enabled === true
                 root.spatialMode = String(result.mode ?? "off")
+                root.spatialActive = result.active === true
+                root.spatialServiceActive = result.service_active === true
                 const capability = result.capability ?? {}
                 root.spatialReady = capability.ready === true
-                root.spatialError = String(capability.error ?? "")
+                const dataset = capability.dataset ?? {}
+                root.spatialDatasetValid = result.dataset_valid === true || dataset.valid === true
+                root.spatialError = root.spatialEnabled
+                    ? String(result.error ?? capability.error ?? "")
+                    : ""
             } catch (error) {
                 root.spatialEnabled = false
                 root.spatialMode = "off"
                 root.spatialReady = false
+                root.spatialDatasetValid = false
+                root.spatialActive = false
+                root.spatialServiceActive = false
                 root.spatialError = `Resposta inválida do estado espacial: ${error}`
             }
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: spatialControlExecutable
+        engine: "executable"
+
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            root.spatialBusy = false
+            const exitCode = Number(data["exit code"] ?? -1)
+            const stderr = String(data.stderr ?? "").trim()
+            if (exitCode !== 0)
+                root.spatialError = stderr || "Não foi possível alterar o áudio espacial"
+            root.refreshSpatial()
         }
     }
 
@@ -1449,5 +1520,13 @@ PlasmoidItem {
         running: true
         triggeredOnStart: true
         onTriggered: root.refresh()
+    }
+
+    Timer {
+        interval: 15000
+        repeat: true
+        running: root.openSection === "spatial"
+        triggeredOnStart: true
+        onTriggered: root.refreshSpatial()
     }
 }

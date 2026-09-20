@@ -1096,8 +1096,17 @@ fn moded_profile(profile: &SpatialProfile, mode: SpatialMode) -> Result<SpatialP
 pub fn set_enabled(enabled: bool) -> Result<SpatialProfile, String> {
     let _lock = mutation_lock()?;
     let profile = load()?;
-    let capability = preflight()?;
-    let next = enabled_profile(&profile, enabled, &capability)?;
+    // Disabling is the recovery path.  It must remain available when the
+    // dataset, PipeWire installation, or another preflight prerequisite has
+    // disappeared, so only an enable request performs the read-only check.
+    let next = if enabled {
+        let capability = preflight()?;
+        enabled_profile(&profile, true, &capability)?
+    } else {
+        let mut next = profile;
+        next.enabled = false;
+        validate(next)?
+    };
     save(&next)?;
     Ok(next)
 }
