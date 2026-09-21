@@ -241,6 +241,39 @@ healthy. See
 [`docs/protocol/audio-processing.md`](docs/protocol/audio-processing.md) for the
 architecture, acceptance evidence, and measurement boundary.
 
+#### Equalizer profiles
+
+The 17 captured profiles are immutable factory presets. Named custom profiles
+are user-owned data, stored next to the active bands in
+`$XDG_CONFIG_HOME/jambalinux-soniccore/equalizer.json`:
+
+```bash
+soniccore equalizer preset fps                     # select a factory preset
+soniccore equalizer profile create "Noite"         # save the current bands
+soniccore equalizer profile list
+soniccore equalizer profile list --format json
+soniccore equalizer profile apply custom-4711-0
+soniccore equalizer profile rename custom-4711-0 "Noite calma"
+soniccore equalizer profile update custom-4711-0   # overwrite with active bands
+soniccore equalizer profile delete custom-4711-0
+```
+
+The `profile` subcommands accept only custom profile IDs: factory presets
+cannot be applied, updated, renamed, or deleted through them, and
+`equalizer preset <id>` remains their dedicated selector. Deleting the selected
+profile applies **Flat** in the same transaction. The widget's equalizer section
+offers the same operations through a profile selector plus **Criar perfil**,
+**Atualizar**, **Renomear**, and **Excluir**, and reads its list from
+`soniccore equalizer status --format json`, which also reports
+`active_profile_id` and `custom_profiles`. An earlier single-profile
+`equalizer.json` is migrated automatically, preserving a hand-tuned setting as a
+custom profile named `Personalizado`.
+
+Profiles are host-side DSP settings: none of these commands opens the headset,
+sends a USB or HID report, or changes what is processed — only the confirmed
+Quantum Game output is, while Chat, capture sources, and the microphone stay
+outside the chain.
+
 ### Experimental open spatial/binaural processing (disabled by default)
 
 `soniccore spatial` controls an explicit, disabled-by-default open
@@ -346,7 +379,8 @@ Device Control and solid RGB lighting already have confirmed implementations
 for the first supported headset. Animation effects are documented research,
 not selectable Linux controls. Game/Chat currently displays the physical dial
 state. A persistent user service implements a customizable 10-band host-side
-equalizer for streams already destined for Game; routing is automatic and
+equalizer for streams already destined for Game, with immutable factory presets
+plus a user-owned library of named custom profiles; routing is automatic and
 reversible, while Chat, microphone, and the system default route remain outside
 the processing policy. Its current filters are a Linux approximation, not a
 claim of QuantumENGINE parity. Real PipeWire/headset acceptance on 2026-09-19
