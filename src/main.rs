@@ -1412,7 +1412,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <id>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -1438,12 +1438,24 @@ fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<
             };
             println!("  {frequency:>6}: {:+.1}", band.gain_db);
         }
-        println!(
-            "Preset: {}",
-            equalizer::matching_preset(profile)
-                .map(|preset| preset.name)
-                .unwrap_or("Custom")
-        );
+        let selection = profile
+            .active_profile_id
+            .as_deref()
+            .and_then(|id| {
+                equalizer::PRESETS
+                    .iter()
+                    .find(|preset| preset.id == id)
+                    .map(|preset| preset.name.to_owned())
+                    .or_else(|| {
+                        profile
+                            .custom_profiles
+                            .iter()
+                            .find(|custom| custom.id == id)
+                            .map(|custom| custom.name.clone())
+                    })
+            })
+            .unwrap_or_else(|| "Manual (not saved as a profile)".to_owned());
+        println!("Selected: {selection}");
     }
     Ok(())
 }
@@ -1452,6 +1464,8 @@ fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<
 struct EqualizerStatusOutput {
     schema: u8,
     bands: Vec<equalizer::Band>,
+    active_profile_id: Option<String>,
+    custom_profiles: Vec<equalizer::CustomEqualizerProfile>,
     preset: Option<&'static str>,
     pipewire: pipewire::Status,
 }
@@ -1466,6 +1480,8 @@ fn print_equalizer_status(json: bool) -> Result<(), String> {
             serde_json::to_string_pretty(&EqualizerStatusOutput {
                 schema: profile.schema,
                 bands: profile.bands,
+                active_profile_id: profile.active_profile_id,
+                custom_profiles: profile.custom_profiles,
                 preset,
                 pipewire,
             })
@@ -1511,6 +1527,175 @@ fn commit_equalizer_profile(
         ));
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct EqualizerCustomProfileListOutput<'a> {
+    schema: u8,
+    active_profile_id: Option<&'a str>,
+    custom_profiles: &'a [equalizer::CustomEqualizerProfile],
+}
+
+fn print_equalizer_custom_profiles(
+    profile: &equalizer::EqualizerProfile,
+    json: bool,
+) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&EqualizerCustomProfileListOutput {
+                schema: profile.schema,
+                active_profile_id: profile.active_profile_id.as_deref(),
+                custom_profiles: &profile.custom_profiles,
+            })
+            .map_err(|error| error.to_string())?
+        );
+    } else if profile.custom_profiles.is_empty() {
+        println!("No custom equalizer profiles.");
+    } else {
+        println!("Custom equalizer profiles:");
+        for custom in &profile.custom_profiles {
+            let selected = if profile.active_profile_id.as_deref() == Some(&custom.id) {
+                " (selected)"
+            } else {
+                ""
+            };
+            println!("  {}: {}{selected}", custom.id, custom.name);
+        }
+    }
+    Ok(())
+}
+
+/// Handles only user-owned profile-library operations. Factory presets remain
+/// available exclusively through `equalizer preset <id>`.
+fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        Some("list") => match args.next().as_deref() {
+            None => {
+                print_equalizer_custom_profiles(&equalizer::load()?, false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_equalizer_custom_profiles(&equalizer::load()?, true)?;
+                Ok(true)
+            }
+            _ => Err("equalizer profile list accepts only --format json".into()),
+        },
+        Some("create") => {
+            let name = args
+                .next()
+                .ok_or("equalizer profile create requires a profile name")?;
+            if args.next().is_some() {
+                return Err("equalizer profile create accepts exactly one profile name".into());
+            }
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            let requested = equalizer::create_custom_profile(&previous, &name)?;
+            commit_equalizer_profile(&previous, &requested)?;
+            let created = requested
+                .custom_profiles
+                .iter()
+                .find(|custom| requested.active_profile_id.as_deref() == Some(&custom.id))
+                .expect("newly created custom profile is selected");
+            println!(
+                "Created custom equalizer profile `{}` ({})",
+                created.name, created.id
+            );
+            Ok(true)
+        }
+        Some("apply") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile apply requires a custom profile id")?;
+            if args.next().is_some() {
+                return Err("equalizer profile apply accepts exactly one custom profile id".into());
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err(
+                    "factory equalizer presets must be selected with `equalizer preset <id>`"
+                        .into(),
+                );
+            }
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            let requested = equalizer::select_profile(&previous, &id)?;
+            commit_equalizer_profile(&previous, &requested)?;
+            print_equalizer(&requested, false)?;
+            Ok(true)
+        }
+        Some("update") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile update requires a custom profile id")?;
+            if args.next().is_some() {
+                return Err(
+                    "equalizer profile update accepts exactly one custom profile id".into(),
+                );
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err("factory equalizer presets are immutable".into());
+            }
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            // Capture the currently active ten bands. The live transaction is
+            // deliberately retained even when the bands do not change, so the
+            // DSP readback succeeds before the library mutation is persisted.
+            let requested =
+                equalizer::update_custom_profile(&previous, &id, previous.bands.clone())?;
+            commit_equalizer_profile(&previous, &requested)?;
+            println!("Updated custom equalizer profile `{id}` from the active bands");
+            Ok(true)
+        }
+        Some("rename") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile rename requires a custom profile id")?;
+            let name = args
+                .next()
+                .ok_or("equalizer profile rename requires a profile name")?;
+            if args.next().is_some() {
+                return Err("equalizer profile rename accepts exactly one id and one name".into());
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err("factory equalizer presets are immutable".into());
+            }
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            let requested = equalizer::rename_custom_profile(&previous, &id, &name)?;
+            equalizer::save(&requested)?;
+            println!("Renamed custom equalizer profile `{id}` to `{name}`");
+            Ok(true)
+        }
+        Some("delete") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile delete requires a custom profile id")?;
+            if args.next().is_some() {
+                return Err(
+                    "equalizer profile delete accepts exactly one custom profile id".into(),
+                );
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err("factory equalizer presets are immutable".into());
+            }
+            let _mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load()?;
+            let deleted_was_active = previous.active_profile_id.as_deref() == Some(&id);
+            let deleted = equalizer::delete_custom_profile(&previous, &id)?;
+            if deleted_was_active {
+                // Removing the selected profile must not leave an ambiguous
+                // manual selection. Flat is an immutable, deterministic safe
+                // fallback and is applied before the deletion is saved.
+                let requested = equalizer::select_profile(&deleted, "flat")?;
+                commit_equalizer_profile(&previous, &requested)?;
+            } else {
+                equalizer::save(&deleted)?;
+            }
+            println!("Deleted custom equalizer profile `{id}`");
+            Ok(true)
+        }
+        _ => Err("unknown equalizer profile command".into()),
+    }
 }
 
 fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
@@ -1596,17 +1781,28 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             if args.next().is_some() {
                 return Err("equalizer preset accepts exactly one preset id".into());
             }
-            let requested = equalizer::preset_profile(&id)?;
             let _mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load()?;
+            // Selecting a factory preset updates only the active bands; the
+            // persistent custom-profile library remains user-owned data.
+            let requested = if previous.custom_profiles.is_empty() {
+                equalizer::preset_profile(&id)?
+            } else {
+                equalizer::select_profile(&previous, &id)?
+            };
             commit_equalizer_profile(&previous, &requested)?;
             print_equalizer(&requested, false)?;
             Ok(true)
         }
+        Some("profile") => equalizer_profile(args),
         Some("reset") if args.next().is_none() => {
             let _mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load()?;
-            let requested = equalizer::reset_profile();
+            let requested = if previous.custom_profiles.is_empty() {
+                equalizer::reset_profile()
+            } else {
+                equalizer::select_profile(&previous, "flat")?
+            };
             commit_equalizer_profile(&previous, &requested)?;
             print_equalizer(&requested, false)?;
             Ok(true)
@@ -2011,5 +2207,42 @@ mod tests {
         assert_eq!(json["battery_percent"], 60);
         assert_eq!(json["charging"], true);
         assert_eq!(json["raw_feature"], "49 3c");
+    }
+
+    #[test]
+    fn serializes_custom_profile_catalog_with_current_selection() {
+        let profile =
+            equalizer::create_custom_profile(&equalizer::EqualizerProfile::default(), "Cinema")
+                .unwrap();
+        let json = serde_json::to_value(EqualizerCustomProfileListOutput {
+            schema: profile.schema,
+            active_profile_id: profile.active_profile_id.as_deref(),
+            custom_profiles: &profile.custom_profiles,
+        })
+        .unwrap();
+
+        assert_eq!(json["schema"], equalizer::PROFILE_SCHEMA);
+        assert_eq!(json["active_profile_id"], profile.custom_profiles[0].id);
+        assert_eq!(json["custom_profiles"][0]["name"], "Cinema");
+        assert_eq!(
+            json["custom_profiles"][0]["bands"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+    }
+
+    #[test]
+    fn custom_profile_commands_reject_factory_ids_before_touching_pipewire() {
+        for command in [
+            vec!["apply", "flat"],
+            vec!["update", "flat"],
+            vec!["rename", "flat", "Changed"],
+            vec!["delete", "flat"],
+        ] {
+            let error = equalizer_profile(command.into_iter().map(String::from)).unwrap_err();
+            assert!(error.contains("factory equalizer presets"));
+        }
     }
 }
