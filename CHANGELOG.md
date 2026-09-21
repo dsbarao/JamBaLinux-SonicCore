@@ -12,6 +12,15 @@
   confirmed QuantumENGINE frequencies and -12 dB to +12 dB range; expose it
   in the CLI and Plasma widget without USB/HID writes or PipeWire routing.
 
+- fix unstable identifiers when migrating a schema 1 equalizer file: the
+  migrated profile now takes the reserved, content-derived `custom-legacy-1`
+  instead of a process-dependent id, so consecutive `soniccore equalizer
+  status --format json` runs no longer report a different `active_profile_id`
+  for the same legacy profile;
+- persist that migration atomically exactly once, inside the transaction of the
+  first command that already holds the mutation lock, keeping read-only
+  commands free of writes and preserving every band and the profile name.
+
 - control synchronized, Logo-only, or Ring-only solid colors from the widget;
 - replace the fixed swatches with an embedded HSV wheel and saturation/value
   field, accepting any strictly validated `#RRGGBB` color;
