@@ -275,24 +275,66 @@ fn profile_bands_by_id(profile: &EqualizerProfile, id: &str) -> Option<Vec<Band>
         })
 }
 
+/// Identifier reserved for the single custom profile a schema 1 file migrates
+/// to. Loading is a pure read, so the id may not depend on the process, a
+/// counter or the clock: two consecutive readers must agree on it.
+const LEGACY_CUSTOM_PROFILE_ID_PREFIX: &str = "custom-legacy-";
+const LEGACY_CUSTOM_PROFILE_NAME: &str = "Personalizado";
+
+/// Picks the reserved legacy identifier, deriving the numeric suffix only from
+/// the profiles already present in the file being migrated.
+///
+/// A well-formed schema 1 file carries no custom profiles, so `existing` is
+/// normally empty and the id is always `custom-legacy-1`. The scan is kept for
+/// hand-edited files in which the schema 2 field leaked into a schema 1
+/// document: those entries are not carried over, and refusing to reuse one of
+/// their identifiers keeps a single id from denoting two different profiles
+/// across the pre- and post-migration files.
+fn legacy_custom_id(existing: &[CustomEqualizerProfile]) -> String {
+    let mut suffix = 1u32;
+    loop {
+        let id = format!("{LEGACY_CUSTOM_PROFILE_ID_PREFIX}{suffix}");
+        if !existing
+            .iter()
+            .any(|custom| custom.id == id || name_key(&custom.name) == name_key(&id))
+        {
+            return id;
+        }
+        suffix += 1;
+    }
+}
+
 fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
     validate_bands(&mut profile.bands)?;
     let preset = PRESETS
         .iter()
         .find(|preset| bands_match(&profile.bands, &preset_bands(preset)));
-    let migrated = EqualizerProfile {
-        schema: PROFILE_SCHEMA,
-        bands: profile.bands,
-        active_profile_id: preset.map(|preset| preset.id.to_owned()),
-        custom_profiles: Vec::new(),
+    let migrated = match preset {
+        Some(preset) => EqualizerProfile {
+            schema: PROFILE_SCHEMA,
+            bands: profile.bands,
+            active_profile_id: Some(preset.id.to_owned()),
+            custom_profiles: Vec::new(),
+        },
+        // Schema 1 had no named profiles, so bands that match no factory preset
+        // become the one custom profile the migrated file selects.
+        None => {
+            let id = legacy_custom_id(&profile.custom_profiles);
+            EqualizerProfile {
+                schema: PROFILE_SCHEMA,
+                bands: profile.bands.clone(),
+                active_profile_id: Some(id.clone()),
+                custom_profiles: vec![CustomEqualizerProfile {
+                    id,
+                    name: LEGACY_CUSTOM_PROFILE_NAME.to_owned(),
+                    bands: profile.bands,
+                }],
+            }
+        }
     };
-    if preset.is_some() {
-        Ok(migrated)
-    } else {
-        // The generated identifier is persisted with the migrated profile,
-        // making it stable while avoiding a collision with a user-created ID.
-        create_custom_profile(&migrated, "Personalizado")
-    }
+    // Hand the result through the schema 2 checks so a migrated file is held to
+    // the same id, name and active-selection invariants as a saved one.
+    validate(migrated)
 }
 
 fn validate(profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
@@ -736,7 +778,9 @@ mod tests {
             Some(migrated.custom_profiles[0].id.as_str())
         );
         assert_eq!(migrated.custom_profiles.len(), 1);
+        assert_eq!(migrated.custom_profiles[0].id, "custom-legacy-1");
         assert_eq!(migrated.custom_profiles[0].name, "Personalizado");
+        assert_eq!(migrated.custom_profiles[0].bands.len(), BANDS_HZ.len());
         assert_eq!(migrated.custom_profiles[0].bands, migrated.bands);
         assert_eq!(migrated.bands[0].gain_db, 3.0);
         assert_eq!(migrated.bands[4].gain_db, -2.0);
@@ -746,6 +790,75 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).expect("read persisted migration"))
                 .expect("parse persisted migration");
         assert_eq!(persisted["schema"], PROFILE_SCHEMA);
+    }
+
+    #[test]
+    fn repeated_schema_one_loads_are_pure_and_keep_a_stable_identifier() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.profile_path();
+        let legacy = r#"{
+  "schema": 1,
+  "bands": [
+    {"frequency_hz":31,"gain_db":3.0}, {"frequency_hz":62,"gain_db":0.0},
+    {"frequency_hz":125,"gain_db":0.0}, {"frequency_hz":250,"gain_db":0.0},
+    {"frequency_hz":500,"gain_db":-2.0}, {"frequency_hz":1000,"gain_db":0.0},
+    {"frequency_hz":2000,"gain_db":0.0}, {"frequency_hz":4000,"gain_db":0.0},
+    {"frequency_hz":8000,"gain_db":0.0}, {"frequency_hz":16000,"gain_db":1.0}
+  ]
+}"#;
+        // A second copy of the same content proves the identifier follows the
+        // bytes rather than the reading process or the file it came from.
+        let copy = directory.0.join("equalizer-copy.json");
+        fs::write(&path, legacy).expect("write legacy profile");
+        fs::write(&copy, legacy).expect("write a second copy of the legacy profile");
+
+        let listing = |root: &Path| {
+            let mut entries = fs::read_dir(root)
+                .expect("read temporary directory")
+                .map(|entry| entry.expect("read directory entry").path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let original_bytes = fs::read(&path).expect("read legacy bytes");
+        let original_listing = listing(directory.0.as_path());
+
+        let migrations = [&path, &path, &path, &copy]
+            .map(|source| load_from_path(source).expect("migrate legacy profile"));
+        for migrated in &migrations {
+            assert_eq!(migrated.schema, PROFILE_SCHEMA);
+            assert_eq!(migrated.custom_profiles.len(), 1);
+            assert_eq!(migrated.custom_profiles[0].id, "custom-legacy-1");
+            assert_eq!(migrated.custom_profiles[0].name, "Personalizado");
+            assert_eq!(
+                migrated.active_profile_id.as_deref(),
+                Some(migrated.custom_profiles[0].id.as_str())
+            );
+            // The migration preserves every band, so a stable id never comes at
+            // the cost of the gains it is supposed to name.
+            assert_eq!(migrated.custom_profiles[0].bands, migrated.bands);
+            assert_eq!(migrated.bands.len(), BANDS_HZ.len());
+            assert_eq!(migrated.bands[0].gain_db, 3.0);
+            assert_eq!(migrated.bands[4].gain_db, -2.0);
+            assert_eq!(migrated.bands[9].gain_db, 1.0);
+            assert_eq!(migrated, &migrations[0]);
+            assert_eq!(
+                serde_json::to_string_pretty(migrated).expect("render migrated profile"),
+                serde_json::to_string_pretty(&migrations[0]).expect("render first migration")
+            );
+        }
+
+        // Reading a legacy file must not write anything: neither the source
+        // bytes nor a stray `.tmp-` replacement may appear.
+        assert_eq!(
+            fs::read(&path).expect("re-read legacy bytes"),
+            original_bytes
+        );
+        assert_eq!(
+            fs::read(&copy).expect("re-read copied bytes"),
+            original_bytes
+        );
+        assert_eq!(listing(directory.0.as_path()), original_listing);
     }
 
     #[test]
