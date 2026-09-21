@@ -1588,8 +1588,8 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
             if args.next().is_some() {
                 return Err("equalizer profile create accepts exactly one profile name".into());
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = equalizer::create_custom_profile(&previous, &name)?;
             commit_equalizer_profile(&previous, &requested)?;
             let created = requested
@@ -1616,8 +1616,8 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
                         .into(),
                 );
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = equalizer::select_profile(&previous, &id)?;
             commit_equalizer_profile(&previous, &requested)?;
             print_equalizer(&requested, false)?;
@@ -1635,8 +1635,8 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
             if equalizer::is_factory_profile_id(&id) {
                 return Err("factory equalizer presets are immutable".into());
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             // Capture the currently active ten bands. The live transaction is
             // deliberately retained even when the bands do not change, so the
             // DSP readback succeeds before the library mutation is persisted.
@@ -1659,8 +1659,8 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
             if equalizer::is_factory_profile_id(&id) {
                 return Err("factory equalizer presets are immutable".into());
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = equalizer::rename_custom_profile(&previous, &id, &name)?;
             equalizer::save(&requested)?;
             println!("Renamed custom equalizer profile `{id}` to `{name}`");
@@ -1678,8 +1678,8 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
             if equalizer::is_factory_profile_id(&id) {
                 return Err("factory equalizer presets are immutable".into());
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let deleted_was_active = previous.active_profile_id.as_deref() == Some(&id);
             let deleted = equalizer::delete_custom_profile(&previous, &id)?;
             if deleted_was_active {
@@ -1769,8 +1769,8 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             if args.next().is_some() {
                 return Err("equalizer set accepts only frequency and gain".into());
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = equalizer::updated_profile(&previous, frequency_hz, gain_db)?;
             commit_equalizer_profile(&previous, &requested)?;
             print_equalizer(&requested, false)?;
@@ -1781,8 +1781,8 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             if args.next().is_some() {
                 return Err("equalizer preset accepts exactly one preset id".into());
             }
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             // Selecting a factory preset updates only the active bands; the
             // persistent custom-profile library remains user-owned data.
             let requested = if previous.custom_profiles.is_empty() {
@@ -1796,8 +1796,8 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
         }
         Some("profile") => equalizer_profile(args),
         Some("reset") if args.next().is_none() => {
-            let _mutation_lock = equalizer::mutation_lock()?;
-            let previous = equalizer::load()?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = if previous.custom_profiles.is_empty() {
                 equalizer::reset_profile()
             } else {

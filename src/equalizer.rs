@@ -372,16 +372,47 @@ fn validate(profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
     Ok(normalized)
 }
 
-fn load_from_path(path: &Path) -> Result<EqualizerProfile, String> {
+/// A validated profile plus whether reading it had to migrate a schema 1
+/// document, so a caller holding the mutation lock can persist the migrated
+/// form without parsing the file a second time.
+struct ReadProfile {
+    profile: EqualizerProfile,
+    migrated: bool,
+}
+
+fn read_profile(path: &Path) -> Result<ReadProfile, String> {
     match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str::<EqualizerProfile>(&content)
-            .map_err(|error| format!("{}: {error}", path.display()))
-            .and_then(validate),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(EqualizerProfile::default())
+        Ok(content) => {
+            let stored = serde_json::from_str::<EqualizerProfile>(&content)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            let migrated = stored.schema == 1;
+            Ok(ReadProfile {
+                profile: validate(stored)?,
+                migrated,
+            })
         }
+        // A missing file is already the current schema, so nothing is migrated
+        // and no command turns the default into a write of its own.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ReadProfile {
+            profile: EqualizerProfile::default(),
+            migrated: false,
+        }),
         Err(error) => Err(format!("{}: {error}", path.display())),
     }
+}
+
+fn load_from_path(path: &Path) -> Result<EqualizerProfile, String> {
+    Ok(read_profile(path)?.profile)
+}
+
+fn load_for_mutation_from_path(path: &Path) -> Result<EqualizerProfile, String> {
+    let ReadProfile { profile, migrated } = read_profile(path)?;
+    if migrated {
+        // The migrated form replaces the schema 1 document exactly once: the
+        // next read finds schema 2 and takes the pure path above.
+        save_to_path(&profile, path)?;
+    }
+    Ok(profile)
 }
 
 fn temporary_path(path: &Path, sequence: u64) -> Result<PathBuf, String> {
@@ -443,6 +474,19 @@ fn save_to_path(profile: &EqualizerProfile, path: &Path) -> Result<(), String> {
 
 pub fn load() -> Result<EqualizerProfile, String> {
     load_from_path(&config_path()?)
+}
+
+/// Loads the stored profile for a command that is about to change it, writing
+/// the migrated schema 2 form back exactly once when the file on disk still
+/// carries schema 1.
+///
+/// The [`File`] reference is the proof that the caller already holds the
+/// transaction from [`mutation_lock`]: the migration is written inside that
+/// same serialized transaction, and this function never takes the lock itself,
+/// so no caller can block on a lock it already owns. Read-only commands keep
+/// calling [`load`], which never writes.
+pub fn load_for_mutation(_mutation_lock: &File) -> Result<EqualizerProfile, String> {
+    load_for_mutation_from_path(&config_path()?)
 }
 
 pub fn save(profile: &EqualizerProfile) -> Result<(), String> {
@@ -638,6 +682,37 @@ pub fn delete_custom_profile(
 mod tests {
     use super::*;
 
+    /// A schema 1 document whose bands match no factory preset, so every load
+    /// has to migrate them into the single reserved legacy custom profile.
+    const LEGACY_CUSTOM_PROFILE_JSON: &str = r#"{
+  "schema": 1,
+  "bands": [
+    {"frequency_hz":31,"gain_db":3.0}, {"frequency_hz":62,"gain_db":0.0},
+    {"frequency_hz":125,"gain_db":0.0}, {"frequency_hz":250,"gain_db":0.0},
+    {"frequency_hz":500,"gain_db":-2.0}, {"frequency_hz":1000,"gain_db":0.0},
+    {"frequency_hz":2000,"gain_db":0.0}, {"frequency_hz":4000,"gain_db":0.0},
+    {"frequency_hz":8000,"gain_db":0.0}, {"frequency_hz":16000,"gain_db":1.0}
+  ]
+}"#;
+
+    /// The gains of [`LEGACY_CUSTOM_PROFILE_JSON`], in [`BANDS_HZ`] order, so a
+    /// test can compare every migrated band instead of a sample of them.
+    const LEGACY_CUSTOM_PROFILE_GAINS_DB: [f32; 10] =
+        [3.0, 0.0, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
+    /// The ten bands a correct migration of [`LEGACY_CUSTOM_PROFILE_JSON`]
+    /// produces, frequency and gain alike.
+    fn legacy_custom_profile_bands() -> Vec<Band> {
+        BANDS_HZ
+            .into_iter()
+            .zip(LEGACY_CUSTOM_PROFILE_GAINS_DB)
+            .map(|(frequency_hz, gain_db)| Band {
+                frequency_hz,
+                gain_db,
+            })
+            .collect()
+    }
+
     struct TemporaryDirectory(PathBuf);
 
     impl TemporaryDirectory {
@@ -759,17 +834,7 @@ mod tests {
     fn schema_one_custom_profile_migrates_without_losing_its_gains() {
         let directory = TemporaryDirectory::new();
         let path = directory.profile_path();
-        let legacy = r#"{
-  "schema": 1,
-  "bands": [
-    {"frequency_hz":31,"gain_db":3.0}, {"frequency_hz":62,"gain_db":0.0},
-    {"frequency_hz":125,"gain_db":0.0}, {"frequency_hz":250,"gain_db":0.0},
-    {"frequency_hz":500,"gain_db":-2.0}, {"frequency_hz":1000,"gain_db":0.0},
-    {"frequency_hz":2000,"gain_db":0.0}, {"frequency_hz":4000,"gain_db":0.0},
-    {"frequency_hz":8000,"gain_db":0.0}, {"frequency_hz":16000,"gain_db":1.0}
-  ]
-}"#;
-        fs::write(&path, legacy).expect("write legacy profile");
+        fs::write(&path, LEGACY_CUSTOM_PROFILE_JSON).expect("write legacy profile");
 
         let migrated = load_from_path(&path).expect("migrate legacy profile");
         assert_eq!(migrated.schema, PROFILE_SCHEMA);
@@ -780,10 +845,9 @@ mod tests {
         assert_eq!(migrated.custom_profiles.len(), 1);
         assert_eq!(migrated.custom_profiles[0].id, "custom-legacy-1");
         assert_eq!(migrated.custom_profiles[0].name, "Personalizado");
-        assert_eq!(migrated.custom_profiles[0].bands.len(), BANDS_HZ.len());
-        assert_eq!(migrated.custom_profiles[0].bands, migrated.bands);
-        assert_eq!(migrated.bands[0].gain_db, 3.0);
-        assert_eq!(migrated.bands[4].gain_db, -2.0);
+        let expected_bands = legacy_custom_profile_bands();
+        assert_eq!(migrated.bands, expected_bands);
+        assert_eq!(migrated.custom_profiles[0].bands, expected_bands);
 
         save_to_path(&migrated, &path).expect("persist migrated profile");
         let persisted: serde_json::Value =
@@ -796,21 +860,12 @@ mod tests {
     fn repeated_schema_one_loads_are_pure_and_keep_a_stable_identifier() {
         let directory = TemporaryDirectory::new();
         let path = directory.profile_path();
-        let legacy = r#"{
-  "schema": 1,
-  "bands": [
-    {"frequency_hz":31,"gain_db":3.0}, {"frequency_hz":62,"gain_db":0.0},
-    {"frequency_hz":125,"gain_db":0.0}, {"frequency_hz":250,"gain_db":0.0},
-    {"frequency_hz":500,"gain_db":-2.0}, {"frequency_hz":1000,"gain_db":0.0},
-    {"frequency_hz":2000,"gain_db":0.0}, {"frequency_hz":4000,"gain_db":0.0},
-    {"frequency_hz":8000,"gain_db":0.0}, {"frequency_hz":16000,"gain_db":1.0}
-  ]
-}"#;
         // A second copy of the same content proves the identifier follows the
         // bytes rather than the reading process or the file it came from.
         let copy = directory.0.join("equalizer-copy.json");
-        fs::write(&path, legacy).expect("write legacy profile");
-        fs::write(&copy, legacy).expect("write a second copy of the legacy profile");
+        fs::write(&path, LEGACY_CUSTOM_PROFILE_JSON).expect("write legacy profile");
+        fs::write(&copy, LEGACY_CUSTOM_PROFILE_JSON)
+            .expect("write a second copy of the legacy profile");
 
         let listing = |root: &Path| {
             let mut entries = fs::read_dir(root)
@@ -859,6 +914,102 @@ mod tests {
             original_bytes
         );
         assert_eq!(listing(directory.0.as_path()), original_listing);
+    }
+
+    #[test]
+    fn loading_under_the_mutation_lock_persists_the_migration_exactly_once() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.profile_path();
+        fs::write(&path, LEGACY_CUSTOM_PROFILE_JSON).expect("write legacy profile");
+
+        let migrated = load_for_mutation_from_path(&path).expect("migrate under the lock");
+        assert_eq!(migrated.schema, PROFILE_SCHEMA);
+        assert_eq!(migrated.custom_profiles.len(), 1);
+        assert_eq!(migrated.custom_profiles[0].name, LEGACY_CUSTOM_PROFILE_NAME);
+        assert_eq!(
+            migrated.active_profile_id.as_deref(),
+            Some(migrated.custom_profiles[0].id.as_str())
+        );
+        // All ten schema 1 bands survive the write, frequency and gain alike, in
+        // the profile and in the library entry that names it.
+        let expected_bands = legacy_custom_profile_bands();
+        assert_eq!(expected_bands.len(), BANDS_HZ.len());
+        assert_eq!(migrated.bands, expected_bands);
+        assert_eq!(migrated.custom_profiles[0].bands, expected_bands);
+
+        // The migration reached the disk, so the next process to run a
+        // read-only command reads schema 2 and the same identifier.
+        let persisted = fs::read(&path).expect("read persisted migration");
+        assert_eq!(
+            load_from_path(&path).expect("read the persisted migration back"),
+            migrated
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&persisted).expect("parse persisted migration");
+        assert_eq!(document["schema"], PROFILE_SCHEMA);
+        // Read the bytes back without `validate`, so the ten bands, the name and
+        // the identifier are checked as they were written rather than as a load
+        // could rebuild them.
+        let stored: EqualizerProfile =
+            serde_json::from_slice(&persisted).expect("parse persisted profile");
+        assert_eq!(stored.bands, expected_bands);
+        assert_eq!(stored.custom_profiles.len(), 1);
+        assert_eq!(stored.custom_profiles[0].bands, expected_bands);
+        assert_eq!(stored.custom_profiles[0].name, LEGACY_CUSTOM_PROFILE_NAME);
+        assert_eq!(stored.custom_profiles[0].id, migrated.custom_profiles[0].id);
+        assert_eq!(
+            stored.active_profile_id.as_deref(),
+            Some(migrated.custom_profiles[0].id.as_str())
+        );
+
+        // Idempotent: a second load under the lock finds schema 2, writes
+        // nothing, and leaves the bytes untouched.
+        assert_eq!(
+            load_for_mutation_from_path(&path).expect("second load under the lock"),
+            migrated
+        );
+        assert_eq!(fs::read(&path).expect("re-read migration"), persisted);
+
+        // The atomic replacement leaves no `.tmp-` file behind.
+        let entries = fs::read_dir(&directory.0)
+            .expect("read temporary directory")
+            .map(|entry| entry.expect("read directory entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![path]);
+    }
+
+    #[test]
+    fn a_failed_migration_write_is_reported_and_keeps_the_legacy_file() {
+        let directory = TemporaryDirectory::new();
+        let unwritable = directory.0.join("unwritable");
+        fs::create_dir(&unwritable).expect("create the enclosing directory");
+        let path = unwritable.join("equalizer.json");
+        fs::write(&path, LEGACY_CUSTOM_PROFILE_JSON).expect("write legacy profile");
+        let original = fs::read(&path).expect("read legacy bytes");
+
+        let writable = fs::metadata(&unwritable)
+            .expect("read directory mode")
+            .permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&unwritable, read_only).expect("make the directory read-only");
+        // A process that writes regardless of the mode cannot reach the failure
+        // path at all, so probe first and skip rather than assert a success.
+        let probe = unwritable.join("probe");
+        let mode_is_enforced = fs::write(&probe, b"probe").is_err();
+        let result = mode_is_enforced.then(|| load_for_mutation_from_path(&path));
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&unwritable, writable).expect("restore the directory mode");
+
+        if let Some(result) = result {
+            assert!(result.is_err());
+            // A migration that cannot be persisted must not consume the only
+            // copy of the legacy profile.
+            assert_eq!(
+                fs::read(&path).expect("read preserved legacy profile"),
+                original
+            );
+        }
     }
 
     #[test]
