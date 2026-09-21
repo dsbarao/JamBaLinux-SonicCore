@@ -56,11 +56,15 @@ PlasmoidItem {
     property var equalizerTargetConnected: null
     property var equalizerDefaultSafe: null
     property string equalizerTarget: ""
-    property string equalizerError: ""
+    property string equalizerStatusError: ""
+    property string equalizerActionError: ""
     property string pendingEqualizerAction: ""
-    property string equalizerPresetId: "custom"
-    property int pendingEqualizerFrequency: 0
-    property real pendingEqualizerGain: 0
+    property string equalizerActiveProfileId: ""
+    property int equalizerProfileRevision: 0
+    property bool equalizerCreateVisible: false
+    property bool equalizerRenameVisible: false
+    property bool equalizerDeleteConfirmation: false
+    property string equalizerProfileNameDraft: ""
     property bool spatialUpdating: false
     property bool spatialBusy: false
     property bool spatialEnabled: false
@@ -73,6 +77,28 @@ PlasmoidItem {
     property string spatialActionMessage: ""
     readonly property var equalizerFrequencies: [
         31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
+    ]
+    // Immutable built-in presets, in the CLI's own order. The equalizer status
+    // JSON reports only the user-owned library, so the factory catalog stays
+    // declared here; it is never written back and carries no band data.
+    readonly property var equalizerFactoryProfiles: [
+        { "label": "Flat", "profileId": "flat" },
+        { "label": "Bass Boost", "profileId": "bass-boost" },
+        { "label": "Cinematic", "profileId": "cinematic" },
+        { "label": "FPS", "profileId": "fps" },
+        { "label": "MOBA", "profileId": "moba" },
+        { "label": "RPG", "profileId": "rpg" },
+        { "label": "Apex Legends", "profileId": "apex-legends" },
+        { "label": "CS2", "profileId": "cs2" },
+        { "label": "Dota 2", "profileId": "dota-2" },
+        { "label": "Fortnite", "profileId": "fortnite" },
+        { "label": "GTA 5", "profileId": "gta-5" },
+        { "label": "LoL", "profileId": "lol" },
+        { "label": "PUBG", "profileId": "pubg" },
+        { "label": "WoW", "profileId": "wow" },
+        { "label": "Escape from Tarkov", "profileId": "escape-from-tarkov" },
+        { "label": "LN3 Immersion", "profileId": "ln3-immersion" },
+        { "label": "LN3 Thrill", "profileId": "ln3-thrill" }
     ]
     readonly property bool deviceAvailable: batteryPercent >= 0
     readonly property bool daemonAvailable: daemonWatcher.registered
@@ -91,24 +117,9 @@ PlasmoidItem {
     }
 
     ListModel {
-        id: equalizerPresetModel
-        ListElement { label: "Flat"; presetId: "flat" }
-        ListElement { label: "Bass Boost"; presetId: "bass-boost" }
-        ListElement { label: "Cinematic"; presetId: "cinematic" }
-        ListElement { label: "FPS"; presetId: "fps" }
-        ListElement { label: "MOBA"; presetId: "moba" }
-        ListElement { label: "RPG"; presetId: "rpg" }
-        ListElement { label: "Apex Legends"; presetId: "apex-legends" }
-        ListElement { label: "CS2"; presetId: "cs2" }
-        ListElement { label: "Dota 2"; presetId: "dota-2" }
-        ListElement { label: "Fortnite"; presetId: "fortnite" }
-        ListElement { label: "GTA 5"; presetId: "gta-5" }
-        ListElement { label: "LoL"; presetId: "lol" }
-        ListElement { label: "PUBG"; presetId: "pubg" }
-        ListElement { label: "WoW"; presetId: "wow" }
-        ListElement { label: "Escape from Tarkov"; presetId: "escape-from-tarkov" }
-        ListElement { label: "LN3 Immersion"; presetId: "ln3-immersion" }
-        ListElement { label: "LN3 Thrill"; presetId: "ln3-thrill" }
+        // A transient view of the catalog reported by the equalizer status
+        // JSON, never a second persistent store of custom profiles.
+        id: equalizerProfileModel
     }
 
     Plasmoid.icon: "audio-headphones"
@@ -172,38 +183,140 @@ PlasmoidItem {
     }
 
     function setEqualizerBand(frequencyHz, gainDb) {
-        if (equalizerBusy || equalizerUpdating) return
-        equalizerBusy = true
         const normalizedGain = Math.round(Number(gainDb) * 10) / 10
-        pendingEqualizerAction = "set"
-        pendingEqualizerFrequency = frequencyHz
-        pendingEqualizerGain = normalizedGain
-        equalizerPresetId = "custom"
-        const equalizerSetCommand = `/bin/sh -lc "$HOME/.cargo/bin/soniccore equalizer set ${frequencyHz} ${normalizedGain}"`
-        equalizerExecutable.connectSource(equalizerSetCommand)
+        startEqualizerAction("set",
+            ["set", String(frequencyHz), String(normalizedGain)])
     }
 
-    function applyEqualizerPreset(presetId) {
-        if (equalizerBusy || equalizerUpdating) return
+    function shellQuote(value) {
+        // POSIX single-quoting: the only character that cannot appear inside a
+        // single-quoted word is the quote itself, which is closed, escaped and
+        // reopened. Everything else stays literal data for the shell.
+        return "'" + String(value).replace(/'/g, "'\"'\"'") + "'"
+    }
+
+    function equalizerCliCommand(cliArguments) {
+        // Quote every argument for the inner login shell, then quote the whole
+        // program for the layer that runs it. Typed profile names and stored
+        // IDs therefore reach the CLI as data even when they contain quotes,
+        // spaces or other shell metacharacters.
+        const quotedArguments = cliArguments.map(shellQuote).join(" ")
+        const program = "$HOME/.cargo/bin/soniccore equalizer"
+            + (quotedArguments.length > 0 ? " " + quotedArguments : "")
+        return "/bin/sh -lc " + shellQuote(program)
+    }
+
+    function startEqualizerAction(action, cliArguments) {
+        if (equalizerBusy || equalizerUpdating) return false
         equalizerBusy = true
-        pendingEqualizerAction = "preset"
-        equalizerExecutable.connectSource(
-            `/bin/sh -lc "$HOME/.cargo/bin/soniccore equalizer preset '${presetId}'"`)
+        pendingEqualizerAction = action
+        equalizerActionError = ""
+        equalizerExecutable.connectSource(equalizerCliCommand(cliArguments))
+        return true
     }
 
-    function equalizerPresetIndex(presetId) {
-        for (let index = 0; index < equalizerPresetModel.count; ++index) {
-            if (equalizerPresetModel.get(index).presetId === presetId)
+    function applyEqualizerProfile(profileId, factory) {
+        // Factory presets keep their dedicated verb; `profile apply` is
+        // restricted to the user-owned library by the CLI itself.
+        startEqualizerAction(factory ? "preset" : "apply", factory
+            ? ["preset", profileId]
+            : ["profile", "apply", profileId])
+    }
+
+    function equalizerProfileIndex(profileId) {
+        // Reading the revision makes bindings that call this helper depend on
+        // the catalog rebuild: list model contents alone notify nothing.
+        const id = String(profileId)
+        if (equalizerProfileRevision < 0 || id.length === 0) return -1
+        for (let index = 0; index < equalizerProfileModel.count; ++index) {
+            if (equalizerProfileModel.get(index).profileId === id)
                 return index
         }
         return -1
     }
 
+    function selectedEqualizerProfile() {
+        const index = equalizerProfileIndex(equalizerActiveProfileId)
+        return index >= 0 ? equalizerProfileModel.get(index) : null
+    }
+
+    function selectedEqualizerProfileIsCustom() {
+        const profile = selectedEqualizerProfile()
+        return profile !== null && profile.factory === false
+    }
+
+    function equalizerSelectionLabel() {
+        // Derived from the canonical selection instead of the combo box index,
+        // which the control resets on its own whenever the model is rebuilt.
+        const profile = selectedEqualizerProfile()
+        if (profile !== null) return String(profile.label)
+        // Before the first status response no catalog is known yet, so manual
+        // settings must not be announced for an unread selection.
+        return equalizerProfileRevision === 0 ? "Carregando…" : "Ajustes manuais"
+    }
+
+    function createEqualizerProfile() {
+        if (equalizerProfileNameDraft.trim().length === 0) return
+        startEqualizerAction("create",
+            ["profile", "create", equalizerProfileNameDraft.trim()])
+    }
+
+    function renameEqualizerProfile() {
+        const profile = selectedEqualizerProfile()
+        if (profile === null || profile.factory) return
+        if (equalizerProfileNameDraft.trim().length === 0) return
+        startEqualizerAction("rename",
+            ["profile", "rename", profile.profileId,
+             equalizerProfileNameDraft.trim()])
+    }
+
+    function updateEqualizerProfile() {
+        const profile = selectedEqualizerProfile()
+        if (profile === null || profile.factory) return
+        startEqualizerAction("update", ["profile", "update", profile.profileId])
+    }
+
+    function deleteEqualizerProfile() {
+        const profile = selectedEqualizerProfile()
+        if (profile === null || profile.factory) return
+        startEqualizerAction("delete", ["profile", "delete", profile.profileId])
+    }
+
+    function equalizerActionMessage(action) {
+        if (action === "reset") return "Bandas zeradas"
+        if (action === "preset" || action === "apply")
+            return "Perfil de equalização aplicado"
+        if (action === "create") return "Perfil personalizado criado"
+        if (action === "update") return "Perfil personalizado atualizado"
+        if (action === "rename") return "Perfil personalizado renomeado"
+        if (action === "delete") return "Perfil personalizado excluído"
+        return "Equalizador atualizado"
+    }
+
+    function equalizerActionFailureMessage(action) {
+        if (action === "create") return "Não foi possível criar o perfil personalizado"
+        if (action === "update") return "Não foi possível atualizar o perfil personalizado"
+        if (action === "rename") return "Não foi possível renomear o perfil personalizado"
+        if (action === "delete") return "Não foi possível excluir o perfil personalizado"
+        if (action === "preset" || action === "apply")
+            return "Não foi possível aplicar o perfil de equalização"
+        return "Não foi possível atualizar o equalizador"
+    }
+
+    function submitEqualizerProfileName() {
+        if (equalizerCreateVisible) createEqualizerProfile()
+        else if (equalizerRenameVisible) renameEqualizerProfile()
+    }
+
+    function closeEqualizerProfileEditors() {
+        equalizerCreateVisible = false
+        equalizerRenameVisible = false
+        equalizerDeleteConfirmation = false
+        equalizerProfileNameDraft = ""
+    }
+
     function resetEqualizer() {
-        if (equalizerBusy || equalizerUpdating) return
-        equalizerBusy = true
-        pendingEqualizerAction = "reset"
-        equalizerExecutable.connectSource("/bin/sh -lc \"$HOME/.cargo/bin/soniccore equalizer reset\"")
+        startEqualizerAction("reset", ["reset"])
     }
 
     function replaceEqualizerBands(bands) {
@@ -226,25 +339,66 @@ PlasmoidItem {
         equalizerVisualRevision += 1
     }
 
-    function updateEqualizerBands(frequencyHz, gainDb, reset) {
-        for (let index = 0; index < equalizerBandModel.count; ++index) {
-            const band = equalizerBandModel.get(index)
-            let nextGain = Number(band.gainDb)
-            if (reset) nextGain = 0
-            else if (Number(band.frequencyHz) === frequencyHz) nextGain = gainDb
-            equalizerBandModel.setProperty(index, "gainDb", nextGain)
+    function isFactoryEqualizerProfile(profileId) {
+        for (let index = 0; index < equalizerFactoryProfiles.length; ++index) {
+            if (equalizerFactoryProfiles[index].profileId === profileId)
+                return true
         }
-        // A revision forces every handle to resynchronize even when its model
-        // value was already zero and ListModel therefore emitted no role change.
-        equalizerVisualRevision += 1
+        return false
+    }
+
+    function equalizerCatalogMatchesModel(catalog) {
+        const offset = equalizerFactoryProfiles.length
+        if (equalizerProfileModel.count !== offset + catalog.length) return false
+        for (let index = 0; index < catalog.length; ++index) {
+            const shown = equalizerProfileModel.get(offset + index)
+            if (shown.profileId !== catalog[index].profileId
+                || shown.label !== catalog[index].label)
+                return false
+        }
+        return true
+    }
+
+    function replaceEqualizerProfiles(customProfiles) {
+        // The custom library is owned by the CLI; this model is only a view of
+        // the catalog that the last status response reported.
+        const catalog = []
+        for (let index = 0; index < customProfiles.length; ++index) {
+            const custom = customProfiles[index] ?? {}
+            const id = String(custom.id ?? "")
+            const name = String(custom.name ?? "")
+            if (id.length > 0 && name.length > 0 && !isFactoryEqualizerProfile(id))
+                catalog.push({ "label": name, "profileId": id, "factory": false })
+        }
+
+        // Band edits refresh the status too, and rebuilding an unchanged
+        // catalog would reset the selector on every committed slider move.
+        if (equalizerCatalogMatchesModel(catalog)) return
+
+        equalizerProfileModel.clear()
+        for (let index = 0; index < equalizerFactoryProfiles.length; ++index) {
+            const factory = equalizerFactoryProfiles[index]
+            equalizerProfileModel.append({
+                "label": factory.label, "profileId": factory.profileId,
+                "factory": true
+            })
+        }
+        for (let index = 0; index < catalog.length; ++index)
+            equalizerProfileModel.append(catalog[index])
+
+        // A revision forces the selector to resynchronize even when the
+        // canonical selection itself did not change.
+        equalizerProfileRevision += 1
     }
 
     function equalizerProblemText() {
         if (equalizerDefaultSafe === false) {
             return "A saída virtual não pode ser a saída padrão. A restauração automática para a saída física está em andamento."
         }
-        if (equalizerError.length > 0)
-            return equalizerError
+        if (equalizerActionError.length > 0)
+            return equalizerActionError
+        if (equalizerStatusError.length > 0)
+            return equalizerStatusError
         if (equalizerTargetConnected !== false && equalizerServiceActive === false) {
             return "O serviço automático do equalizador está inativo. Execute tools/install-user.sh novamente e confira o serviço do usuário."
         }
@@ -494,7 +648,7 @@ PlasmoidItem {
         id: expandedRepresentation
         readonly property int equalizerColumns: width >= Kirigami.Units.gridUnit * 20 ? 10 : 5
         readonly property real requiredGridHeight: root.openSection === "lighting"
-            ? 52 : root.openSection === "equalizer" ? 57 : root.openSection.length > 0 ? 32 : 25
+            ? 52 : root.openSection === "equalizer" ? 66 : root.openSection.length > 0 ? 32 : 25
 
         Layout.minimumWidth: Kirigami.Units.gridUnit * 19
         Layout.minimumHeight: Kirigami.Units.gridUnit * requiredGridHeight
@@ -680,6 +834,9 @@ PlasmoidItem {
                 checked: root.openSection === "equalizer"
                 onClicked: {
                     root.openSection = checked ? "equalizer" : ""
+                    // Never reopen the panel on a half-finished name entry or
+                    // on a deletion that was left awaiting confirmation.
+                    root.closeEqualizerProfileEditors()
                     if (checked) root.refreshEqualizer()
                 }
             }
@@ -751,16 +908,174 @@ PlasmoidItem {
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.ComboBox {
-                        id: equalizerPresetSelector
+                        id: equalizerProfileSelector
                         Layout.alignment: Qt.AlignHCenter
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 14
-                        model: equalizerPresetModel
+                        model: equalizerProfileModel
                         textRole: "label"
-                        valueRole: "presetId"
-                        currentIndex: root.equalizerPresetIndex(root.equalizerPresetId)
-                        displayText: root.equalizerPresetId === "custom"
-                            ? "Personalizado" : currentText
-                        onActivated: root.applyEqualizerPreset(currentValue)
+                        valueRole: "profileId"
+                        // Taken from the canonical selection rather than from
+                        // currentText, which follows an index the control may
+                        // have rewritten while the model was being rebuilt.
+                        displayText: root.equalizerSelectionLabel()
+
+                        // Reasserted after every catalog rebuild and after every
+                        // confirmed selection change, for the same reason.
+                        function synchronizeSelection() {
+                            currentIndex = root.equalizerProfileIndex(
+                                root.equalizerActiveProfileId)
+                        }
+
+                        Component.onCompleted: equalizerProfileSelector.synchronizeSelection()
+                        onCountChanged: equalizerProfileSelector.synchronizeSelection()
+                        onActivated: function(index) {
+                            const profile = equalizerProfileModel.get(index)
+                            if (profile === null || profile === undefined) return
+                            root.applyEqualizerProfile(profile.profileId, profile.factory)
+                            // The selector never leads the CLI: the confirmed
+                            // entry stays shown until a refresh reports the new
+                            // selection, including when the request is refused.
+                            equalizerProfileSelector.synchronizeSelection()
+                        }
+
+                        Connections {
+                            target: root
+
+                            function onEqualizerProfileRevisionChanged() {
+                                equalizerProfileSelector.synchronizeSelection()
+                            }
+
+                            function onEqualizerActiveProfileIdChanged() {
+                                equalizerProfileSelector.synchronizeSelection()
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+
+                        PlasmaComponents.Button {
+                            text: "Criar perfil"
+                            icon.name: "list-add"
+                            checkable: true
+                            checked: root.equalizerCreateVisible
+                            onClicked: {
+                                const opening = !root.equalizerCreateVisible
+                                root.closeEqualizerProfileEditors()
+                                root.equalizerCreateVisible = opening
+                            }
+                        }
+
+                        PlasmaComponents.Button {
+                            // Factory presets are immutable: the library
+                            // actions exist only for user-owned profiles.
+                            visible: root.selectedEqualizerProfileIsCustom()
+                            text: "Atualizar"
+                            icon.name: "document-save"
+                            onClicked: root.updateEqualizerProfile()
+                        }
+
+                        PlasmaComponents.Button {
+                            visible: root.selectedEqualizerProfileIsCustom()
+                            text: "Renomear"
+                            icon.name: "edit-rename"
+                            checkable: true
+                            checked: root.equalizerRenameVisible
+                            onClicked: {
+                                const opening = !root.equalizerRenameVisible
+                                const profile = root.selectedEqualizerProfile()
+                                root.closeEqualizerProfileEditors()
+                                root.equalizerRenameVisible = opening
+                                if (opening && profile !== null)
+                                    root.equalizerProfileNameDraft = String(profile.label)
+                            }
+                        }
+
+                        PlasmaComponents.Button {
+                            visible: root.selectedEqualizerProfileIsCustom()
+                            text: root.equalizerDeleteConfirmation
+                                ? "Confirmar exclusão" : "Excluir"
+                            icon.name: "edit-delete"
+                            onClicked: {
+                                if (root.equalizerDeleteConfirmation) {
+                                    root.equalizerDeleteConfirmation = false
+                                    root.deleteEqualizerProfile()
+                                } else {
+                                    root.closeEqualizerProfileEditors()
+                                    root.equalizerDeleteConfirmation = true
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.equalizerCreateVisible || root.equalizerRenameVisible
+                        onVisibleChanged: {
+                            if (!visible) return
+                            // Opening the editor always shows the draft that the
+                            // action prepared, never the text left behind by an
+                            // earlier edit.
+                            equalizerProfileNameField.adoptDraft()
+                            equalizerProfileNameField.forceActiveFocus()
+                        }
+
+                        PlasmaComponents.TextField {
+                            id: equalizerProfileNameField
+                            Layout.fillWidth: true
+                            placeholderText: root.equalizerCreateVisible
+                                ? "Nome do novo perfil" : "Nome do perfil"
+                            // The CLI rejects longer names; stopping the entry
+                            // here avoids a rejected round trip.
+                            maximumLength: 64
+
+                            // The draft on root is the single source of truth.
+                            // Interactive editing writes `text` directly, which
+                            // would drop a declarative binding on it and leave
+                            // the field showing a stale name the next time an
+                            // editor is opened, so both directions are wired
+                            // explicitly. The equality guard keeps the two
+                            // assignments from looping and leaves the cursor
+                            // alone while the user is typing.
+                            function adoptDraft() {
+                                if (text !== root.equalizerProfileNameDraft)
+                                    text = root.equalizerProfileNameDraft
+                            }
+
+                            Component.onCompleted: equalizerProfileNameField.adoptDraft()
+                            onTextChanged: root.equalizerProfileNameDraft = text
+                            onAccepted: root.submitEqualizerProfileName()
+
+                            Connections {
+                                target: root
+
+                                function onEqualizerProfileNameDraftChanged() {
+                                    equalizerProfileNameField.adoptDraft()
+                                }
+                            }
+                        }
+
+                        PlasmaComponents.Button {
+                            text: root.equalizerCreateVisible ? "Criar" : "Salvar"
+                            enabled: root.equalizerProfileNameDraft.trim().length > 0
+                            onClicked: root.submitEqualizerProfileName()
+                        }
+
+                        PlasmaComponents.Button {
+                            text: "Cancelar"
+                            icon.name: "dialog-cancel"
+                            onClicked: root.closeEqualizerProfileEditors()
+                        }
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.equalizerDeleteConfirmation
+                            && root.selectedEqualizerProfileIsCustom()
+                        text: `Excluir o perfil “${root.equalizerSelectionLabel()}”? Clique em “Confirmar exclusão” para remover definitivamente.`
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.negativeTextColor
                     }
 
                     GridLayout {
@@ -1330,7 +1645,7 @@ PlasmoidItem {
                     root.equalizerTargetConnected = null
                     root.equalizerDefaultSafe = null
                     root.equalizerTarget = ""
-                    root.equalizerError = stderr
+                    root.equalizerStatusError = stderr
                         || "Não foi possível consultar o PipeWire. Verifique se ele está em execução e tente novamente."
                     return
                 }
@@ -1341,7 +1656,10 @@ PlasmoidItem {
                         ?? profile.applied_bands ?? profile.bands ?? []
                     root.replaceEqualizerBands(appliedBands.length === 10
                         ? appliedBands : profile.bands ?? [])
-                    root.equalizerPresetId = String(profile.preset ?? "custom")
+                    root.replaceEqualizerProfiles(profile.custom_profiles ?? [])
+                    root.equalizerActiveProfileId = profile.active_profile_id === null
+                        || profile.active_profile_id === undefined
+                        ? "" : String(profile.active_profile_id)
                     root.equalizerPipeWireActive = (pipewire.active ?? profile.active) === true
                     root.equalizerServiceActive = pipewire.service_active
                         ?? profile.service_active ?? null
@@ -1351,40 +1669,36 @@ PlasmoidItem {
                         ?? profile.default_safe ?? null
                     root.equalizerTarget = String(pipewire.target_node_name
                         ?? profile.target_node_name ?? "")
-                    root.equalizerError = String(pipewire.error ?? profile.error ?? "")
+                    root.equalizerStatusError = String(pipewire.error ?? profile.error ?? "")
                 } catch (error) {
                     root.equalizerPipeWireActive = false
                     root.equalizerServiceActive = null
                     root.equalizerTargetConnected = null
                     root.equalizerDefaultSafe = null
                     root.equalizerTarget = ""
-                    root.equalizerError = `Resposta inválida do equalizador: ${error}`
+                    root.equalizerStatusError = `Resposta inválida do equalizador: ${error}`
                 }
                 return
             }
             root.equalizerBusy = false
+            const action = root.pendingEqualizerAction
+            root.pendingEqualizerAction = ""
             if (exitCode === 0) {
-                if (root.pendingEqualizerAction === "reset") {
-                    root.updateEqualizerBands(0, 0, true)
-                    root.actionMessage = "Bandas zeradas"
-                } else if (root.pendingEqualizerAction === "set") {
-                    root.updateEqualizerBands(root.pendingEqualizerFrequency,
-                        root.pendingEqualizerGain, false)
-                    root.actionMessage = "Equalizador atualizado"
-                } else if (root.pendingEqualizerAction === "preset") {
-                    root.actionMessage = "Perfil de equalização aplicado"
-                }
-                root.pendingEqualizerAction = ""
-                root.equalizerError = ""
+                root.actionMessage = root.equalizerActionMessage(action)
+                root.equalizerActionError = ""
+                root.closeEqualizerProfileEditors()
                 clearAction.restart()
-                root.refreshEqualizer()
             } else {
-                root.pendingEqualizerAction = ""
-                root.equalizerError = stderr || "Não foi possível atualizar o equalizador"
-                // Restore the canonical values after a rejected update so a
-                // dragged handle never remains visually detached from DSP.
-                root.refreshEqualizer()
+                root.equalizerActionError = stderr
+                    || root.equalizerActionFailureMessage(action)
+                // A rejected name stays in the editor so it can be corrected,
+                // but a pending deletion always has to be confirmed again.
+                root.equalizerDeleteConfirmation = false
             }
+            // Reload after every mutation, accepted or rejected, so neither the
+            // selector nor the handles can stay detached from the confirmed
+            // profile library and DSP state.
+            root.refreshEqualizer()
         }
     }
 
