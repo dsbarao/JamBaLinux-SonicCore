@@ -1542,7 +1542,7 @@ PlasmoidItem {
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: root.spatialError.length > 0
+                        visible: !root.spatialActive && root.spatialError.length > 0
                         text: root.spatialError
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
@@ -1732,9 +1732,13 @@ PlasmoidItem {
                 root.spatialReady = capability.ready === true
                 const dataset = capability.dataset ?? {}
                 root.spatialDatasetValid = result.dataset_valid === true || dataset.valid === true
-                root.spatialError = root.spatialEnabled
-                    ? String(result.error ?? capability.error ?? "")
-                    : ""
+                // A healthy status is authoritative. Clear any transient
+                // startup error as soon as the backend reports recovery.
+                root.spatialError = result.active === true
+                    ? ""
+                    : (root.spatialEnabled
+                        ? String(result.error ?? capability.error ?? "")
+                        : "")
             } catch (error) {
                 root.spatialEnabled = false
                 root.spatialMode = "off"
@@ -1807,7 +1811,7 @@ PlasmoidItem {
     }
 
     Timer {
-        interval: 15000
+        interval: root.spatialEnabled && !root.spatialActive ? 1000 : 15000
         repeat: true
         running: root.openSection === "spatial"
         triggeredOnStart: true

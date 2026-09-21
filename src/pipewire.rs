@@ -916,6 +916,36 @@ fn managed_route_destination(
     sink_serial == equalizer_serial || spatial_serial == Some(sink_serial)
 }
 
+fn exact_spatial_sink(sinks: &[PulseSink]) -> Result<Option<&PulseSink>, String> {
+    let matches = sinks
+        .iter()
+        .filter(|sink| sink.name == SPATIAL_SINK_NODE)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [sink] => Ok(Some(*sink)),
+        _ => Err(format!(
+            "multiple spatial sinks named {SPATIAL_SINK_NODE} exist; refusing automatic Game routing; remove the duplicate spatial sink"
+        )),
+    }
+}
+
+fn spatial_output_connected(inputs: &[PulseInput], equalizer_serial: u64) -> bool {
+    let outputs = inputs
+        .iter()
+        .filter(|input| is_spatial_output(input))
+        .collect::<Vec<_>>();
+    matches!(outputs.as_slice(), [output] if output.sink_serial == equalizer_serial)
+}
+
+fn registered_route_needs_promotion(
+    current_sink_serial: u64,
+    equalizer_serial: u64,
+    processing_sink_serial: u64,
+) -> bool {
+    current_sink_serial == equalizer_serial && processing_sink_serial != equalizer_serial
+}
+
 /// Records streams that the spatial supervisor is about to hand to the
 /// equalizer. Only streams currently attached to the exact spatial sink are
 /// accepted, and their eventual non-EQ fallback is the proven physical Game
@@ -972,14 +1002,22 @@ pub fn register_spatial_fallback_streams(input_serials: &[u64]) -> Result<(), St
     write_state(&state)
 }
 
+fn is_managed_processing_sink(name: &str) -> bool {
+    name == VIRTUAL_SINK || name == SPATIAL_SINK_NODE
+}
+
 fn safe_default_sink<'a>(sinks: &'a [PulseSink], saved: Option<&str>) -> Option<&'a PulseSink> {
     saved
         .and_then(|name| {
             sinks
                 .iter()
-                .find(|sink| sink.name == name && sink.name != VIRTUAL_SINK)
+                .find(|sink| sink.name == name && !is_managed_processing_sink(&sink.name))
         })
-        .or_else(|| sinks.iter().find(|sink| sink.name != VIRTUAL_SINK))
+        .or_else(|| {
+            sinks
+                .iter()
+                .find(|sink| !is_managed_processing_sink(&sink.name))
+        })
 }
 
 fn run_route_iteration() -> Result<(), String> {
@@ -994,14 +1032,14 @@ fn run_route_iteration() -> Result<(), String> {
         return Ok(());
     }
 
-    if default == VIRTUAL_SINK {
+    if is_managed_processing_sink(&default) {
         let fallback = safe_default_sink(&sinks, state.default_sink_before.as_deref()).ok_or(
-            "the virtual equalizer is the default sink and no physical fallback is available",
+            "a managed processing sink is the default and no physical fallback is available",
         )?;
         pactl_success(&["set-default-sink", &fallback.name])?;
     } else if sinks
         .iter()
-        .any(|sink| sink.name == default && sink.name != VIRTUAL_SINK)
+        .any(|sink| sink.name == default && !is_managed_processing_sink(&sink.name))
         && state.default_sink_before.as_deref() != Some(default.as_str())
     {
         state.default_sink_before = Some(default);
@@ -1020,6 +1058,8 @@ fn run_route_iteration() -> Result<(), String> {
         .find(|sink| sink.name == VIRTUAL_SINK)
         .cloned()
         .ok_or("the automatic equalizer sink is not available yet")?;
+    let spatial_sink = exact_spatial_sink(&sinks)?;
+    let spatial_sink_serial = spatial_sink.map(|sink| sink.object_serial);
     if state.target_node_name != game.name || state.target_object_serial != Some(game.object_serial)
     {
         state.target_node_name.clone_from(&game.name);
@@ -1028,10 +1068,13 @@ fn run_route_iteration() -> Result<(), String> {
     }
 
     let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
-    let spatial_sink_serial = sinks
-        .iter()
-        .find(|sink| sink.name == SPATIAL_SINK_NODE)
-        .map(|sink| sink.object_serial);
+    // The spatial capture sink can become visible just before its stereo
+    // output is linked to the equalizer. Keep streams on the EQ during that
+    // short startup window; the next iteration promotes registered routes as
+    // soon as exactly one spatial output is connected to the exact EQ sink.
+    let processing_sink = spatial_sink
+        .filter(|_| spatial_output_connected(&inputs, virtual_sink.object_serial))
+        .unwrap_or(&virtual_sink);
     let old_len = state.routed_streams.len();
     state.routed_streams.retain(|route| {
         inputs.iter().any(|input| {
@@ -1089,7 +1132,7 @@ fn run_route_iteration() -> Result<(), String> {
     }
 
     for input in inputs {
-        if input.sink_serial != game.object_serial || is_equalizer_output(&input) {
+        if is_equalizer_output(&input) || is_spatial_output(&input) {
             continue;
         }
         if state.unproven_streams.iter().any(|identity| {
@@ -1097,9 +1140,25 @@ fn run_route_iteration() -> Result<(), String> {
         }) {
             continue;
         }
-        if state.routed_streams.iter().any(|route| {
+        let registered = state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
-        }) {
+        });
+        if registered {
+            if registered_route_needs_promotion(
+                input.sink_serial,
+                virtual_sink.object_serial,
+                processing_sink.object_serial,
+            ) {
+                pactl_success(&[
+                    "move-sink-input",
+                    &input.object_serial.to_string(),
+                    &processing_sink.name,
+                ])?;
+                changed = true;
+            }
+            continue;
+        }
+        if input.sink_serial != game.object_serial {
             continue;
         }
         state.routed_streams.push(RoutedStream {
@@ -1113,7 +1172,7 @@ fn run_route_iteration() -> Result<(), String> {
         pactl_success(&[
             "move-sink-input",
             &input.object_serial.to_string(),
-            &virtual_sink.name,
+            &processing_sink.name,
         ])?;
         changed = true;
     }
@@ -1295,7 +1354,7 @@ pub fn status(profile: &EqualizerProfile) -> Result<Status, String> {
     });
     let target_connected = graph_connected || pulse_connected;
     let chat_isolated = graph_isolated && pulse_isolated;
-    let default_safe = pactl_default_sink()? != VIRTUAL_SINK;
+    let default_safe = !is_managed_processing_sink(&pactl_default_sink()?);
     let quarantined = |input: &PulseInput| {
         state.as_ref().is_some_and(|state| {
             state.unproven_streams.iter().any(|identity| {
@@ -1382,14 +1441,14 @@ pub fn prepare(profile: &EqualizerProfile) -> Result<(), String> {
     let sinks = pulse_sinks(&sinks_value)?;
     let default = pactl_default_sink()?;
     let mut state = read_state()?.unwrap_or_default();
-    if default == VIRTUAL_SINK {
+    if is_managed_processing_sink(&default) {
         let fallback = safe_default_sink(&sinks, state.default_sink_before.as_deref()).ok_or(
-            "the virtual equalizer is the default sink and no physical fallback is available",
+            "a managed processing sink is the default and no physical fallback is available",
         )?;
         pactl_success(&["set-default-sink", &fallback.name])?;
     } else if sinks
         .iter()
-        .any(|sink| sink.name == default && sink.name != VIRTUAL_SINK)
+        .any(|sink| sink.name == default && !is_managed_processing_sink(&sink.name))
     {
         state.default_sink_before = Some(default);
     }
@@ -1544,7 +1603,7 @@ pub fn restore_routes() -> Result<(), String> {
             remaining_routes.push(route.clone());
         }
     }
-    if pactl_default_sink()? == VIRTUAL_SINK
+    if is_managed_processing_sink(&pactl_default_sink()?)
         && let Some(default) = safe_default_sink(&sinks, state.default_sink_before.as_deref())
     {
         pactl_success(&["set-default-sink", &default.name])?;
@@ -1630,11 +1689,15 @@ mod tests {
     }
 
     #[test]
-    fn safe_default_never_selects_the_virtual_sink() {
+    fn safe_default_never_selects_a_managed_processing_sink() {
         let sinks = vec![
             PulseSink {
                 object_serial: 1,
                 name: VIRTUAL_SINK.into(),
+            },
+            PulseSink {
+                object_serial: 4,
+                name: SPATIAL_SINK_NODE.into(),
             },
             PulseSink {
                 object_serial: 2,
@@ -1653,6 +1716,71 @@ mod tests {
             safe_default_sink(&sinks, Some(VIRTUAL_SINK)).map(|sink| sink.name.as_str()),
             Some("physical-a")
         );
+        assert_eq!(
+            safe_default_sink(&sinks, Some(SPATIAL_SINK_NODE)).map(|sink| sink.name.as_str()),
+            Some("physical-a")
+        );
+    }
+
+    #[test]
+    fn spatial_route_requires_exactly_one_spatial_sink() {
+        let none = vec![PulseSink {
+            object_serial: 1,
+            name: VIRTUAL_SINK.into(),
+        }];
+        assert_eq!(exact_spatial_sink(&none).unwrap(), None);
+
+        let one = vec![PulseSink {
+            object_serial: 2,
+            name: SPATIAL_SINK_NODE.into(),
+        }];
+        assert_eq!(
+            exact_spatial_sink(&one)
+                .unwrap()
+                .map(|sink| sink.object_serial),
+            Some(2)
+        );
+
+        let duplicates = vec![
+            PulseSink {
+                object_serial: 2,
+                name: SPATIAL_SINK_NODE.into(),
+            },
+            PulseSink {
+                object_serial: 3,
+                name: SPATIAL_SINK_NODE.into(),
+            },
+        ];
+        let error = exact_spatial_sink(&duplicates).unwrap_err();
+        assert!(error.contains("multiple spatial sinks"));
+        assert!(error.contains("remove the duplicate"));
+    }
+
+    #[test]
+    fn spatial_route_waits_for_one_output_connected_to_the_equalizer() {
+        let output = |serial, sink_serial| PulseInput {
+            object_serial: serial,
+            sink_serial,
+            stream_key: format!("spatial-{serial}"),
+            node_name: SPATIAL_OUTPUT_NODE.into(),
+            media_name: "JamBaLinux Game Spatial".into(),
+        };
+
+        assert!(!spatial_output_connected(&[], 100));
+        assert!(!spatial_output_connected(&[output(1, 200)], 100));
+        assert!(spatial_output_connected(&[output(1, 100)], 100));
+        assert!(!spatial_output_connected(
+            &[output(1, 100), output(2, 100)],
+            100
+        ));
+    }
+
+    #[test]
+    fn a_registered_equalizer_route_is_promoted_when_spatial_becomes_ready() {
+        assert!(registered_route_needs_promotion(100, 100, 200));
+        assert!(!registered_route_needs_promotion(200, 100, 200));
+        assert!(!registered_route_needs_promotion(100, 100, 100));
+        assert!(!registered_route_needs_promotion(300, 100, 200));
     }
 
     #[test]
