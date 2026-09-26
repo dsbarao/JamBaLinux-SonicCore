@@ -295,7 +295,15 @@ for a third-party HRIR dataset.
 
 When explicitly enabled, the persistent spatial supervisor creates one 7.1
 virtual sink and convolves its eight inputs through sixteen HRIR paths into a
-stereo output. That output disables session-manager autoconnection and is
+stereo wet output. In parallel, its dry path makes an ITU-style 7.1-to-stereo
+downmix: left is `FL + 0.707·FC + 0.707·SL + 0.707·RL`, right is
+`FR + 0.707·FC + 0.707·SR + 0.707·RR`; LFE is intentionally omitted. Final
+per-channel mixers start wet at `1.0` and dry at `0.0`, so the rendered output
+is identical to the former binaural-only graph until a future live transition
+changes those controls. Thus a stereo source using only FL/FR exits dry as
+left=FL and right=FR. The PipeWire `channelmix` behavior for a stereo client
+connected to the 7.1 sink remains an upmix assumption to verify on hardware.
+That output disables session-manager autoconnection and is
 linked explicitly, channel by channel, only to the existing equalizer input;
 the complete authorized path is `application -> Spatial -> EQ -> Quantum
 Game`. The spatial sink cannot become the default, and health fails closed if

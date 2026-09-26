@@ -12,7 +12,8 @@
 //! `/usr/share/pipewire/filter-chain/sink-virtual-surround-7.1-hesuvi.conf`:
 //! eight surround inputs feed sixteen HRIR convolvers (fourteen distinct WAV
 //! channels; the two LFE convolvers reuse the FC responses), mixed down to a
-//! stereo pair that is handed to the existing equalizer sink.
+//! stereo pair. A parallel ITU-style dry downmix and final wet/dry mixers let
+//! the persistent graph later change modes without replacing the sink.
 //!
 //! Rendering is fail-closed with respect to the one caller-controlled value in
 //! the config — the HRIR path. A path that cannot be expressed exactly is a
@@ -160,6 +161,43 @@ const OUTPUT_LINKS: [(&str, &str, u8); 16] = [
     ("convLFE_L", "mixL", 8),
 ];
 
+/// The final per-channel mixers that combine the binaural (wet) and direct
+/// surround downmix (dry) paths. Their names are part of the live-control
+/// contract; do not rename them without updating callers that use
+/// `pw-cli set-param`.
+const WET_DRY_MIXERS: [&str; 2] = ["wetDryL", "wetDryR"];
+
+/// Live PipeWire control names for the binaural inputs of the final mixers.
+/// Both start at 1.0, preserving the pre-wet/dry renderer's output.
+pub const SPATIAL_WET_CONTROLS: [&str; 2] = ["wetDryL:Gain 1", "wetDryR:Gain 1"];
+
+/// Live PipeWire control names for the direct stereo downmix inputs of the
+/// final mixers. Both start muted at 0.0, preserving the current wet-only
+/// behavior until a later lifecycle phase changes them live.
+pub const SPATIAL_DRY_CONTROLS: [&str; 2] = ["wetDryL:Gain 2", "wetDryR:Gain 2"];
+
+/// ITU-style dry downmix links. LFE is intentionally omitted. Left receives
+/// FL, FC, SL and RL; right receives FR, FC, SR and RR.
+const DRY_DOWNMIX_LINKS: [(&str, &str, u8); 8] = [
+    ("copyFL", "dryL", 1),
+    ("copyFC", "dryL", 2),
+    ("copySL", "dryL", 3),
+    ("copyRL", "dryL", 4),
+    ("copyFR", "dryR", 1),
+    ("copyFC", "dryR", 2),
+    ("copySR", "dryR", 3),
+    ("copyRR", "dryR", 4),
+];
+
+/// The final wet/dry links. Input 1 is the pre-existing binaural stereo
+/// result; input 2 is the direct dry downmix.
+const FINAL_MIX_LINKS: [(&str, &str, u8); 4] = [
+    ("mixL", "wetDryL", 1),
+    ("dryL", "wetDryL", 2),
+    ("mixR", "wetDryR", 1),
+    ("dryR", "wetDryR", 2),
+];
+
 /// Escapes a value for inclusion inside a double-quoted PipeWire config string.
 /// Mirrors `crate::pipewire::pipewire_string` and additionally neutralizes the
 /// control characters that would otherwise break the config text.
@@ -258,6 +296,20 @@ pub fn render_filter_chain_config(hrir_path: &Path) -> Result<String, String> {
     }
     nodes.push_str("                    { type = builtin label = mixer name = mixL }\n");
     nodes.push_str("                    { type = builtin label = mixer name = mixR }\n");
+    // The direct path follows the conventional ITU surround-to-stereo matrix:
+    // main channel 1.0, centre/surround channels 0.707, and no LFE.
+    nodes.push_str(
+        "                    { type = builtin label = mixer name = dryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
+    );
+    nodes.push_str(
+        "                    { type = builtin label = mixer name = dryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
+    );
+    nodes.push_str(
+        "                    { type = builtin label = mixer name = wetDryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
+    );
+    nodes.push_str(
+        "                    { type = builtin label = mixer name = wetDryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
+    );
 
     let mut links = String::new();
     for (output, input) in INPUT_LINKS {
@@ -266,6 +318,16 @@ pub fn render_filter_chain_config(hrir_path: &Path) -> Result<String, String> {
         ));
     }
     for (output, mixer, index) in OUTPUT_LINKS {
+        links.push_str(&format!(
+            "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
+        ));
+    }
+    for (output, mixer, index) in DRY_DOWNMIX_LINKS {
+        links.push_str(&format!(
+            "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
+        ));
+    }
+    for (output, mixer, index) in FINAL_MIX_LINKS {
         links.push_str(&format!(
             "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
         ));
@@ -317,7 +379,7 @@ context.modules = [
                 links = [
 {links}                ]
                 inputs = [ {inputs} ]
-                outputs = [ "mixL:Out" "mixR:Out" ]
+                outputs = [ "wetDryL:Out" "wetDryR:Out" ]
             }
             capture.props = {
                 node.name = "{sink}"
@@ -432,6 +494,24 @@ mod tests {
         ("convLFE_L", "mixL", 8),
     ];
 
+    const EXPECTED_DRY_DOWNMIX_LINKS: [(&str, &str, u8); 8] = [
+        ("copyFL", "dryL", 1),
+        ("copyFC", "dryL", 2),
+        ("copySL", "dryL", 3),
+        ("copyRL", "dryL", 4),
+        ("copyFR", "dryR", 1),
+        ("copyFC", "dryR", 2),
+        ("copySR", "dryR", 3),
+        ("copyRR", "dryR", 4),
+    ];
+
+    const EXPECTED_FINAL_MIX_LINKS: [(&str, &str, u8); 4] = [
+        ("mixL", "wetDryL", 1),
+        ("dryL", "wetDryL", 2),
+        ("mixR", "wetDryR", 1),
+        ("dryR", "wetDryR", 2),
+    ];
+
     /// The exact `nodes = [ ... ]` body the tables above imply, for `hrir`.
     fn expected_nodes_block(hrir: &str) -> String {
         let mut block = String::new();
@@ -447,6 +527,18 @@ mod tests {
         }
         block.push_str("                    { type = builtin label = mixer name = mixL }\n");
         block.push_str("                    { type = builtin label = mixer name = mixR }\n");
+        block.push_str(
+            "                    { type = builtin label = mixer name = dryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
+        );
+        block.push_str(
+            "                    { type = builtin label = mixer name = dryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
+        );
+        block.push_str(
+            "                    { type = builtin label = mixer name = wetDryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
+        );
+        block.push_str(
+            "                    { type = builtin label = mixer name = wetDryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
+        );
         block
     }
 
@@ -459,6 +551,16 @@ mod tests {
             ));
         }
         for (output, mixer, index) in EXPECTED_OUTPUT_LINKS {
+            block.push_str(&format!(
+                "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
+            ));
+        }
+        for (output, mixer, index) in EXPECTED_DRY_DOWNMIX_LINKS {
+            block.push_str(&format!(
+                "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
+            ));
+        }
+        for (output, mixer, index) in EXPECTED_FINAL_MIX_LINKS {
             block.push_str(&format!(
                 "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
             ));
@@ -493,7 +595,7 @@ mod tests {
         assert!(config.contains("node.dont-fallback = true"));
         assert!(config.contains("audio.channels = 2"));
         assert!(config.contains("audio.position = [ FL FR ]"));
-        assert!(config.contains("outputs = [ \"mixL:Out\" \"mixR:Out\" ]"));
+        assert!(config.contains("outputs = [ \"wetDryL:Out\" \"wetDryR:Out\" ]"));
         assert!(config.contains(&format!("target.object = \"{TARGET_EQUALIZER_SINK}\"")));
         // Exactly one routing target, and it is the equalizer.
         assert_eq!(config.matches("target.object").count(), 1);
@@ -504,7 +606,7 @@ mod tests {
         let config = render();
         assert_eq!(config.matches("label = copy ").count(), 8);
         assert_eq!(config.matches("label = convolver").count(), 16);
-        assert_eq!(config.matches("label = mixer").count(), 2);
+        assert_eq!(config.matches("label = mixer").count(), 6);
 
         // Every entry, in order, name and channel — not a sample of them.
         assert_eq!(
@@ -572,6 +674,48 @@ mod tests {
                 "{} must have exactly one output link",
                 convolver.name
             );
+        }
+    }
+
+    #[test]
+    fn dry_path_uses_the_documented_itu_downmix_without_lfe() {
+        assert_eq!(DRY_DOWNMIX_LINKS, EXPECTED_DRY_DOWNMIX_LINKS);
+        assert_eq!(FINAL_MIX_LINKS, EXPECTED_FINAL_MIX_LINKS);
+        let config = render();
+
+        for (output, mixer, index) in EXPECTED_DRY_DOWNMIX_LINKS {
+            assert!(config.contains(&format!(
+                "output = \"{output}:Out\" input = \"{mixer}:In {index}\""
+            )));
+        }
+        assert!(
+            !DRY_DOWNMIX_LINKS
+                .iter()
+                .any(|(output, _, _)| *output == "copyLFE")
+        );
+        assert!(config.contains(
+            "name = dryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 }"
+        ));
+        assert!(config.contains(
+            "name = dryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 }"
+        ));
+    }
+
+    #[test]
+    fn wet_dry_controls_exist_and_default_to_the_current_wet_only_output() {
+        let config = render();
+        assert_eq!(WET_DRY_MIXERS, ["wetDryL", "wetDryR"]);
+        for control in SPATIAL_WET_CONTROLS {
+            let (mixer, gain) = control.split_once(':').expect("mixer:control name");
+            assert!(config.contains(&format!(
+                "name = {mixer} control = {{ \"{gain}\" = 1.0 \"Gain 2\" = 0.0 }}"
+            )));
+        }
+        for control in SPATIAL_DRY_CONTROLS {
+            let (mixer, gain) = control.split_once(':').expect("mixer:control name");
+            assert!(config.contains(&format!(
+                "name = {mixer} control = {{ \"Gain 1\" = 1.0 \"{gain}\" = 0.0 }}"
+            )));
         }
     }
 
