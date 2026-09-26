@@ -59,6 +59,12 @@ PlasmoidItem {
     property string equalizerStatusError: ""
     property string equalizerActionError: ""
     property string pendingEqualizerAction: ""
+    // Latest requested gain per frequency (Hz -> dB) not sent yet. A slider
+    // moved while another `set` runs lands here and is sent when that command
+    // finishes: a change is replaced by a newer one for the same band, never
+    // dropped.
+    property var pendingEqualizerBands: ({})
+    property string equalizerSetCommand: ""
     property string equalizerActiveProfileId: ""
     property int equalizerProfileRevision: 0
     property bool equalizerCreateVisible: false
@@ -184,8 +190,76 @@ PlasmoidItem {
 
     function setEqualizerBand(frequencyHz, gainDb) {
         const normalizedGain = Math.round(Number(gainDb) * 10) / 10
-        startEqualizerAction("set",
-            ["set", String(frequencyHz), String(normalizedGain)])
+        const pending = Object.assign({}, pendingEqualizerBands)
+        pending[String(frequencyHz)] = normalizedGain
+        pendingEqualizerBands = pending
+        equalizerFullRefresh.stop()
+        sendNextEqualizerBand()
+    }
+
+    function sendNextEqualizerBand() {
+        if (equalizerBusy) return
+        const frequencies = Object.keys(pendingEqualizerBands)
+        if (frequencies.length === 0) return
+        const frequency = frequencies[0]
+        const gain = pendingEqualizerBands[frequency]
+        const pending = Object.assign({}, pendingEqualizerBands)
+        delete pending[frequency]
+        pendingEqualizerBands = pending
+        equalizerBusy = true
+        pendingEqualizerAction = "set"
+        equalizerActionError = ""
+        equalizerSetCommand = equalizerCliCommand(
+            ["set", "--format", "json", frequency, String(gain)])
+        equalizerExecutable.connectSource(equalizerSetCommand)
+    }
+
+    // Handles follow the DSP's confirmed gains, except bands the user already
+    // moved again: those keep the newer, still queued value.
+    function showConfirmedEqualizerBands(bands) {
+        const shown = []
+        for (let index = 0; index < bands.length; ++index) {
+            const frequency = String(bands[index].frequency_hz)
+            shown.push({
+                "frequency_hz": bands[index].frequency_hz,
+                "gain_db": pendingEqualizerBands[frequency] ?? bands[index].gain_db
+            })
+        }
+        replaceEqualizerBands(shown)
+    }
+
+    function finishEqualizerSet(exitCode, stdout, stderr) {
+        equalizerBusy = false
+        pendingEqualizerAction = ""
+        let result = null
+        try {
+            result = JSON.parse(stdout)
+        } catch (error) {
+            result = null
+        }
+        const bands = result && Array.isArray(result.applied_bands) ? result.applied_bands : []
+        if (bands.length === 10) {
+            showConfirmedEqualizerBands(bands)
+            equalizerActiveProfileId = result.active_profile_id === null
+                || result.active_profile_id === undefined ? "" : String(result.active_profile_id)
+        }
+        const failed = exitCode !== 0 || Boolean(result && result.error)
+        if (failed) {
+            // The CLI answers a rejected change with the previous, still
+            // applied profile: the handle goes back to the confirmed value.
+            equalizerActionError = String(result?.error ?? "") || stderr
+                || equalizerActionFailureMessage("set")
+            equalizerVisualRevision += 1
+        } else {
+            equalizerActionError = ""
+        }
+        if (Object.keys(pendingEqualizerBands).length > 0) {
+            sendNextEqualizerBand()
+        } else if (failed || bands.length !== 10) {
+            refreshEqualizer()
+        } else {
+            equalizerFullRefresh.restart()
+        }
     }
 
     function shellQuote(value) {
@@ -904,11 +978,13 @@ PlasmoidItem {
                 ColumnLayout {
                     Layout.fillWidth: true
                     visible: root.openSection === "equalizer"
-                    enabled: !root.equalizerBusy && !root.equalizerUpdating
+                    // Only profile actions below are blocked while one runs: the band sliders
+                    // keep moving and queue their latest value (pendingEqualizerBands).
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.ComboBox {
                         id: equalizerProfileSelector
+                        enabled: !root.equalizerBusy && !root.equalizerUpdating
                         Layout.alignment: Qt.AlignHCenter
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 14
                         model: equalizerProfileModel
@@ -952,6 +1028,7 @@ PlasmoidItem {
                     }
 
                     RowLayout {
+                        enabled: !root.equalizerBusy && !root.equalizerUpdating
                         Layout.alignment: Qt.AlignHCenter
 
                         PlasmaComponents.Button {
@@ -1009,6 +1086,7 @@ PlasmoidItem {
                     }
 
                     RowLayout {
+                        enabled: !root.equalizerBusy && !root.equalizerUpdating
                         Layout.fillWidth: true
                         visible: root.equalizerCreateVisible || root.equalizerRenameVisible
                         onVisibleChanged: {
@@ -1116,7 +1194,7 @@ PlasmoidItem {
 
                                 Timer {
                                     id: equalizerCommit
-                                    interval: 180
+                                    interval: 70
                                     repeat: false
                                     onTriggered: {
                                         if (!equalizerSlider.pressed) root.setEqualizerBand(
@@ -1161,6 +1239,7 @@ PlasmoidItem {
                     }
 
                     PlasmaComponents.Button {
+                        enabled: !root.equalizerBusy && !root.equalizerUpdating
                         Layout.alignment: Qt.AlignHCenter
                         text: "Zerar bandas"
                         icon.name: "edit-clear"
@@ -1654,8 +1733,11 @@ PlasmoidItem {
                     const pipewire = profile.pipewire ?? {}
                     const appliedBands = pipewire.applied_bands
                         ?? profile.applied_bands ?? profile.bands ?? []
-                    root.replaceEqualizerBands(appliedBands.length === 10
-                        ? appliedBands : profile.bands ?? [])
+                    // A status read while a `set` is in flight can predate it;
+                    // the set's own answer updates the handles instead.
+                    if (!root.equalizerBusy)
+                        root.showConfirmedEqualizerBands(appliedBands.length === 10
+                            ? appliedBands : profile.bands ?? [])
                     root.replaceEqualizerProfiles(profile.custom_profiles ?? [])
                     root.equalizerActiveProfileId = profile.active_profile_id === null
                         || profile.active_profile_id === undefined
@@ -1678,6 +1760,11 @@ PlasmoidItem {
                     root.equalizerTarget = ""
                     root.equalizerStatusError = `Resposta inválida do equalizador: ${error}`
                 }
+                return
+            }
+            if (sourceName === root.equalizerSetCommand) {
+                root.equalizerSetCommand = ""
+                root.finishEqualizerSet(exitCode, stdout, stderr)
                 return
             }
             root.equalizerBusy = false
@@ -1793,6 +1880,18 @@ PlasmoidItem {
         interval: 300
         repeat: false
         onTriggered: root.refresh()
+    }
+
+    // Full status reload after a burst of slider changes: the `set` answers
+    // already moved the handles, this only re-syncs profiles and health.
+    Timer {
+        id: equalizerFullRefresh
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            if (!root.equalizerBusy && Object.keys(root.pendingEqualizerBands).length === 0)
+                root.refreshEqualizer()
+        }
     }
 
     Timer {
