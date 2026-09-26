@@ -185,6 +185,20 @@ fn config_path() -> Result<PathBuf, String> {
 }
 
 fn route_lock() -> Result<File, String> {
+    #[cfg(test)]
+    if MOCK_STATE.with(|state| state.borrow().is_some()) {
+        // Unit tests keep routing state in-memory. Locking /dev/null preserves
+        // the same FileExt synchronization contract without creating files in
+        // the developer's configuration directory.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .map_err(|error| format!("could not open test route lock: {error}"))?;
+        lock.lock()
+            .map_err(|error| format!("could not lock test route lock: {error}"))?;
+        return Ok(lock);
+    }
     let lock_path = path(LOCK_NAME)?;
     let directory = lock_path
         .parent()
@@ -293,6 +307,16 @@ fn pactl_success(args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 std::thread_local! {
     static MOCK_STATE: std::cell::RefCell<Option<BackendState>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn install_mock_state_for_test() {
+    MOCK_STATE.with(|state| *state.borrow_mut() = Some(BackendState::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_mock_state_for_test() {
+    MOCK_STATE.with(|state| *state.borrow_mut() = None);
 }
 
 fn read_state() -> Result<Option<BackendState>, String> {
