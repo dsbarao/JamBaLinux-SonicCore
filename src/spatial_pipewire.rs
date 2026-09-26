@@ -222,7 +222,7 @@ pub fn restore_streams() -> Result<(), String> {
         .cloned()
         .collect::<Vec<_>>();
     let input_serials = inputs.iter().map(|input| input.index).collect::<Vec<_>>();
-    crate::pipewire::register_spatial_fallback_streams(&input_serials)?;
+    let _ = crate::pipewire::register_spatial_fallback_streams(&input_serials);
     for input in inputs {
         pactl_success(&["move-sink-input", &input.index.to_string(), &equalizer.name])?;
     }

@@ -56,6 +56,22 @@ Health checks detect links from the equalizer output to the headset's Chat or
 capture nodes and report the chain as unhealthy; they do not remove those
 links.
 
+### WirePlumber stream restoration and routing
+
+When WirePlumber's `stream-restore` module restores application streams directly
+to the virtual equalizer sink (because the application previously played through
+it), the routing supervisor checks whether the stream's application identity
+(`stream_key`) was previously proven and routed from the physical Quantum Game
+sink (`proven_stream_keys`). If proven, the stream is immediately registered with
+its original destination as the Game sink and remains processed (by EQ or promoted
+to spatial audio) rather than being put into `unproven_streams` quarantine and
+evacuated to raw physical output. If unproven, the quarantine and evacuation to
+the safe default sink remain in effect. Furthermore, any stream manually moved
+by the user to a different output (such as HDMI or analog) is never hijacked back.
+When the spatial graph is stopped, all streams on the spatial capture sink are
+safely evacuated to the equalizer sink before the graph process is terminated.
+
+
 `soniccore equalizer status` and the widget expose actionable errors for an
 inactive service, unavailable Game output, missing or disconnected filter,
 unsafe default or links, unobservable DSP controls, and a mismatch between the

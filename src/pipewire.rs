@@ -54,6 +54,7 @@ struct BackendState {
     routing_paused: bool,
     routed_streams: Vec<RoutedStream>,
     unproven_streams: Vec<StreamIdentity>,
+    proven_stream_keys: Vec<String>,
     last_route_error: Option<String>,
 }
 
@@ -289,7 +290,18 @@ fn pactl_success(args: &[&str]) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static MOCK_STATE: std::cell::RefCell<Option<BackendState>> = const { std::cell::RefCell::new(None) };
+}
+
 fn read_state() -> Result<Option<BackendState>, String> {
+    #[cfg(test)]
+    {
+        if let Some(state) = MOCK_STATE.with(|m| m.borrow().clone()) {
+            return Ok(Some(state));
+        }
+    }
     let state = state_path()?;
     match fs::read_to_string(&state) {
         Ok(contents) => serde_json::from_str(&contents)
@@ -309,6 +321,13 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 }
 
 fn write_state(state: &BackendState) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        if MOCK_STATE.with(|m| m.borrow().is_some()) {
+            MOCK_STATE.with(|m| *m.borrow_mut() = Some(state.clone()));
+            return Ok(());
+        }
+    }
     let mut state = state.clone();
     state.schema = backend_schema();
     let serialized = serde_json::to_string_pretty(&state).map_err(|error| error.to_string())?;
@@ -1004,12 +1023,14 @@ pub fn register_spatial_fallback_streams(input_serials: &[u64]) -> Result<(), St
         if !state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
         }) {
-            state.routed_streams.push(RoutedStream {
-                object_serial: input.object_serial,
-                stream_key: input.stream_key.clone(),
-                original_sink_name: game.name.clone(),
-                original_sink_serial: game.object_serial,
-            });
+            if state.proven_stream_keys.contains(&input.stream_key) {
+                state.routed_streams.push(RoutedStream {
+                    object_serial: input.object_serial,
+                    stream_key: input.stream_key.clone(),
+                    original_sink_name: game.name.clone(),
+                    original_sink_serial: game.object_serial,
+                });
+            }
         }
     }
     write_state(&state)
@@ -1120,6 +1141,18 @@ fn run_route_iteration() -> Result<(), String> {
             && !is_spatial_output(input)
             && !registered
         {
+            if state.proven_stream_keys.contains(&input.stream_key) {
+                state.routed_streams.push(RoutedStream {
+                    object_serial: input.object_serial,
+                    stream_key: input.stream_key.clone(),
+                    original_sink_name: game.name.clone(),
+                    original_sink_serial: game.object_serial,
+                });
+                write_state(&state)?;
+                changed = true;
+                continue;
+            }
+
             if !state.unproven_streams.iter().any(|identity| {
                 identity.object_serial == input.object_serial
                     && identity.stream_key == input.stream_key
@@ -1173,6 +1206,12 @@ fn run_route_iteration() -> Result<(), String> {
         }
         if input.sink_serial != game.object_serial {
             continue;
+        }
+        if !state.proven_stream_keys.contains(&input.stream_key) {
+            state.proven_stream_keys.push(input.stream_key.clone());
+            if state.proven_stream_keys.len() > 100 {
+                state.proven_stream_keys.remove(0);
+            }
         }
         state.routed_streams.push(RoutedStream {
             object_serial: input.object_serial,
@@ -2123,5 +2162,126 @@ mod tests {
             }),
         );
         assert_eq!(node_is_chat_or_capture(&microphone), (false, true));
+    }
+    #[test]
+    fn unproven_stream_is_not_quarantined_if_previously_routed() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        // --- ITERATION 1 ---
+        // 1. pactl --format=json list sinks
+        runner.push_output(r#"[
+            { "name": "alsa_output.usb_quantum.game", "description": "Quantum Game", "index": 200, "properties": { "object.serial": 200, "alsa.components": "USB0ecb:2069", "alsa.device": 0, "api.alsa.pcm.stream": "playback" } },
+            { "name": "jambalinux-soniccore-game-equalizer", "index": 100, "properties": { "object.serial": 100 } }
+        ]"#);
+        // 2. pactl get-default-sink
+        runner.push_output("alsa_output.usb_quantum.game");
+        // 3. pactl --format=json list sink-inputs (Stream appears on game sink first)
+        runner.push_output(r#"[
+            { "index": 300, "sink": 200, "properties": { "object.serial": 300, "application.name": "chrome" } }
+        ]"#);
+        // 4. pactl move-sink-input 300 jambalinux-soniccore-game-equalizer
+        runner.push_output("");
+
+        // --- ITERATION 2 ---
+        // 1. pactl --format=json list sinks
+        runner.push_output(r#"[
+            { "name": "alsa_output.usb_quantum.game", "description": "Quantum Game", "index": 200, "properties": { "object.serial": 200, "alsa.components": "USB0ecb:2069", "alsa.device": 0, "api.alsa.pcm.stream": "playback" } },
+            { "name": "jambalinux-soniccore-game-equalizer", "index": 100, "properties": { "object.serial": 100 } }
+        ]"#);
+        // 2. pactl get-default-sink
+        runner.push_output("alsa_output.usb_quantum.game");
+        // 3. pactl --format=json list sink-inputs (Stream reappears on equalizer sink directly)
+        runner.push_output(r#"[
+            { "index": 301, "sink": 100, "properties": { "object.serial": 301, "application.name": "chrome" } }
+        ]"#);
+
+        let _guard = crate::command::set_runner(runner.clone());
+        MOCK_STATE.with(|m| *m.borrow_mut() = Some(BackendState::default()));
+
+        // Run first iteration: Stream 300 is on Game. It will be registered and moved to equalizer.
+        run_route_iteration().unwrap();
+
+        let calls = runner.command_lines();
+        assert!(
+            calls
+                .iter()
+                .any(|args| args.contains("move-sink-input") && args.contains("300"))
+        );
+
+        // Run second iteration: Stream 301 is on Equalizer directly. It should be recognized and NOT quarantined!
+        run_route_iteration().unwrap();
+
+        let state = MOCK_STATE.with(|m| m.borrow().clone().unwrap());
+        assert!(state.unproven_streams.is_empty(), "Stream was quarantined!");
+        assert_eq!(state.routed_streams.len(), 1, "Stream was not registered!");
+        assert_eq!(state.routed_streams[0].object_serial, 301);
+
+        // Clean up mock
+        MOCK_STATE.with(|m| *m.borrow_mut() = None);
+    }
+
+    #[test]
+    fn unproven_stream_on_spatial_sink_is_evacuated_safely() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        // 1. pactl --format=json list sinks
+        runner.push_output(r#"[
+            { "name": "alsa_output.usb_quantum.game", "description": "Quantum Game", "index": 200, "properties": { "object.serial": 200, "alsa.components": "USB0ecb:2069", "alsa.device": 0, "api.alsa.pcm.stream": "playback" } },
+            { "name": "jambalinux-soniccore-game-equalizer", "index": 100, "properties": { "object.serial": 100 } },
+            { "name": "jambalinux-soniccore-game-spatial", "index": 400, "properties": { "object.serial": 400 } }
+        ]"#);
+        // 2. pw-dump (ensure_equalizer_target)
+        runner.push_output(
+            r#"[
+            {
+                "id": 100,
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {
+                        "node.name": "jambalinux-soniccore-game-equalizer",
+                        "media.class": "Audio/Sink",
+                        "object.serial": 100
+                    }
+                }
+            }
+        ]"#,
+        );
+        // 3. pactl --format=json list sink-inputs (restore_streams)
+        runner.push_output(r#"[
+            { "index": 300, "sink": 400, "properties": { "object.serial": 300, "application.name": "chrome" } }
+        ]"#);
+
+        // 4. register_spatial_fallback_streams -> pactl list sinks
+        runner.push_output(r#"[
+            { "name": "alsa_output.usb_quantum.game", "description": "Quantum Game", "index": 200, "properties": { "object.serial": 200, "alsa.components": "USB0ecb:2069", "alsa.device": 0, "api.alsa.pcm.stream": "playback" } },
+            { "name": "jambalinux-soniccore-game-equalizer", "index": 100, "properties": { "object.serial": 100 } },
+            { "name": "jambalinux-soniccore-game-spatial", "index": 400, "properties": { "object.serial": 400 } }
+        ]"#);
+        // 5. register_spatial_fallback_streams -> pactl list sink-inputs
+        runner.push_output(r#"[
+            { "index": 300, "sink": 400, "properties": { "object.serial": 300, "application.name": "chrome" } }
+        ]"#);
+
+        // 6. pactl move-sink-input 300 jambalinux-soniccore-game-equalizer
+        runner.push_output("");
+
+        let _guard = crate::command::set_runner(runner.clone());
+        MOCK_STATE.with(|m| *m.borrow_mut() = Some(BackendState::default()));
+
+        // Call spatial_pipewire::restore_streams() which should evacuate stream 300 to equalizer.
+        crate::spatial_pipewire::restore_streams().unwrap();
+
+        let calls = runner.command_lines();
+        assert!(calls.iter().any(|args| args.contains("move-sink-input")
+            && args.contains("300")
+            && args.contains("jambalinux-soniccore-game-equalizer")));
+
+        // The stream should NOT be blindly registered as Game!
+        let state = MOCK_STATE.with(|m| m.borrow().clone().unwrap());
+        assert!(
+            state.routed_streams.is_empty(),
+            "Stream was blindly registered!"
+        );
+
+        // Clean up mock
+        MOCK_STATE.with(|m| *m.borrow_mut() = None);
     }
 }
