@@ -194,20 +194,16 @@ fn route_lock() -> Result<File, String> {
     Ok(lock)
 }
 
+/// Every short-lived client runs with the bounded budget from
+/// [`crate::command`]. The routing paths below call them while holding the
+/// route lock, so an unbounded wait here would block every other equalizer and
+/// spatial operation instead of failing with an actionable error.
 fn command_output(program: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("could not start {program}: {error}"))
+    crate::command::run_default(program, args)
 }
 
 fn command_failure(program: &str, output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if stderr.is_empty() {
-        format!("{program} exited with {}", output.status)
-    } else {
-        format!("{program} failed: {stderr}")
-    }
+    crate::command::failure(program, output)
 }
 
 fn systemctl(args: &[&str]) -> Result<Output, String> {

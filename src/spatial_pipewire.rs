@@ -40,20 +40,15 @@ struct PulseInput {
     sink: u64,
 }
 
+/// Every short-lived client runs with the bounded budget from
+/// [`crate::command`]. `pw-link --wait` in particular blocks until the link
+/// appears, and the supervisor loop below must never be parked on it.
 fn command_output(program: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("could not start {program}: {error}"))
+    crate::command::run_default(program, args)
 }
 
 fn command_failure(program: &str, output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if stderr.is_empty() {
-        format!("{program} exited with {}", output.status)
-    } else {
-        format!("{program} failed: {stderr}")
-    }
+    crate::command::failure(program, output)
 }
 
 fn pw_dump() -> Result<Vec<Value>, String> {

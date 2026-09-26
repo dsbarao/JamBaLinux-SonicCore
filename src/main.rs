@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+mod command;
 mod equalizer;
 mod hid;
 mod pipewire;
