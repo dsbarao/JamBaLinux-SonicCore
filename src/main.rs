@@ -1531,6 +1531,75 @@ fn commit_equalizer_profile(
 }
 
 #[derive(Serialize)]
+struct EqualizerMutationOutput<'a> {
+    schema: u8,
+    applied_bands: &'a [equalizer::Band],
+    active_profile_id: Option<&'a str>,
+    error: Option<String>,
+}
+
+fn execute_equalizer_mutation(
+    format_json: bool,
+    previous: &equalizer::EqualizerProfile,
+    requested: &equalizer::EqualizerProfile,
+) -> Result<bool, String> {
+    match commit_equalizer_profile(previous, requested) {
+        Ok(()) => {
+            if format_json {
+                let output = EqualizerMutationOutput {
+                    schema: requested.schema,
+                    applied_bands: &requested.bands,
+                    active_profile_id: requested.active_profile_id.as_deref(),
+                    error: None,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output).unwrap_or_default()
+                );
+            } else {
+                print_equalizer(requested, false)?;
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            if format_json {
+                let output = EqualizerMutationOutput {
+                    schema: previous.schema,
+                    applied_bands: &previous.bands,
+                    active_profile_id: previous.active_profile_id.as_deref(),
+                    error: Some(error),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output).unwrap_or_default()
+                );
+                Ok(true)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn parse_mutation_args(args: impl Iterator<Item = String>) -> Result<(bool, Vec<String>), String> {
+    let mut format_json = false;
+    let mut values = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--format" {
+            if iter.next().as_deref() == Some("json") {
+                format_json = true;
+            } else {
+                return Err("--format requires exactly `json`".into());
+            }
+        } else {
+            values.push(arg);
+        }
+    }
+    Ok((format_json, values))
+}
+
+#[derive(Serialize)]
 struct EqualizerCustomProfileListOutput<'a> {
     schema: u8,
     active_profile_id: Option<&'a str>,
@@ -1605,13 +1674,12 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
             Ok(true)
         }
         Some("apply") => {
-            let id = args
-                .next()
-                .ok_or("equalizer profile apply requires a custom profile id")?;
-            if args.next().is_some() {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if values.len() != 1 {
                 return Err("equalizer profile apply accepts exactly one custom profile id".into());
             }
-            if equalizer::is_factory_profile_id(&id) {
+            let id = &values[0];
+            if equalizer::is_factory_profile_id(id) {
                 return Err(
                     "factory equalizer presets must be selected with `equalizer preset <id>`"
                         .into(),
@@ -1619,10 +1687,8 @@ fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, Str
             }
             let mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
-            let requested = equalizer::select_profile(&previous, &id)?;
-            commit_equalizer_profile(&previous, &requested)?;
-            print_equalizer(&requested, false)?;
-            Ok(true)
+            let requested = equalizer::select_profile(&previous, id)?;
+            execute_equalizer_mutation(format_json, &previous, &requested)
         }
         Some("update") => {
             let id = args
@@ -1757,46 +1823,46 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
         }
         Some("restore") => Err("equalizer restore accepts no value".into()),
         Some("set") => {
-            let frequency_hz = args
-                .next()
-                .ok_or("equalizer set requires a frequency in Hz")?
+            let (format_json, values) = parse_mutation_args(args)?;
+            if values.len() != 2 {
+                return Err(
+                    "equalizer set requires exactly a frequency in Hz and a gain in dB".into(),
+                );
+            }
+            let frequency_hz = values[0]
                 .parse::<u32>()
                 .map_err(|_| "equalizer frequency must be an integer in Hz")?;
-            let gain_db = args
-                .next()
-                .ok_or("equalizer set requires a gain in dB")?
+            let gain_db = values[1]
                 .parse::<f32>()
                 .map_err(|_| "equalizer gain must be a number in dB")?;
-            if args.next().is_some() {
-                return Err("equalizer set accepts only frequency and gain".into());
-            }
             let mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = equalizer::updated_profile(&previous, frequency_hz, gain_db)?;
-            commit_equalizer_profile(&previous, &requested)?;
-            print_equalizer(&requested, false)?;
-            Ok(true)
+            execute_equalizer_mutation(format_json, &previous, &requested)
         }
         Some("preset") => {
-            let id = args.next().ok_or("equalizer preset requires a preset id")?;
-            if args.next().is_some() {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if values.len() != 1 {
                 return Err("equalizer preset accepts exactly one preset id".into());
             }
+            let id = &values[0];
             let mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
             // Selecting a factory preset updates only the active bands; the
             // persistent custom-profile library remains user-owned data.
             let requested = if previous.custom_profiles.is_empty() {
-                equalizer::preset_profile(&id)?
+                equalizer::preset_profile(id)?
             } else {
-                equalizer::select_profile(&previous, &id)?
+                equalizer::select_profile(&previous, id)?
             };
-            commit_equalizer_profile(&previous, &requested)?;
-            print_equalizer(&requested, false)?;
-            Ok(true)
+            execute_equalizer_mutation(format_json, &previous, &requested)
         }
         Some("profile") => equalizer_profile(args),
-        Some("reset") if args.next().is_none() => {
+        Some("reset") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if !values.is_empty() {
+                return Err("equalizer reset accepts no value".into());
+            }
             let mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let requested = if previous.custom_profiles.is_empty() {
@@ -1804,11 +1870,8 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             } else {
                 equalizer::select_profile(&previous, "flat")?
             };
-            commit_equalizer_profile(&previous, &requested)?;
-            print_equalizer(&requested, false)?;
-            Ok(true)
+            execute_equalizer_mutation(format_json, &previous, &requested)
         }
-        Some("reset") => Err("equalizer reset accepts no value".into()),
         _ => Err("unknown equalizer command".into()),
     }
 }
@@ -2245,5 +2308,38 @@ mod tests {
             let error = equalizer_profile(command.into_iter().map(String::from)).unwrap_err();
             assert!(error.contains("factory equalizer presets"));
         }
+    }
+
+    #[test]
+    fn parses_mutation_args_with_format_json() {
+        assert_eq!(
+            parse_mutation_args(
+                ["--format", "json", "62", "3.0"]
+                    .into_iter()
+                    .map(String::from)
+            ),
+            Ok((true, vec!["62".into(), "3.0".into()]))
+        );
+        assert_eq!(
+            parse_mutation_args(["31", "1.5"].into_iter().map(String::from)),
+            Ok((false, vec!["31".into(), "1.5".into()]))
+        );
+        assert!(parse_mutation_args(["--format", "xml"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn serializes_mutation_output_json() {
+        let profile = equalizer::EqualizerProfile::default();
+        let output = EqualizerMutationOutput {
+            schema: profile.schema,
+            applied_bands: &profile.bands,
+            active_profile_id: profile.active_profile_id.as_deref(),
+            error: Some("test error".into()),
+        };
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["schema"], equalizer::PROFILE_SCHEMA);
+        assert_eq!(json["active_profile_id"], "flat");
+        assert_eq!(json["applied_bands"].as_array().unwrap().len(), 10);
+        assert_eq!(json["error"], "test error");
     }
 }

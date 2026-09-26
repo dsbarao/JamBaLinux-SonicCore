@@ -236,6 +236,16 @@ fn pw_dump() -> Result<Vec<Value>, String> {
         .map_err(|error| format!("pw-dump returned invalid JSON: {error}"))
 }
 
+fn pw_dump_node(node_id: u32) -> Result<Vec<Value>, String> {
+    let id_str = node_id.to_string();
+    let output = command_output("pw-dump", &[&id_str])?;
+    if !output.status.success() {
+        return Err(command_failure("pw-dump", &output));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("pw-dump returned invalid JSON: {error}"))
+}
+
 fn pactl_json(args: &[&str]) -> Result<Value, String> {
     let mut all_args = vec!["--format=json"];
     all_args.extend_from_slice(args);
@@ -1404,7 +1414,6 @@ pub fn status(profile: &EqualizerProfile) -> Result<Status, String> {
         profile_synced,
     });
     let active = error.is_none();
-    let state = read_state()?;
     Ok(Status {
         active,
         service_active: service,
@@ -1519,7 +1528,7 @@ pub fn apply_profile(
         );
     }
 
-    let after = match pw_dump() {
+    let after = match pw_dump_node(node.id) {
         Ok(after) => after,
         Err(error) => {
             return failed_update_with_rollback(
@@ -1636,6 +1645,7 @@ pub fn disable() -> Result<Status, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn node(id: u32, serial: u64, properties: Value) -> Value {
         let mut properties = properties;
@@ -1857,6 +1867,136 @@ mod tests {
         assert!(managed_route_destination(200, 100, Some(200)));
         assert!(!managed_route_destination(300, 100, Some(200)));
         assert!(!managed_route_destination(200, 100, None));
+    }
+
+    /// A `pw-dump` answer holding only the equalizer node with all ten bands.
+    fn equalizer_dump(serial: u64, gains: [f32; 10]) -> String {
+        let params = crate::equalizer::BANDS_HZ
+            .iter()
+            .zip(gains)
+            .enumerate()
+            .flat_map(|(index, (frequency, gain))| {
+                vec![
+                    serde_json::json!(format!("eq_band_{index}:Freq")),
+                    serde_json::json!(frequency),
+                    serde_json::json!(format!("eq_band_{index}:Gain")),
+                    serde_json::json!(gain),
+                ]
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!([{
+            "id": 105,
+            "info": {
+                "props": { "object.serial": serial, "node.name": VIRTUAL_SINK },
+                "params": { "Props": [ { "params": params } ] }
+            }
+        }])
+        .to_string()
+    }
+
+    /// Scripts the full dump that finds the node and every `set-param` of the
+    /// ramp; the verification dump is pushed by each test.
+    fn script_ramp(runner: &crate::command::ScriptedRunner) {
+        runner.push_output(&equalizer_dump(1005, [0.0; 10]));
+        for _ in 0..RAMP_STEPS {
+            runner.push_output("");
+        }
+    }
+
+    /// Scripts a successful rollback: full dump, one `set-param`, full dump
+    /// showing the previous (flat) gains again.
+    fn script_rollback(runner: &crate::command::ScriptedRunner) {
+        runner.push_output(&equalizer_dump(1005, [0.0; 10]));
+        runner.push_output("");
+        runner.push_output(&equalizer_dump(1005, [0.0; 10]));
+    }
+
+    fn profile_with_gain(gain: f32) -> crate::equalizer::EqualizerProfile {
+        let mut profile = crate::equalizer::EqualizerProfile::default();
+        for band in &mut profile.bands {
+            band.gain_db = gain;
+        }
+        profile
+    }
+
+    fn full_dumps(calls: &[String]) -> usize {
+        calls
+            .iter()
+            .filter(|call| call.as_str() == "pw-dump")
+            .count()
+    }
+
+    #[test]
+    fn apply_profile_uses_one_full_dump_and_one_targeted_dump_for_verification() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        script_ramp(&runner);
+        runner.push_output(&equalizer_dump(1005, [3.0; 10]));
+        let _guard = crate::command::set_runner(runner.clone());
+
+        apply_profile(
+            &profile_with_gain(3.0),
+            &crate::equalizer::EqualizerProfile::default(),
+        )
+        .unwrap();
+
+        let calls = runner.command_lines();
+        assert_eq!(full_dumps(&calls), 1, "{calls:?}");
+        assert_eq!(calls.first().map(String::as_str), Some("pw-dump"));
+        let ramp = calls
+            .iter()
+            .filter(|call| call.starts_with("pw-cli set-param 105 Props"))
+            .count();
+        assert_eq!(ramp, RAMP_STEPS as usize, "{calls:?}");
+        assert_eq!(calls.last().map(String::as_str), Some("pw-dump 105"));
+        assert_eq!(calls.len(), 1 + RAMP_STEPS as usize + 1);
+    }
+
+    #[test]
+    fn apply_profile_rolls_back_if_node_recreated() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        script_ramp(&runner);
+        // Same id, different serial: the node was recreated during the ramp.
+        runner.push_output(&equalizer_dump(1006, [3.0; 10]));
+        script_rollback(&runner);
+        let _guard = crate::command::set_runner(runner.clone());
+
+        let err = apply_profile(
+            &profile_with_gain(3.0),
+            &crate::equalizer::EqualizerProfile::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("recreated"), "{err}");
+        assert!(err.contains("restored"), "{err}");
+        let calls = runner.command_lines();
+        assert_eq!(calls[1 + RAMP_STEPS as usize], "pw-dump 105");
+        assert!(
+            calls.last().is_some_and(|call| call == "pw-dump"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn apply_profile_rolls_back_if_gains_mismatch() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        script_ramp(&runner);
+        // Same node, but the DSP still reports the old gains.
+        runner.push_output(&equalizer_dump(1005, [0.0; 10]));
+        script_rollback(&runner);
+        let _guard = crate::command::set_runner(runner.clone());
+
+        let err = apply_profile(
+            &profile_with_gain(3.0),
+            &crate::equalizer::EqualizerProfile::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("did not match"), "{err}");
+        assert!(err.contains("restored"), "{err}");
+        assert_eq!(
+            runner.command_lines()[1 + RAMP_STEPS as usize],
+            "pw-dump 105"
+        );
     }
 
     fn ready_spatial_capability() -> crate::spatial::CapabilityReport {

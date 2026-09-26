@@ -200,7 +200,7 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatu
 }
 
 #[cfg(test)]
-pub use testing::{Invocation, RunnerGuard, ScriptedRunner, set_runner};
+pub use testing::{ScriptedRunner, set_runner};
 
 #[cfg(test)]
 mod testing {
