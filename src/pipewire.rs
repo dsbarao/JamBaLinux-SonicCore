@@ -29,8 +29,15 @@ const OUTPUT_NODE: &str = "jambalinux-soniccore-game-equalizer-output";
 const QUANTUM_ALSA_COMPONENTS: &str = "USB0ecb:2069";
 const ROUTE_INTERVAL: Duration = Duration::from_millis(500);
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+// A gain change is split into steps of at most RAMP_MAX_STEP_DB, one per audio
+// cycle: the filter-chain biquads switch coefficients at once, so a big jump
+// clicks. 26/09: 4 steps 10 ms apart were shorter than the 21 ms quantum (1024
+// frames at 48 kHz); half the steps landed in the same cycle and the gain moved
+// in audible 0.5 dB+ jumps while a slider was dragged.
 const RAMP_STEPS: u32 = 4;
-const RAMP_STEP_INTERVAL: Duration = Duration::from_millis(10);
+const RAMP_MAX_STEP_DB: f32 = 0.25;
+const RAMP_MAX_STEPS: u32 = 48;
+const RAMP_STEP_INTERVAL: Duration = Duration::from_millis(22);
 
 fn backend_schema() -> u8 {
     3
@@ -1234,19 +1241,31 @@ fn profile_gains(profile: &EqualizerProfile) -> Vec<f32> {
     profile.bands.iter().map(|band| band.gain_db).collect()
 }
 
+/// Steps needed so no band moves more than RAMP_MAX_STEP_DB per audio cycle;
+/// never fewer than RAMP_STEPS, capped so a full-scale reset stays about a second.
+fn ramp_steps(from: &[f32], to: &[f32]) -> u32 {
+    let largest = from
+        .iter()
+        .zip(to)
+        .map(|(start, end)| (end - start).abs())
+        .fold(0.0_f32, f32::max);
+    ((largest / RAMP_MAX_STEP_DB).ceil() as u32).clamp(RAMP_STEPS, RAMP_MAX_STEPS)
+}
+
 fn ramp_controls(node_id: u32, from: &[f32], to: &[f32]) -> Result<(), String> {
     if from.len() != BANDS_HZ.len() || to.len() != BANDS_HZ.len() {
         return Err("the PipeWire ramp requires exactly ten bands".into());
     }
-    for step in 1..=RAMP_STEPS {
-        let alpha = step as f32 / RAMP_STEPS as f32;
+    let steps = ramp_steps(from, to);
+    for step in 1..=steps {
+        let alpha = step as f32 / steps as f32;
         let gains = from
             .iter()
             .zip(to)
             .map(|(start, end)| start + ((end - start) * alpha))
             .collect::<Vec<_>>();
         update_controls(node_id, &gains)?;
-        if step < RAMP_STEPS {
+        if step < steps {
             thread::sleep(RAMP_STEP_INTERVAL);
         }
     }
@@ -1898,7 +1917,7 @@ mod tests {
     /// ramp; the verification dump is pushed by each test.
     fn script_ramp(runner: &crate::command::ScriptedRunner) {
         runner.push_output(&equalizer_dump(1005, [0.0; 10]));
-        for _ in 0..RAMP_STEPS {
+        for _ in 0..ramp_steps(&[0.0; 10], &[3.0; 10]) {
             runner.push_output("");
         }
     }
@@ -1927,6 +1946,15 @@ mod tests {
     }
 
     #[test]
+    fn ramp_moves_at_most_a_quarter_db_per_audio_cycle() {
+        assert_eq!(ramp_steps(&[0.0; 10], &[1.0; 10]), RAMP_STEPS);
+        assert_eq!(ramp_steps(&[0.0; 10], &[3.0; 10]), 12);
+        assert_eq!(ramp_steps(&[2.0; 10], &[1.9; 10]), RAMP_STEPS);
+        assert_eq!(ramp_steps(&[-12.0; 10], &[12.0; 10]), RAMP_MAX_STEPS);
+        assert!(RAMP_STEP_INTERVAL >= Duration::from_millis(1024 * 1000 / 48_000));
+    }
+
+    #[test]
     fn apply_profile_uses_one_full_dump_and_one_targeted_dump_for_verification() {
         let runner = Arc::new(crate::command::ScriptedRunner::new());
         script_ramp(&runner);
@@ -1946,9 +1974,9 @@ mod tests {
             .iter()
             .filter(|call| call.starts_with("pw-cli set-param 105 Props"))
             .count();
-        assert_eq!(ramp, RAMP_STEPS as usize, "{calls:?}");
+        assert_eq!(ramp, 12, "0 -> 3 dB in 0.25 dB steps: {calls:?}");
         assert_eq!(calls.last().map(String::as_str), Some("pw-dump 105"));
-        assert_eq!(calls.len(), 1 + RAMP_STEPS as usize + 1);
+        assert_eq!(calls.len(), 1 + 12 + 1);
     }
 
     #[test]
@@ -1969,7 +1997,7 @@ mod tests {
         assert!(err.contains("recreated"), "{err}");
         assert!(err.contains("restored"), "{err}");
         let calls = runner.command_lines();
-        assert_eq!(calls[1 + RAMP_STEPS as usize], "pw-dump 105");
+        assert_eq!(calls[1 + 12], "pw-dump 105");
         assert!(
             calls.last().is_some_and(|call| call == "pw-dump"),
             "{calls:?}"
@@ -1993,10 +2021,7 @@ mod tests {
 
         assert!(err.contains("did not match"), "{err}");
         assert!(err.contains("restored"), "{err}");
-        assert_eq!(
-            runner.command_lines()[1 + RAMP_STEPS as usize],
-            "pw-dump 105"
-        );
+        assert_eq!(runner.command_lines()[1 + 12], "pw-dump 105");
     }
 
     fn ready_spatial_capability() -> crate::spatial::CapabilityReport {

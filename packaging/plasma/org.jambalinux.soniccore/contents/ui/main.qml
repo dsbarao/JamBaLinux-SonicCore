@@ -277,7 +277,10 @@ PlasmoidItem {
         const quotedArguments = cliArguments.map(shellQuote).join(" ")
         const program = "$HOME/.cargo/bin/soniccore equalizer"
             + (quotedArguments.length > 0 ? " " + quotedArguments : "")
-        return "/bin/sh -lc " + shellQuote(program)
+        // A plain (non-login) shell: `sh -l` sources the whole login profile on
+        // every call and tripled the latency of a band change (243 ms vs 90 ms,
+        // measured 26/09). $HOME is still expanded by the shell.
+        return "/bin/sh -c " + shellQuote(program)
     }
 
     function startEqualizerAction(action, cliArguments) {
@@ -402,13 +405,18 @@ PlasmoidItem {
                 gainsByFrequency[frequency] = gain
         }
 
-        equalizerBandModel.clear()
+        // Update rows in place: clear()+append() destroyed and recreated every
+        // slider delegate, so the handle being dragged vanished mid-drag each
+        // time a `set` answered (26/09: "the knob keeps sticking").
+        if (equalizerBandModel.count !== equalizerFrequencies.length) {
+            equalizerBandModel.clear()
+            for (let index = 0; index < equalizerFrequencies.length; ++index)
+                equalizerBandModel.append({ "frequencyHz": equalizerFrequencies[index], "gainDb": 0 })
+        }
         for (let index = 0; index < equalizerFrequencies.length; ++index) {
-            const frequency = equalizerFrequencies[index]
-            equalizerBandModel.append({
-                "frequencyHz": frequency,
-                "gainDb": Number(gainsByFrequency[frequency] ?? 0)
-            })
+            const gain = Number(gainsByFrequency[equalizerFrequencies[index]] ?? 0)
+            if (equalizerBandModel.get(index).gainDb !== gain)
+                equalizerBandModel.setProperty(index, "gainDb", gain)
         }
         equalizerVisualRevision += 1
     }
@@ -1194,13 +1202,15 @@ PlasmoidItem {
 
                                 Timer {
                                     id: equalizerCommit
+                                    // Like a radio's volume knob: while the handle is
+                                    // dragged the band is sent at most every 70 ms, not
+                                    // only on release. The queue keeps just the latest
+                                    // value per band, so commands never pile up.
                                     interval: 70
                                     repeat: false
-                                    onTriggered: {
-                                        if (!equalizerSlider.pressed) root.setEqualizerBand(
-                                            equalizerBand.frequencyHz,
-                                            equalizerSlider.value)
-                                    }
+                                    onTriggered: root.setEqualizerBand(
+                                        equalizerBand.frequencyHz,
+                                        equalizerSlider.value)
                                 }
 
                                 PlasmaComponents.Label {
@@ -1221,9 +1231,17 @@ PlasmoidItem {
                                     to: 12
                                     stepSize: 1
                                     value: 0
-                                    onMoved: equalizerCommit.restart()
+                                    // Throttle, not debounce: a running timer is left alone so
+                                    // a continuous drag still fires every interval.
+                                    onMoved: {
+                                        if (!equalizerCommit.running) equalizerCommit.start()
+                                    }
                                     onPressedChanged: {
-                                        if (!pressed) equalizerCommit.restart()
+                                        // Release sends the final position right away.
+                                        if (!pressed) {
+                                            equalizerCommit.stop()
+                                            root.setEqualizerBand(equalizerBand.frequencyHz, value)
+                                        }
                                     }
                                 }
 
