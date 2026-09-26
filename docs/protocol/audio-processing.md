@@ -295,3 +295,143 @@ fallback, and recovered automatically after physical dongle reconnection.
 Full measurements and the remaining legal boundary for a distributable HRIR
 are recorded in
 [`validation_reports/spatial-hardware-validation.md`](validation_reports/spatial-hardware-validation.md).
+
+## Diagnóstico de transições
+
+Two user-visible symptoms are under investigation: (A) toggling spatial audio
+pauses media that is playing, for example a YouTube video in a browser, and
+(B) moving an equalizer band shows a "loading" delay instead of applying
+immediately. This section records the hypotheses derived from static analysis
+of the current code and the read-only tool that collects the evidence needed
+to confirm or reject them. None of the hypotheses below is confirmed yet; they
+are the candidates the measurements must discriminate between.
+
+### Read-only diagnostic tool
+
+`tools/diagnose-audio-transition.sh` only observes. It never moves streams,
+changes the default sink, sets node parameters, creates links, starts or stops
+services, or changes the SonicCore configuration.
+
+- `tools/diagnose-audio-transition.sh spatial [--duration 20] [--interval 0.25] [--output FILE]`
+  records, with a relative timestamp per line, every `pactl subscribe` event
+  as it arrives plus snapshots, written only when they change, of: the stored
+  `spatial.json` gate, the default sink, all sinks with their state, every sink
+  input with its sink index, `Corked` flag, application and media name, the
+  state of every PipeWire audio node from `pw-dump`, and the MPRIS
+  `PlaybackStatus` of every player (via `busctl --user`, or `playerctl` when
+  `busctl` is absent). The default log is
+  `$XDG_RUNTIME_DIR/jambalinux-soniccore/diagnose-audio-transition-<time>.log`;
+  an existing file is never overwritten.
+- `tools/diagnose-audio-transition.sh timing [--runs 3] [--soniccore PATH]`
+  reports min/median/max wall time of `soniccore equalizer status --format json`
+  and `soniccore spatial status --format json`, and of their building blocks
+  `pw-dump`, `pactl list sinks`, and `/bin/sh -lc true` (the login-shell
+  wrapper the widget puts around every command).
+
+Both modes require `pactl` and `pw-dump` and exit with a non-zero status and a
+one-line message when either is missing. `python3` (node summary) and
+`busctl`/`playerctl` (MPRIS) are optional; their absence is written to the log.
+
+### A — spatial toggle pauses playback
+
+The spatial switch only records intent in `spatial.json`
+(`spatial::set_enabled`). Two independent 500 ms loops then act on it: the
+spatial supervisor (`src/spatial_pipewire.rs`, `run`) starts or kills a child
+`pipewire -c` process that owns the 7.1 spatial sink, and the equalizer route
+supervisor (`src/pipewire.rs`, `run_route_iteration`) moves registered
+streams between the stereo EQ sink and the spatial sink.
+
+**H1 — the stream is moved between a 2-channel and an 8-channel sink.**
+On enable, once the spatial output is linked to the EQ, `run_route_iteration`
+selects the spatial sink as `processing_sink` and promotes every registered
+stream from the EQ sink to it with `pactl move-sink-input`
+(`registered_route_needs_promotion`). On disable, `restore_streams` moves them
+back with the same command. Each move reconnects the client stream to a sink
+with a different channel map (stereo ↔ 7.1), so pipewire-pulse renegotiates
+the stream and the client receives a move/format change. Browsers that treat
+an output-device change as a device loss may pause the media element or the
+MPRIS player. Expected evidence: an `inputs` line whose `sink=` changes from
+the EQ index to the spatial index (or back) while every node stays present,
+followed within a few hundred milliseconds by `corked=yes` and/or an MPRIS
+`Paused` line.
+
+**H2 — streams are still attached when the spatial graph is killed.**
+`stop_graph` (`src/spatial_pipewire.rs:331`) calls `restore_streams()` and
+immediately kills the child PipeWire process. `restore_streams` snapshots the
+sink inputs once, and `register_spatial_fallback_streams` releases the route
+lock before the moves happen. During that window the equalizer route
+supervisor still sees a live, connected spatial sink and a registered stream
+on the EQ, so it can promote the stream back to the spatial sink; a stream
+created after the snapshot is not moved at all. When the process dies, the
+sink disappears under those streams, and the session manager moves them to a
+fallback or the client sees its device vanish. Expected evidence: a
+`pulse ... Event 'remove' on sink #<spatial>` while an `inputs` line still
+shows that sink index, followed by the input moving to a sink other than the
+EQ, disappearing, or corking.
+
+**H3 — the default sink changes transiently.**
+When a managed processing sink becomes the default, `run_route_iteration` and
+`prepare` reset it with `pactl set-default-sink` on their next iteration. If
+the session manager briefly selects the new spatial sink as default when it
+appears, or selects another sink when it disappears, streams that follow the
+default are moved by the session manager itself for up to one iteration
+(≤ 500 ms), independently of H1. Expected evidence: `default` lines that
+change and change back around the toggle.
+
+The hypotheses are not exclusive; the log orders their effects in time, so the
+first event that precedes the pause identifies the cause to fix first.
+
+### B — equalizer band latency decomposition
+
+A band change in the widget currently travels this path:
+
+1. **Debounce.** `equalizerCommit` (`main.qml`, `interval: 180`) waits 180 ms
+   after the last slider move or release before sending anything.
+2. **Login shell.** Every command runs as `/bin/sh -lc "$HOME/.cargo/bin/soniccore …"`,
+   so each call sources the user's login profile before `soniccore` starts.
+3. **CLI apply.** `soniccore equalizer set` calls `commit_equalizer_profile`,
+   whose `pipewire::apply_profile` runs `pw-dump` once to find the node and
+   read current gains, four `pw-cli set-param` ramp steps separated by three
+   10 ms sleeps, and a second full `pw-dump` to verify node identity and the
+   applied gains, and only then persists the profile. The 2026-09-19
+   acceptance measured about 0.10 s for this call end to end.
+4. **Full status after every mutation.** When the action finishes, the widget
+   always calls `refreshEqualizer()`, i.e. another login shell plus
+   `soniccore equalizer status --format json`, whose `pipewire::status` runs
+   `systemctl --user is-active`, `pw-dump`, three `pactl` queries (sinks, sink
+   inputs, default sink), and reads the routing state file twice.
+5. **Blocked UI.** While `equalizerBusy` or `equalizerUpdating` is true,
+   `startEqualizerAction` returns `false`. A band moved during that time is not
+   queued: its debounced commit is dropped, and the following status refresh
+   rewrites the handles from the applied gains, so the slider can snap back to
+   its previous value.
+
+The perceived delay is therefore roughly *180 ms + 2 × login shell + CLI apply
++ full status*, with any overlapping input lost. The `timing` mode measures
+steps 2 and 4 and their `pw-dump`/`pactl` components directly; step 3 can be
+timed manually as shown below. The live DSP update itself (the ramp) is only a
+nominal 30 ms, and the node is not recreated, so rebuilding the graph is not
+part of the delay.
+
+### Manual reproduction procedure
+
+1. Build and install the current tree, confirm `soniccore equalizer status`
+   reports `active` and that spatial is disabled and ready
+   (`soniccore spatial status`).
+2. Start media in the browser (for example a YouTube video) and confirm it
+   plays through the Game output.
+3. In a terminal run `tools/diagnose-audio-transition.sh spatial --duration 30`.
+4. Within the recording window, enable spatial audio in the widget (or with
+   `soniccore spatial enable`), wait about ten seconds, then disable it (or
+   `soniccore spatial disable`). Note the wall-clock moments of each click and
+   whether playback paused.
+5. Inspect the log: find the first `mpris ... Paused` or `corked=yes` line and
+   read the `inputs`, `default`, `sinks`, `nodes`, and `pulse` lines just
+   before it to decide between H1, H2, and H3.
+6. For B, run `tools/diagnose-audio-transition.sh timing --runs 5`. To time
+   the write path, note the current gain of one band, run
+   `time soniccore equalizer set 500 <new>` and then restore it with
+   `time soniccore equalizer set 500 <previous>`.
+7. Attach the log and the timing table to the fix phase that addresses the
+   confirmed hypothesis. The log contains application and media names; review
+   it before sharing it publicly.
