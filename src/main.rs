@@ -250,7 +250,7 @@ fn spawn_charging_watcher() -> Result<(), String> {
     thread::Builder::new()
         .name("soniccore-usb-power".into())
         .spawn(|| {
-            let mut confirmed = state::load().and_then(|cached| cached.charging);
+            let mut confirmed = state::load().ok().and_then(|cached| cached.charging);
             let mut candidate = None;
             let mut candidate_samples = 0_u8;
             loop {
@@ -270,9 +270,11 @@ fn spawn_charging_watcher() -> Result<(), String> {
                     candidate_samples = 1;
                 }
                 if candidate_samples >= 3 {
-                    let mut cached = state::load().unwrap_or_default();
-                    cached.charging = Some(current);
-                    if let Err(error) = state::save(&mut cached) {
+                    if let Err(error) = state::update_recovering_if(|cached| {
+                        let changed = cached.charging != Some(current);
+                        cached.charging = Some(current);
+                        changed
+                    }) {
                         eprintln!("failed to cache USB power state: {error}");
                     } else {
                         confirmed = Some(current);
@@ -674,27 +676,46 @@ fn monitor(dry_run: bool) -> Result<bool, String> {
 fn daemon() -> Result<bool, String> {
     state::init_signal_service()?;
     spawn_charging_watcher()?;
-    let mut runtime = state::load().unwrap_or_default();
+    let mut runtime = match state::load() {
+        Ok(state) => state,
+        Err(state::LoadError::Missing) => state::RuntimeState::default(),
+        Err(error) => {
+            eprintln!("failed to load runtime state: {error}");
+            state::RuntimeState::default()
+        }
+    };
     loop {
         let Some(node) = quantum_hidraw_node()? else {
-            if let Some(cached) = state::load() {
+            if let Ok(cached) = state::load() {
                 runtime = cached;
             }
             if runtime.headset_connected != Some(false) {
-                runtime.headset_connected = Some(false);
-                state::save(&mut runtime)?;
+                match state::update_recovering_if(|cached| {
+                    let changed = cached.headset_connected != Some(false);
+                    cached.headset_connected = Some(false);
+                    changed
+                }) {
+                    Ok(updated) => runtime = updated,
+                    Err(error) => eprintln!("failed to cache headset disconnect: {error}"),
+                }
             }
             thread::sleep(Duration::from_secs(2));
             continue;
         };
 
-        if let Some(cached) = state::load() {
+        if let Ok(cached) = state::load() {
             runtime = cached;
         }
         if let Ok((battery, _)) = query_battery(&node) {
-            runtime.battery_percent = Some(battery);
+            match state::update_recovering_if(|cached| {
+                let changed = cached.battery_percent != Some(battery);
+                cached.battery_percent = Some(battery);
+                changed
+            }) {
+                Ok(updated) => runtime = updated,
+                Err(error) => eprintln!("failed to cache battery state: {error}"),
+            }
         }
-        state::save(&mut runtime)?;
 
         let mut device = match fs::File::open(&node) {
             Ok(device) => device,
@@ -709,11 +730,10 @@ fn daemon() -> Result<bool, String> {
             match device.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if let Some(cached) = state::load() {
-                        runtime = cached;
-                    }
-                    if runtime.apply_input(&buffer[..count]) {
-                        state::save(&mut runtime)?;
+                    let report = &buffer[..count];
+                    match state::update_recovering_if(|cached| cached.apply_input(report)) {
+                        Ok(updated) => runtime = updated,
+                        Err(error) => eprintln!("failed to cache headset input: {error}"),
                     }
                 }
                 Err(error) => {
@@ -1089,7 +1109,11 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
     ) || segment_feature(command.feature).is_some();
     let mut resolved_profile = None;
     let reports = if is_profile_control {
-        let cached = state::load().unwrap_or_default();
+        let cached = match state::load() {
+            Ok(state) => state,
+            Err(state::LoadError::Missing) => state::RuntimeState::default(),
+            Err(error) => return Err(error.to_string()),
+        };
         let (mut logo, mut ring) = if command.feature == "color" {
             let initial = LightingZone {
                 colors: vec![command.value.clone(); 5],
@@ -1202,9 +1226,12 @@ fn print_status_json(output: &StatusOutput) -> Result<(), String> {
 }
 
 fn cached_status_json() -> Result<(), String> {
-    let cached = state::load().ok_or(
-        "runtime state is unavailable; start jambalinux-soniccore.service or use status for a direct read",
-    )?;
+    let cached = state::load().map_err(|error| match error {
+        state::LoadError::Missing => {
+            "runtime state is unavailable; start jambalinux-soniccore.service or use status for a direct read".to_owned()
+        }
+        error => error.to_string(),
+    })?;
     print_status_json(&StatusOutput {
         schema: 1,
         device: "0ecb:2069",
@@ -1315,7 +1342,11 @@ fn status(options: StatusOptions) -> Result<bool, String> {
         return Ok(true);
     }
     let (battery, raw_feature) = query_battery(&node)?;
-    let cached = state::load().unwrap_or_default();
+    let cached = match state::load() {
+        Ok(state) => state,
+        Err(state::LoadError::Missing) => state::RuntimeState::default(),
+        Err(error) => return Err(error.to_string()),
+    };
     let charging = match cached.charging {
         Some(charging) => charging,
         None => charging_usb_connected().map_err(|error| error.to_string())?,
