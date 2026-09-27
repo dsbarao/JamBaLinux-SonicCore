@@ -1091,6 +1091,17 @@ fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetComman
     Ok(command)
 }
 
+fn partial_lighting_error(device_error: &str, cache_error: Option<&str>) -> String {
+    match cache_error {
+        Some(cache_error) => format!(
+            "aplicação parcial do perfil de iluminação; não foi possível marcar o cache como desconhecido ({cache_error}). Reaplique o perfil. Erro do dispositivo: {device_error}"
+        ),
+        None => format!(
+            "aplicação parcial do perfil de iluminação; o estado da zona afetada é desconhecido. Reaplique o perfil. Erro do dispositivo: {device_error}"
+        ),
+    }
+}
+
 fn set_control(command: SetCommand) -> Result<bool, String> {
     let Some(node) = quantum_hidraw_node()? else {
         return Ok(false);
@@ -1178,8 +1189,28 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
     } else {
         command.reports.clone()
     };
-    for report in &reports {
-        set_feature_report_allowlisted(&node, report)?;
+    for (failed_report_index, report) in reports.iter().enumerate() {
+        if let Err(error) = set_feature_report_allowlisted(&node, report) {
+            if let Some((logo, ring)) = resolved_profile.as_ref() {
+                let cache_update =
+                    state::lighting_profile_cache_update(reports.len(), Some(failed_report_index));
+                if cache_update == state::LightingProfileCacheUpdate::Keep {
+                    return Err(error);
+                }
+                state::update_partial_lighting_profile(
+                    cache_update,
+                    &logo.colors,
+                    &ring.colors,
+                    &logo.effect,
+                    &ring.effect,
+                    &logo.speed,
+                    &ring.speed,
+                )
+                .map_err(|cache_error| partial_lighting_error(&error, Some(&cache_error)))?;
+                return Err(partial_lighting_error(&error, None));
+            }
+            return Err(error);
+        }
     }
     if let Some((logo, ring)) = resolved_profile {
         state::update_lighting_profile(
@@ -1225,14 +1256,8 @@ fn print_status_json(output: &StatusOutput) -> Result<(), String> {
     Ok(())
 }
 
-fn cached_status_json() -> Result<(), String> {
-    let cached = state::load().map_err(|error| match error {
-        state::LoadError::Missing => {
-            "runtime state is unavailable; start jambalinux-soniccore.service or use status for a direct read".to_owned()
-        }
-        error => error.to_string(),
-    })?;
-    print_status_json(&StatusOutput {
+fn status_output_from_cached_state(cached: state::RuntimeState) -> StatusOutput {
+    StatusOutput {
         schema: 1,
         device: "0ecb:2069",
         hidraw: "runtime-cache".into(),
@@ -1257,7 +1282,17 @@ fn cached_status_json() -> Result<(), String> {
         game_chat_value: cached.game_chat_value,
         bluetooth: cached.bluetooth,
         sidetone_level: cached.sidetone_level,
-    })
+    }
+}
+
+fn cached_status_json() -> Result<(), String> {
+    let cached = state::load().map_err(|error| match error {
+        state::LoadError::Missing => {
+            "runtime state is unavailable; start jambalinux-soniccore.service or use status for a direct read".to_owned()
+        }
+        error => error.to_string(),
+    })?;
+    print_status_json(&status_output_from_cached_state(cached))
 }
 
 fn cached_status(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
@@ -2358,6 +2393,17 @@ mod tests {
     }
 
     #[test]
+    fn partial_lighting_error_explains_recovery() {
+        let error = partial_lighting_error("write failed", None);
+        assert!(error.contains("parcial"));
+        assert!(error.contains("Reaplique"));
+
+        let cache_error = partial_lighting_error("write failed", Some("state unavailable"));
+        assert!(cache_error.contains("parcial"));
+        assert!(cache_error.contains("Reaplique"));
+    }
+
+    #[test]
     fn serializes_versioned_status_json() {
         let output = StatusOutput {
             schema: 1,
@@ -2390,6 +2436,21 @@ mod tests {
         assert_eq!(json["battery_percent"], 60);
         assert_eq!(json["charging"], true);
         assert_eq!(json["raw_feature"], "49 3c");
+    }
+
+    #[test]
+    fn cached_status_serializes_unknown_lighting_zone_as_null() {
+        let cached = state::RuntimeState {
+            logo_colors: None,
+            logo_effect: None,
+            logo_speed: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(status_output_from_cached_state(cached)).unwrap();
+
+        assert!(json["logo_colors"].is_null());
+        assert!(json["logo_effect"].is_null());
+        assert!(json["logo_speed"].is_null());
     }
 
     #[test]

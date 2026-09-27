@@ -89,3 +89,14 @@ The widget can target both zones, Logo only, or Ring only. Even for an
 independent change, JamBaLinux SonicCore reconstructs and sends both complete zone
 profiles from its confirmed cache. If the other zone is unknown, it refuses
 the operation and requires a synchronized color first rather than guessing.
+
+If a complete-profile write fails after one or more reports have been accepted,
+the client marks the incomplete zone's cached colors, effect, and speed as
+unknown (`null`) and asks the user to reapply the profile. It does not retry or
+send a compensating report automatically. A failure on the first report leaves
+the existing cache intact because no profile report was accepted.
+
+The Plasma widget preserves those `null` values rather than displaying fallback
+colors, effects, or speeds. It identifies the profile as unknown and disables
+cache-dependent zone controls; applying a new synchronized solid color to both
+zones remains available as the explicit recovery action.

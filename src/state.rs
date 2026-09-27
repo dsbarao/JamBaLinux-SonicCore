@@ -52,6 +52,68 @@ pub struct RuntimeState {
     pub sidetone_level: Option<String>,
 }
 
+/// The cache action to take after sending a complete two-zone lighting
+/// profile. `Replace` is used only after every report for that zone was
+/// accepted by the kernel; `Unknown` deliberately serializes as JSON `null`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightingZoneCacheUpdate {
+    Keep,
+    Replace,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightingProfileCacheUpdate {
+    Keep,
+    Partial {
+        logo: LightingZoneCacheUpdate,
+        ring: LightingZoneCacheUpdate,
+    },
+    Complete,
+}
+
+/// Decides how a failed complete-profile write affects the runtime cache.
+///
+/// A profile consists of six reports for Logo, six for Ring, and a final
+/// global-enable report. The function intentionally depends only on the
+/// report count and the failed report index, so its partial-write behavior is
+/// testable without a HID device. An unexpected report layout is handled
+/// conservatively by invalidating both zones after any accepted report.
+pub fn lighting_profile_cache_update(
+    total_reports: usize,
+    failed_report_index: Option<usize>,
+) -> LightingProfileCacheUpdate {
+    const ZONE_REPORTS: usize = 6;
+    const COMPLETE_PROFILE_REPORTS: usize = ZONE_REPORTS * 2 + 1;
+
+    match failed_report_index {
+        None => LightingProfileCacheUpdate::Complete,
+        Some(0) => LightingProfileCacheUpdate::Keep,
+        Some(index) if index >= total_reports => LightingProfileCacheUpdate::Keep,
+        Some(_) if total_reports != COMPLETE_PROFILE_REPORTS => {
+            LightingProfileCacheUpdate::Partial {
+                logo: LightingZoneCacheUpdate::Unknown,
+                ring: LightingZoneCacheUpdate::Unknown,
+            }
+        }
+        Some(index) if index < ZONE_REPORTS => LightingProfileCacheUpdate::Partial {
+            logo: LightingZoneCacheUpdate::Unknown,
+            ring: LightingZoneCacheUpdate::Keep,
+        },
+        Some(index) if index < ZONE_REPORTS * 2 => LightingProfileCacheUpdate::Partial {
+            logo: LightingZoneCacheUpdate::Replace,
+            ring: LightingZoneCacheUpdate::Unknown,
+        },
+        // The final global-enable write has no zone selector. If it fails,
+        // conservatively invalidate both profiles rather than claiming that
+        // the device retained a usable complete profile.
+        Some(_) => LightingProfileCacheUpdate::Partial {
+            logo: LightingZoneCacheUpdate::Unknown,
+            ring: LightingZoneCacheUpdate::Unknown,
+        },
+    }
+}
+
 impl RuntimeState {
     pub fn apply_input(&mut self, report: &[u8]) -> bool {
         let changed = match report {
@@ -410,6 +472,70 @@ pub fn update_lighting_profile(
     .map(|_| ())
 }
 
+/// Persist the portions of a lighting profile that are known after a failed
+/// write. This never changes `lighting_enabled`: the final global report was
+/// not confirmed, so retaining its previous observed value is safer than
+/// inventing a new one.
+pub fn update_partial_lighting_profile(
+    cache_update: LightingProfileCacheUpdate,
+    logo_colors: &[String],
+    ring_colors: &[String],
+    logo_effect: &str,
+    ring_effect: &str,
+    logo_speed: &str,
+    ring_speed: &str,
+) -> Result<(), String> {
+    let LightingProfileCacheUpdate::Partial { logo, ring } = cache_update else {
+        return Ok(());
+    };
+
+    update(|state| {
+        apply_zone_cache_update(state, true, logo, logo_colors, logo_effect, logo_speed);
+        apply_zone_cache_update(state, false, ring, ring_colors, ring_effect, ring_speed);
+        // A partial profile cannot safely claim that both zones share one
+        // uniform color, even if the surviving cached values happen to match.
+        state.lighting_color = None;
+    })
+    .map(|_| ())
+}
+
+fn apply_zone_cache_update(
+    state: &mut RuntimeState,
+    logo: bool,
+    cache_update: LightingZoneCacheUpdate,
+    colors: &[String],
+    effect: &str,
+    speed: &str,
+) {
+    match (logo, cache_update) {
+        (_, LightingZoneCacheUpdate::Keep) => {}
+        (true, LightingZoneCacheUpdate::Replace) => {
+            state.logo_colors = Some(colors.to_vec());
+            state.logo_color = uniform_color(colors);
+            state.logo_effect = Some(effect.into());
+            state.logo_speed = Some(speed.into());
+        }
+        (false, LightingZoneCacheUpdate::Replace) => {
+            state.ring_colors = Some(colors.to_vec());
+            state.ring_color = uniform_color(colors);
+            state.ring_effect = Some(effect.into());
+            state.ring_speed = Some(speed.into());
+        }
+        (true, LightingZoneCacheUpdate::Unknown) => {
+            state.logo_colors = None;
+            state.logo_color = None;
+            state.logo_effect = None;
+            state.logo_speed = None;
+        }
+        (false, LightingZoneCacheUpdate::Unknown) => {
+            state.ring_colors = None;
+            state.ring_color = None;
+            state.ring_effect = None;
+            state.ring_speed = None;
+        }
+    }
+}
+
 fn uniform_color(colors: &[String]) -> Option<String> {
     let first = colors.first()?;
     colors
@@ -424,6 +550,88 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn first_lighting_report_failure_leaves_cache_intact() {
+        assert_eq!(
+            lighting_profile_cache_update(13, Some(0)),
+            LightingProfileCacheUpdate::Keep
+        );
+    }
+
+    #[test]
+    fn partial_lighting_write_marks_the_affected_zone_unknown() {
+        assert_eq!(
+            lighting_profile_cache_update(13, Some(3)),
+            LightingProfileCacheUpdate::Partial {
+                logo: LightingZoneCacheUpdate::Unknown,
+                ring: LightingZoneCacheUpdate::Keep,
+            }
+        );
+        assert_eq!(
+            lighting_profile_cache_update(13, Some(8)),
+            LightingProfileCacheUpdate::Partial {
+                logo: LightingZoneCacheUpdate::Replace,
+                ring: LightingZoneCacheUpdate::Unknown,
+            }
+        );
+        assert_eq!(
+            lighting_profile_cache_update(13, Some(6)),
+            LightingProfileCacheUpdate::Partial {
+                logo: LightingZoneCacheUpdate::Replace,
+                ring: LightingZoneCacheUpdate::Unknown,
+            }
+        );
+        assert_eq!(
+            lighting_profile_cache_update(13, Some(12)),
+            LightingProfileCacheUpdate::Partial {
+                logo: LightingZoneCacheUpdate::Unknown,
+                ring: LightingZoneCacheUpdate::Unknown,
+            }
+        );
+        assert_eq!(
+            lighting_profile_cache_update(12, Some(3)),
+            LightingProfileCacheUpdate::Partial {
+                logo: LightingZoneCacheUpdate::Unknown,
+                ring: LightingZoneCacheUpdate::Unknown,
+            }
+        );
+    }
+
+    #[test]
+    fn complete_lighting_write_records_the_new_profile() {
+        assert_eq!(
+            lighting_profile_cache_update(13, None),
+            LightingProfileCacheUpdate::Complete
+        );
+    }
+
+    #[test]
+    fn partial_lighting_cache_serializes_unknown_zone_as_null() {
+        with_test_runtime(|_| {
+            let old = vec!["#112233".to_owned(); 5];
+            let new = vec!["#445566".to_owned(); 5];
+            update_lighting_profile(&old, &old, "solid", "solid", "0.5", "0.5").unwrap();
+            update_partial_lighting_profile(
+                lighting_profile_cache_update(13, Some(3)),
+                &new,
+                &new,
+                "wave",
+                "wave",
+                "1.5",
+                "1.5",
+            )
+            .unwrap();
+
+            let cached = load().unwrap();
+            assert_eq!(cached.logo_colors, None);
+            assert_eq!(cached.logo_effect, None);
+            assert_eq!(cached.ring_colors, Some(old));
+            let json = serde_json::to_value(cached).unwrap();
+            assert!(json["logo_colors"].is_null());
+            assert!(json["logo_effect"].is_null());
+        });
+    }
 
     fn with_test_runtime<T>(operation: impl FnOnce(&PathBuf) -> T) -> T {
         let _guard = TEST_ENVIRONMENT.lock().unwrap();

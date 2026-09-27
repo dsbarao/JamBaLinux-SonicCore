@@ -30,15 +30,17 @@ PlasmoidItem {
     property string microphoneState: "unknown"
     property string sidetoneLevel: "unknown"
     property var lightingEnabled: null
-    property string lightingColor: "unknown"
-    property string logoColor: "unknown"
-    property string ringColor: "unknown"
-    property var logoColors: ["#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc"]
-    property var ringColors: ["#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc", "#33ffcc"]
-    property string logoEffect: "solid"
-    property string ringEffect: "solid"
-    property string logoSpeed: "0.5"
-    property string ringSpeed: "0.5"
+    // Lighting profile fields are nullable. In particular, a partial HID
+    // write makes the affected zone unknown; do not turn that into defaults.
+    property var lightingColor: null
+    property var logoColor: null
+    property var ringColor: null
+    property var logoColors: null
+    property var ringColors: null
+    property var logoEffect: null
+    property var ringEffect: null
+    property var logoSpeed: null
+    property var ringSpeed: null
     property string lightingTarget: "both"
     property int lightingSegment: -1
     property real pickerHue: 0
@@ -523,7 +525,7 @@ PlasmoidItem {
     function selectedLightingColor() {
         if (lightingSegment >= 0) {
             const colors = lightingTarget === "ring" ? ringColors : logoColors
-            return String(colors[lightingSegment] ?? "unknown")
+            return Array.isArray(colors) ? colors[lightingSegment] ?? null : null
         }
         if (lightingTarget === "logo") return logoColor
         if (lightingTarget === "ring") return ringColor
@@ -531,6 +533,10 @@ PlasmoidItem {
     }
 
     function lightingFeature() {
+        // A synchronized color is the only recovery command that does not
+        // depend on a cached profile. It takes precedence over an old segment
+        // selection retained while the segment picker is hidden.
+        if (lightingTarget === "both" && !lightingTargetProfileKnown()) return "color"
         if (lightingSegment >= 0) {
             const prefix = lightingTarget === "logo" ? "logo-"
                 : lightingTarget === "ring" ? "ring-" : ""
@@ -565,6 +571,26 @@ PlasmoidItem {
         return logoSpeed === ringSpeed ? logoSpeed : "mixed"
     }
 
+    function zoneProfileKnown(zone) {
+        const colors = zone === "ring" ? ringColors : logoColors
+        const effect = zone === "ring" ? ringEffect : logoEffect
+        const speed = zone === "ring" ? ringSpeed : logoSpeed
+        return Array.isArray(colors) && colors.length === 5
+            && typeof effect === "string" && typeof speed === "string"
+    }
+
+    function lightingTargetProfileKnown() {
+        // Every non-recovery lighting command rebuilds and writes both zones,
+        // so either unknown zone makes the entire cached profile unusable.
+        return zoneProfileKnown("logo") && zoneProfileKnown("ring")
+    }
+
+    function canApplyLightingColor() {
+        // `color` is the explicit synchronized recovery command and does not
+        // read either cached zone. All other writes require known cache data.
+        return lightingTarget === "both" || lightingTargetProfileKnown()
+    }
+
     function normalizeColor(value) {
         const presets = {
             "blue": "#0029ff", "cyan": "#33ffcc", "magenta": "#ff00cc",
@@ -574,7 +600,9 @@ PlasmoidItem {
     }
 
     function loadPicker() {
-        const hex = normalizeColor(selectedLightingColor())
+        const selected = selectedLightingColor()
+        if (typeof selected !== "string") return
+        const hex = normalizeColor(selected)
         const red = parseInt(hex.slice(1, 3), 16) / 255
         const green = parseInt(hex.slice(3, 5), 16) / 255
         const blue = parseInt(hex.slice(5, 7), 16) / 255
@@ -652,17 +680,15 @@ PlasmoidItem {
             microphoneState = String(result.microphone ?? "unknown")
             sidetoneLevel = String(result.sidetone_level ?? "unknown")
             lightingEnabled = result.lighting_enabled ?? null
-            lightingColor = String(result.lighting_color ?? "unknown")
-            logoColor = String(result.logo_color ?? result.lighting_color ?? "unknown")
-            ringColor = String(result.ring_color ?? result.lighting_color ?? "unknown")
-            const logoFallback = normalizeColor(logoColor)
-            const ringFallback = normalizeColor(ringColor)
-            logoColors = result.logo_colors ?? [logoFallback, logoFallback, logoFallback, logoFallback, logoFallback]
-            ringColors = result.ring_colors ?? [ringFallback, ringFallback, ringFallback, ringFallback, ringFallback]
-            logoEffect = String(result.logo_effect ?? "solid")
-            ringEffect = String(result.ring_effect ?? "solid")
-            logoSpeed = String(result.logo_speed ?? "0.5")
-            ringSpeed = String(result.ring_speed ?? "0.5")
+            lightingColor = result.lighting_color ?? null
+            logoColor = result.logo_color ?? null
+            ringColor = result.ring_color ?? null
+            logoColors = result.logo_colors ?? null
+            ringColors = result.ring_colors ?? null
+            logoEffect = result.logo_effect ?? null
+            ringEffect = result.ring_effect ?? null
+            logoSpeed = result.logo_speed ?? null
+            ringSpeed = result.ring_speed ?? null
             gameChatValue = result.game_chat_value === null ? -1 : Number(result.game_chat_value)
             errorMessage = ""
         } catch (error) {
@@ -1321,6 +1347,15 @@ PlasmoidItem {
                     opacity: 0.7
                 }
 
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    visible: root.openSection === "lighting" && !root.lightingTargetProfileKnown()
+                    text: "Perfil da zona desconhecido. Aplique uma cor sólida em Ambos para recuperar."
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Kirigami.Theme.negativeTextColor
+                }
+
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
@@ -1360,15 +1395,15 @@ PlasmoidItem {
 
                 PlasmaComponents.Label {
                     Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
+                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
                     text: "Efeito"
                     opacity: 0.7
                 }
 
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                    enabled: root.deviceAvailable && !root.controlBusy && root.lightingTargetProfileKnown()
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.Button { text: "Respiração"; checkable: true; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
@@ -1379,14 +1414,14 @@ PlasmoidItem {
 
                 PlasmaComponents.Label {
                     Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
+                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
                     text: "Velocidade"
                     opacity: 0.7
                 }
 
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
+                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
                     enabled: root.deviceAvailable && !root.controlBusy
                     spacing: Kirigami.Units.smallSpacing
 
@@ -1407,7 +1442,7 @@ PlasmoidItem {
 
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
+                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
                     enabled: root.deviceAvailable && !root.controlBusy
                     spacing: Kirigami.Units.smallSpacing
 
@@ -1426,11 +1461,12 @@ PlasmoidItem {
 
                         delegate: Rectangle {
                             required property int index
+                            readonly property var colors: root.lightingTarget === "ring"
+                                ? root.ringColors : root.logoColors
                             Layout.preferredWidth: 34
                             Layout.preferredHeight: 30
                             radius: Kirigami.Units.cornerRadius
-                            color: root.lightingTarget === "ring"
-                                ? root.ringColors[index] : root.logoColors[index]
+                            color: Array.isArray(colors) ? colors[index] ?? "transparent" : "transparent"
                             border.width: root.lightingSegment === index ? 3 : 1
                             border.color: root.lightingSegment === index
                                 ? Kirigami.Theme.highlightColor : Kirigami.Theme.textColor
@@ -1462,7 +1498,7 @@ PlasmoidItem {
                     Layout.preferredWidth: 220
                     Layout.preferredHeight: 220
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    enabled: root.deviceAvailable && !root.controlBusy && root.canApplyLightingColor()
 
                     readonly property real centerX: width / 2
                     readonly property real centerY: height / 2
@@ -1586,7 +1622,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    enabled: root.deviceAvailable && !root.controlBusy && root.canApplyLightingColor()
                     spacing: Kirigami.Units.smallSpacing
 
                     Rectangle {
@@ -1599,13 +1635,16 @@ PlasmoidItem {
                     }
 
                     PlasmaComponents.Label {
-                        text: root.pickerHex().toUpperCase()
+                        text: root.lightingTargetProfileKnown()
+                            ? root.pickerHex().toUpperCase()
+                            : "Nova cor sincronizada"
                         font.family: "monospace"
                     }
 
                     PlasmaComponents.Button {
                         text: "Aplicar"
                         icon.name: "dialog-ok-apply"
+                        enabled: root.canApplyLightingColor()
                         onClicked: root.runControl(root.lightingFeature(), root.pickerHex())
                     }
                 }
