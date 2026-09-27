@@ -1261,10 +1261,24 @@ fn plan_route_iteration(
     });
     changed |= state.routed_streams.len() != old_len;
     let old_unproven_len = state.unproven_streams.len();
+    // A stream key can become proven in an earlier session while a stale
+    // quarantine entry for the same live stream survives a service restart.
+    // Keeping both makes the quarantine branch below win forever, so the
+    // stream can sit on the physical Game sink without ever reaching the
+    // equalizer or spatial graph. Historical proof is deliberately keyed by
+    // application identity, so it is also sufficient to retire that stale
+    // quarantine entry.
+    let proven_stream_keys = state
+        .proven_stream_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     state.unproven_streams.retain(|identity| {
-        inputs.iter().any(|input| {
-            input.object_serial == identity.object_serial && input.stream_key == identity.stream_key
-        })
+        !proven_stream_keys.contains(identity.stream_key.as_str())
+            && inputs.iter().any(|input| {
+                input.object_serial == identity.object_serial
+                    && input.stream_key == identity.stream_key
+            })
     });
     changed |= state.unproven_streams.len() != old_unproven_len;
 
@@ -2036,6 +2050,34 @@ mod tests {
         assert!(matches!(
             plan.actions[1],
             RouteAction::MoveSinkInput { input_serial: 11, ref sink_name } if sink_name == "alsa_output.usb_quantum.game"
+        ));
+    }
+
+    #[test]
+    fn route_plan_reconciles_stale_quarantine_for_a_proven_game_stream() {
+        let (sinks, game) = routing_sinks();
+        let state = BackendState {
+            unproven_streams: vec![StreamIdentity {
+                object_serial: 11,
+                stream_key: "known-stream".into(),
+            }],
+            proven_stream_keys: vec!["known-stream".into()],
+            ..BackendState::default()
+        };
+        let plan = plan_route_iteration(
+            &sinks,
+            &[playback_input(11, game.object_serial, "known-stream")],
+            &game,
+            state,
+        )
+        .unwrap();
+
+        assert!(plan.state.unproven_streams.is_empty());
+        assert_eq!(plan.state.routed_streams.len(), 1);
+        assert!(matches!(
+            plan.actions.get(1),
+            Some(RouteAction::MoveSinkInput { input_serial: 11, sink_name })
+                if sink_name == VIRTUAL_SINK
         ));
     }
 
