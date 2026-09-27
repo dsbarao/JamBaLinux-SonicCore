@@ -29,3 +29,17 @@ Output Report `0x2f` declares six LED usages, including LED Usage `0x09`
 (Mute). The headset also has a physical microphone LED that lights while muted.
 This is a useful correlation, but control ownership remains unconfirmed and no
 output has been attempted.
+
+## hidraw interface reporting
+
+The read-only `monitor --dry-run`, `status --dry-run`, and `inspect` commands
+report the selected hidraw node's USB `bInterfaceNumber` from sysfs. The
+repository's udev rule documents interface `05`; a different, missing, or
+malformed value produces a warning. This is diagnostic evidence only: hidraw
+selection still uses the existing HID identity criterion and does not require
+interface `05`.
+
+Before interface `05` can become a selection requirement, the owner must
+validate that condition on the physical supported headset and record the
+result in the evidence ledger. No VID/PID, allowlist, udev rule, HID command,
+or report behavior is changed by this reporting step.

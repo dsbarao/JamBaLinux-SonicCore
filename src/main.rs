@@ -191,6 +191,7 @@ struct StatusOutput {
     schema: u8,
     device: &'static str,
     hidraw: String,
+    interface_number: Option<u8>,
     access: &'static str,
     dry_run: bool,
     battery_percent: Option<u8>,
@@ -212,6 +213,12 @@ struct StatusOutput {
     game_chat_value: Option<u8>,
     bluetooth: Option<String>,
     sidetone_level: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct HidrawInterfaceNumber {
+    number: Option<u8>,
+    warning: Option<String>,
 }
 
 fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
@@ -465,6 +472,9 @@ fn scan() -> io::Result<bool> {
 
 fn inspect() -> Result<bool, String> {
     let reports = device_reports()?;
+    let hidraw_interface = quantum_hidraw_node()?
+        .as_deref()
+        .map(hidraw_interface_number);
     for report in &reports {
         println!("Device {JBL_VENDOR_ID}:{QUANTUM_810_PRODUCT_ID}");
         println!("  manufacturer: {}", report.manufacturer);
@@ -473,6 +483,16 @@ fn inspect() -> Result<bool, String> {
         println!("  speed: {} Mbit/s", report.speed_mbps);
         println!("  sysfs: {}", report.sysfs);
         println!("  descriptor bytes: {}", report.descriptor_bytes);
+        if let Some(interface) = &hidraw_interface {
+            print!("  ");
+            match interface.number {
+                Some(number) => println!("hidraw interface_number: {number:02x}"),
+                None => println!("hidraw interface_number: unknown"),
+            }
+            if let Some(warning) = &interface.warning {
+                eprintln!("warning: {warning}");
+            }
+        }
         println!("  interfaces:");
         for interface in &report.interfaces {
             let marker = if interface.active {
@@ -606,6 +626,84 @@ fn quantum_hidraw_node() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+// This is deliberately diagnostic only.  HID identity remains the selection
+// criterion until interface matching has been validated on the target hardware.
+fn interface_number_from_sysfs(sysfs_interface: &Path) -> HidrawInterfaceNumber {
+    let value = match read_trimmed(sysfs_interface.join("bInterfaceNumber")) {
+        Some(value) => value,
+        None => {
+            return HidrawInterfaceNumber {
+                number: None,
+                warning: Some(format!(
+                    "could not read bInterfaceNumber from {}; expected 05",
+                    sysfs_interface.display()
+                )),
+            };
+        }
+    };
+    match u8::from_str_radix(&value, 16) {
+        Ok(5) => HidrawInterfaceNumber {
+            number: Some(5),
+            warning: None,
+        },
+        Ok(number) => HidrawInterfaceNumber {
+            number: Some(number),
+            warning: Some(format!(
+                "hidraw bInterfaceNumber is {number:02x}; the repository udev rule documents 05"
+            )),
+        },
+        Err(_) => HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "malformed bInterfaceNumber `{value}` in {}; expected hexadecimal 05",
+                sysfs_interface.display()
+            )),
+        },
+    }
+}
+
+fn hidraw_interface_number(node: &Path) -> HidrawInterfaceNumber {
+    let Some(name) = node.file_name() else {
+        return HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "could not resolve hidraw sysfs path for {}",
+                node.display()
+            )),
+        };
+    };
+    let hid_device = Path::new("/sys/class/hidraw").join(name).join("device");
+    let Ok(hid_device) = fs::canonicalize(hid_device) else {
+        return HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "could not resolve hidraw sysfs path for {}",
+                node.display()
+            )),
+        };
+    };
+    let Some(interface) = hid_device.parent() else {
+        return HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "could not find USB interface for {}",
+                node.display()
+            )),
+        };
+    };
+    interface_number_from_sysfs(interface)
+}
+
+fn print_hidraw_interface_number(report: &HidrawInterfaceNumber) {
+    match report.number {
+        Some(number) => println!("interface_number: {number:02x}"),
+        None => println!("interface_number: unknown"),
+    }
+    if let Some(warning) = &report.warning {
+        eprintln!("warning: {warning}");
+    }
+}
+
 fn format_hid_report(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -619,6 +717,8 @@ fn monitor(dry_run: bool) -> Result<bool, String> {
         return Ok(false);
     };
     println!("matched JBL Quantum 810 HID node: {}", node.display());
+    let interface = hidraw_interface_number(&node);
+    print_hidraw_interface_number(&interface);
     println!("access mode: read-only (no Output/Feature reports)");
     if dry_run {
         match fs::metadata(&node) {
@@ -1261,6 +1361,7 @@ fn status_output_from_cached_state(cached: state::RuntimeState) -> StatusOutput 
         schema: 1,
         device: "0ecb:2069",
         hidraw: "runtime-cache".into(),
+        interface_number: None,
         access: "runtime-cache-read-only",
         dry_run: false,
         battery_percent: cached.battery_percent,
@@ -1332,9 +1433,13 @@ fn status(options: StatusOptions) -> Result<bool, String> {
     let Some(node) = quantum_hidraw_node()? else {
         return Ok(false);
     };
+    let interface = hidraw_interface_number(&node);
     if !options.json {
         println!("matched JBL Quantum 810 HID node: {}", node.display());
+        print_hidraw_interface_number(&interface);
         println!("access mode: read-only HID GET_FEATURE (no SET_FEATURE/output reports)");
+    } else if let Some(warning) = &interface.warning {
+        eprintln!("warning: {warning}");
     }
     if options.dry_run {
         let metadata =
@@ -1347,6 +1452,7 @@ fn status(options: StatusOptions) -> Result<bool, String> {
                 schema: 1,
                 device: "0ecb:2069",
                 hidraw: node.display().to_string(),
+                interface_number: interface.number,
                 access: "hid-get-feature-read-only",
                 dry_run: true,
                 battery_percent: None,
@@ -1391,6 +1497,7 @@ fn status(options: StatusOptions) -> Result<bool, String> {
             schema: 1,
             device: "0ecb:2069",
             hidraw: node.display().to_string(),
+            interface_number: interface.number,
             access: "hid-get-feature-read-only",
             dry_run: false,
             battery_percent: Some(battery),
@@ -2262,6 +2369,45 @@ mod tests {
     }
 
     #[test]
+    fn reports_hidraw_interface_number_from_temp_sysfs() {
+        let root = env::temp_dir().join(format!(
+            "jambalinux-soniccore-interface-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temporary sysfs directory");
+
+        fs::write(root.join("bInterfaceNumber"), "05\n").expect("write interface number");
+        assert_eq!(
+            interface_number_from_sysfs(&root),
+            HidrawInterfaceNumber {
+                number: Some(5),
+                warning: None,
+            }
+        );
+
+        fs::write(root.join("bInterfaceNumber"), "04\n").expect("write mismatched interface");
+        let mismatched = interface_number_from_sysfs(&root);
+        assert_eq!(mismatched.number, Some(4));
+        assert!(mismatched.warning.is_some());
+
+        fs::remove_file(root.join("bInterfaceNumber")).expect("remove interface number");
+        let missing = interface_number_from_sysfs(&root);
+        assert_eq!(missing.number, None);
+        assert!(missing.warning.is_some());
+
+        fs::write(root.join("bInterfaceNumber"), "not-hex\n").expect("write malformed interface");
+        let malformed = interface_number_from_sysfs(&root);
+        assert_eq!(malformed.number, None);
+        assert!(malformed.warning.is_some());
+
+        fs::remove_dir_all(root).expect("remove temporary sysfs directory");
+    }
+
+    #[test]
     fn rejects_invalid_descriptor_length() {
         assert!(parse_descriptors(&[1, 4]).is_err());
         assert!(parse_descriptors(&[9, 4, 0]).is_err());
@@ -2405,10 +2551,11 @@ mod tests {
 
     #[test]
     fn serializes_versioned_status_json() {
-        let output = StatusOutput {
+        let mut output = StatusOutput {
             schema: 1,
             device: "0ecb:2069",
             hidraw: "/dev/hidraw7".into(),
+            interface_number: Some(5),
             access: "hid-get-feature-read-only",
             dry_run: false,
             battery_percent: Some(60),
@@ -2431,11 +2578,17 @@ mod tests {
             bluetooth: Some("connected".into()),
             sidetone_level: Some("low".into()),
         };
-        let json = serde_json::to_value(output).unwrap();
+        let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["schema"], 1);
         assert_eq!(json["battery_percent"], 60);
         assert_eq!(json["charging"], true);
         assert_eq!(json["raw_feature"], "49 3c");
+        assert_eq!(json["interface_number"], 5);
+
+        output.dry_run = true;
+        output.interface_number = None;
+        let dry_run_json = serde_json::to_value(output).unwrap();
+        assert_eq!(dry_run_json["interface_number"], serde_json::Value::Null);
     }
 
     #[test]
