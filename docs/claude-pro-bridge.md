@@ -12,6 +12,11 @@ instalação, commits, rede e comandos de mudança de estado. Isso fornece uma
 segunda opinião rastreável sem permitir que um subprocesso autônomo altere o
 projeto silenciosamente.
 
+As ferramentas permitidas ao Claude Code são `Read`, `Glob`, `Grep`,
+`Bash(git status --short)` e `Bash(git diff -- *)`. Em particular, a ponte não
+autoriza `Bash(rg *)`: `Grep` já atende buscas de texto, enquanto argumentos
+como `rg --pre` poderiam iniciar um programa externo.
+
 ## Instalação
 
 Com o login Pro ativo no Claude Code, execute:

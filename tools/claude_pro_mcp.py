@@ -57,14 +57,19 @@ def claude_ready() -> tuple[bool, str]:
         return False, "ANTHROPIC_API_KEY está definido; ponte recusada para evitar cobrança por API."
     if not shutil.which("claude"):
         return False, "Claude Code CLI não foi encontrado no PATH."
-    status = subprocess.run(
-        ["claude", "auth", "status"],
-        cwd=PROJECT,
-        text=True,
-        capture_output=True,
-        timeout=15,
-        check=False,
-    )
+    try:
+        status = subprocess.run(
+            ["claude", "auth", "status"],
+            cwd=PROJECT,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "A consulta de autenticação do Claude Code excedeu o limite de 15 segundos."
+    except OSError:
+        return False, "Não foi possível executar o Claude Code para consultar a autenticação."
     if status.returncode != 0:
         return False, "Não foi possível consultar a autenticação do Claude Code."
     try:
@@ -102,7 +107,7 @@ Responda em JSON com: status (pass|fail|blocked), resumo, evidencias (lista), ri
         "none",
         "--no-session-persistence",
         "--allowedTools",
-        "Read,Glob,Grep,Bash(rg *),Bash(git status --short),Bash(git diff -- *)",
+        "Read,Glob,Grep,Bash(git status --short),Bash(git diff -- *)",
         prompt,
     ]
     try:
