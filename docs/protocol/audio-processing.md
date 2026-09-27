@@ -325,6 +325,12 @@ Full measurements and the remaining legal boundary for a distributable HRIR
 are recorded in
 [`validation_reports/spatial-hardware-validation.md`](validation_reports/spatial-hardware-validation.md).
 
+Antes de qualquer ajuste de ganho, coeficiente, HRIR, EQ ou roteamento para
+investigar volume espacial, seguir o contrato passivo de evidência em
+[`diagnostics/audio-gain.md`](diagnostics/audio-gain.md). Ele não transforma a
+topologia documentada em uma medição de ganho ou em autorização para alterar o
+grafo.
+
 ## Diagnóstico de transições
 
 Two user-visible symptoms are under investigation: (A) toggling spatial audio

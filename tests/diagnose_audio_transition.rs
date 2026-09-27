@@ -15,6 +15,13 @@ fn source() -> String {
     fs::read_to_string(script()).expect("diagnostic script is readable")
 }
 
+fn audio_gain_contract() -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/protocol/diagnostics/audio-gain.md"),
+    )
+    .expect("audio gain evidence contract is readable")
+}
+
 fn scratch(name: &str) -> PathBuf {
     let directory =
         std::env::temp_dir().join(format!("soniccore-diag-{}-{name}", std::process::id()));
@@ -103,6 +110,42 @@ fn script_is_executable_and_strict() {
         .mode();
     assert_ne!(mode & 0o111, 0, "the diagnostic script must be executable");
     assert!(source().contains("set -euo pipefail"));
+}
+
+#[test]
+fn audio_gain_contract_keeps_measurement_passive_and_falsifiable() {
+    let contract = audio_gain_contract();
+    for required in [
+        "Stream da aplicação",
+        "Mixers seco/wet",
+        "Convolvers/HRIR",
+        "Quantum Game e Chat",
+        "Volume percebido",
+        "RMS em dBFS",
+        "pico em dBFS",
+        "Correlação normalizada",
+        "formatos efetivamente negociados",
+        "normalização",
+        "upmix estéreo->7.1",
+        "Game/Chat",
+        "resampling",
+        "Props",
+        "VID/PID",
+        "allowlists",
+    ] {
+        assert!(contract.contains(required), "contract omits `{required}`");
+    }
+    for forbidden in [
+        "pactl move-sink-input",
+        "pactl set-sink-volume",
+        "pw-cli set-param",
+        "qualquer escrita HID",
+    ] {
+        assert!(
+            contract.contains(forbidden),
+            "contract must prohibit `{forbidden}`"
+        );
+    }
 }
 
 #[test]
