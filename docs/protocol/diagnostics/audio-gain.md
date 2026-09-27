@@ -162,3 +162,38 @@ Este documento não recomenda elevar volumes, usar valores acima de 100%,
 compensar ganho, alterar coeficientes, adicionar preamp, trocar HRIR ou mudar
 roteamento. Essas seriam implementações posteriores, condicionadas à evidência
 e às autorizações adequadas.
+
+## Ledger offline (ag03)
+
+`tools/analyze_audio_gain.py` não consulta uma sessão PipeWire, não executa
+SonicCore e não aceita argumentos que descrevam um dispositivo. Ele lê somente
+um arquivo JSON fornecido pelo operador e escreve um relatório JSON em stdout:
+
+```bash
+python3 tools/analyze_audio_gain.py captura-sanitizada.json --pretty
+```
+
+O arquivo deve declarar `"schema": "jambalinux-audio-gain-ledger/v1"`.
+Ele é a transcrição explícita e sanitizada de campos presentes no instantâneo
+passivo: `streams`, `spatial.wet_dry_gains`, `spatial.formats`,
+`eq.requested_bands_db`, `eq.applied_bands_db`, `sinks.game`, `sinks.chat` e,
+quando houver captura digital comparável, `measured_peaks_dbfs`. Formatos usam
+`format`, `rate`, `channels` e opcionalmente `position`; ganhos de stream/sink
+continuam observações, não níveis de amostra. As fixtures em
+`tests/fixtures/audio_gain/` são exemplos completos e reprodutíveis desse
+formato, incluindo Game/Chat, bypass/binaural, EQ positivo, lacunas e taxas
+divergentes.
+
+O relatório mantém `observed` separado de `limits_derived`. O único limite de
+soma que ele calcula é a matriz seca documentada: máximo correlacionado por
+lado `1 + 3*0.707 = 3.121` (cerca de `+9.887 dBFS` com entrada full-scale).
+Isso é risco teórico, não medição de pico. O headroom contratual é `0 dBFS`;
+um pico fornecido acima dele ou EQ positivo sem preamp automático é sinalizado.
+O ledger nunca recomenda volume acima de 100%.
+
+Sem dados expostos, ganho/normalização do convolver ou HRIR, ganho/SPL do
+endpoint, ganho de resampler/conversão e efeito do dial Game/Chat são sempre
+`indeterminado`. Uma diferença de formato/taxa é reportada como divergência,
+não como causa ou perda de qualidade. Esses resultados delimitam as medições
+A/B necessárias; não autorizam alteração de HID, roteamento, EQ, espacial ou
+volume.

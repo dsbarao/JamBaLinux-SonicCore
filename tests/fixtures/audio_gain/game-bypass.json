@@ -1,0 +1,7 @@
+{
+  "schema": "jambalinux-audio-gain-ledger/v1",
+  "streams": {"game-player": {"volume_linear": 1.0, "volume_db": 0.0}},
+  "spatial": {"wet_dry_gains": {"wet": [0, 0], "dry": [1, 1]}, "formats": {"input": {"format": "F32LE", "rate": 48000, "channels": 8, "position": ["FL", "FR", "FC", "LFE", "SL", "SR", "RL", "RR"]}, "output": {"format": "F32LE", "rate": 48000, "channels": 2, "position": ["FL", "FR"]}}},
+  "eq": {"requested_bands_db": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "applied_bands_db": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+  "sinks": {"game": {"volume_linear": 1.0, "volume_db": 0.0, "format": "F32LE", "rate": 48000, "channels": 2, "position": ["FL", "FR"]}, "chat": {"volume_linear": 1.0, "volume_db": 0.0, "format": "F32LE", "rate": 48000, "channels": 2, "position": ["FL", "FR"]}}
+}
