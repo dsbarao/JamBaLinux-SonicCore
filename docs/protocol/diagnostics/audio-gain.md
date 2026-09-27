@@ -197,3 +197,12 @@ endpoint, ganho de resampler/conversão e efeito do dial Game/Chat são sempre
 não como causa ou perda de qualidade. Esses resultados delimitam as medições
 A/B necessárias; não autorizam alteração de HID, roteamento, EQ, espacial ou
 volume.
+
+## Protocolo A/B pré-registrado (ag04)
+
+O roteiro manual, as métricas, aleatorização, restauração e bloqueios para a
+próxima fase ativa estão em [audio-gain-ab.md](audio-gain-ab.md). Ele começa
+com baseline passivo e é apenas documentação nesta fase: pares que envolvam
+interação física ou mudança de áudio só podem ocorrer após aprovação humana
+explícita. O manifesto-modelo é propositalmente não reproduzível e não contém
+sinal, comandos ou controles executáveis.
