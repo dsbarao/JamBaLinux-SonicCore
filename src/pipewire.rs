@@ -96,6 +96,29 @@ struct PulseInput {
     media_name: String,
 }
 
+/// An ordered, side-effect-free description of a routing update.  Keeping
+/// persistence explicit is important: a route is recorded before its stream
+/// is moved, so a supervisor restart cannot mistake its own move for a new
+/// user-selected Game stream.
+#[derive(Debug, Clone, PartialEq)]
+enum RouteAction {
+    SetDefaultSink(String),
+    /// The state as it stood when this action was planned.  In particular,
+    /// this must precede the corresponding stream move, rather than writing
+    /// the final state of a batch of moves.
+    PersistState(BackendState),
+    MoveSinkInput {
+        input_serial: u64,
+        sink_name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RoutePlan {
+    state: BackendState,
+    actions: Vec<RouteAction>,
+}
+
 struct Health<'a> {
     service: bool,
     virtual_node: Option<&'a Target>,
@@ -1094,45 +1117,121 @@ fn safe_default_sink<'a>(sinks: &'a [PulseSink], saved: Option<&str>) -> Option<
         })
 }
 
-fn run_route_iteration() -> Result<(), String> {
-    let _route_lock = route_lock()?;
-    let sinks_value = pactl_json(&["list", "sinks"])?;
-    let sinks = pulse_sinks(&sinks_value)?;
-    let default = pactl_default_sink()?;
-    let mut state = read_state()?.unwrap_or_default();
+fn restore_target<'a>(sinks: &'a [PulseSink], route: &RoutedStream) -> Option<&'a PulseSink> {
+    sinks
+        .iter()
+        .find(|sink| sink.name == route.original_sink_name)
+        .or_else(|| {
+            sinks
+                .iter()
+                .find(|sink| sink.object_serial == route.original_sink_serial)
+        })
+}
+
+/// Plan shutdown restoration without overwriting a stream moved to a newer
+/// user/session-manager destination. `routing_paused` is persisted by the
+/// caller before the PipeWire snapshot is collected.
+fn plan_restore_routes(
+    sinks: &[PulseSink],
+    inputs: &[PulseInput],
+    mut state: BackendState,
+) -> RoutePlan {
+    let virtual_sink_serial = sinks
+        .iter()
+        .find(|sink| sink.name == VIRTUAL_SINK)
+        .map(|sink| sink.object_serial);
+    let mut actions = Vec::new();
+    let mut remaining_routes = Vec::new();
+    for route in &state.routed_streams {
+        let Some(input) = inputs.iter().find(|input| {
+            input.object_serial == route.object_serial && input.stream_key == route.stream_key
+        }) else {
+            // The stream ended; no restoration remains to perform.
+            continue;
+        };
+        if Some(input.sink_serial) != virtual_sink_serial {
+            // The user or session manager already moved it elsewhere. Respect
+            // that newer destination instead of overwriting it on shutdown.
+            continue;
+        }
+        if let Some(original) = restore_target(sinks, route) {
+            actions.push(RouteAction::MoveSinkInput {
+                input_serial: input.object_serial,
+                sink_name: original.name.clone(),
+            });
+        } else {
+            // Keep the proof and original destination for a later reconnect.
+            remaining_routes.push(route.clone());
+        }
+    }
+    state.routed_streams = remaining_routes;
+    RoutePlan { state, actions }
+}
+
+/// Make the default safe before requiring the headset graph. This preserves
+/// recovery when the Game endpoint is temporarily absent.
+fn plan_default_recovery(
+    sinks: &[PulseSink],
+    default: &str,
+    mut state: BackendState,
+) -> Result<(RoutePlan, String), String> {
+    if state.routing_paused {
+        return Ok((
+            RoutePlan {
+                state,
+                actions: Vec::new(),
+            },
+            default.to_owned(),
+        ));
+    }
+    if is_managed_processing_sink(default) {
+        let fallback = safe_default_sink(sinks, state.default_sink_before.as_deref()).ok_or(
+            "a managed processing sink is the default and no physical fallback is available",
+        )?;
+        let effective_default = fallback.name.clone();
+        return Ok((
+            RoutePlan {
+                state,
+                actions: vec![RouteAction::SetDefaultSink(effective_default.clone())],
+            },
+            effective_default,
+        ));
+    }
+    let changed = sinks
+        .iter()
+        .any(|sink| sink.name == default && !is_managed_processing_sink(&sink.name))
+        && state.default_sink_before.as_deref() != Some(default);
+    if changed {
+        state.default_sink_before = Some(default.to_owned());
+    }
+    let actions = changed
+        .then(|| RouteAction::PersistState(state.clone()))
+        .into_iter()
+        .collect();
+    Ok((RoutePlan { state, actions }, default.to_owned()))
+}
+
+fn plan_route_iteration(
+    sinks: &[PulseSink],
+    inputs: &[PulseInput],
+    game: &PulseSink,
+    mut state: BackendState,
+) -> Result<RoutePlan, String> {
+    let mut actions = Vec::new();
     let mut changed = false;
 
     if state.routing_paused {
-        return Ok(());
-    }
-
-    if is_managed_processing_sink(&default) {
-        let fallback = safe_default_sink(&sinks, state.default_sink_before.as_deref()).ok_or(
-            "a managed processing sink is the default and no physical fallback is available",
-        )?;
-        pactl_success(&["set-default-sink", &fallback.name])?;
-    } else if sinks
-        .iter()
-        .any(|sink| sink.name == default && !is_managed_processing_sink(&sink.name))
-        && state.default_sink_before.as_deref() != Some(default.as_str())
-    {
-        state.default_sink_before = Some(default);
-        changed = true;
-    }
-    if changed {
-        write_state(&state)?;
-        changed = false;
+        return Ok(RoutePlan { state, actions });
     }
 
     // Default recovery must not depend on the headset being present. Only
     // after it is safe do we require the exact, confirmed Game sink.
-    let game = pulse_game_sink(&sinks_value)?;
     let virtual_sink = sinks
         .iter()
         .find(|sink| sink.name == VIRTUAL_SINK)
         .cloned()
         .ok_or("the automatic equalizer sink is not available yet")?;
-    let spatial_sink = exact_spatial_sink(&sinks)?;
+    let spatial_sink = exact_spatial_sink(sinks)?;
     let spatial_sink_serial = spatial_sink.map(|sink| sink.object_serial);
     if state.target_node_name != game.name || state.target_object_serial != Some(game.object_serial)
     {
@@ -1141,13 +1240,12 @@ fn run_route_iteration() -> Result<(), String> {
         changed = true;
     }
 
-    let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
     // The spatial capture sink can become visible just before its stereo
     // output is linked to the equalizer. Keep streams on the EQ during that
     // short startup window; the next iteration promotes registered routes as
     // soon as exactly one spatial output is connected to the exact EQ sink.
     let processing_sink = spatial_sink
-        .filter(|_| spatial_output_connected(&inputs, virtual_sink.object_serial))
+        .filter(|_| spatial_output_connected(inputs, virtual_sink.object_serial))
         .unwrap_or(&virtual_sink);
     let old_len = state.routed_streams.len();
     state.routed_streams.retain(|route| {
@@ -1170,9 +1268,9 @@ fn run_route_iteration() -> Result<(), String> {
     });
     changed |= state.unproven_streams.len() != old_unproven_len;
 
-    let evacuation_sink = safe_default_sink(&sinks, state.default_sink_before.as_deref())
+    let evacuation_sink = safe_default_sink(sinks, state.default_sink_before.as_deref())
         .ok_or("no physical sink is available for an unproven equalizer stream")?;
-    for input in &inputs {
+    for input in inputs {
         let registered = state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
         });
@@ -1188,7 +1286,10 @@ fn run_route_iteration() -> Result<(), String> {
                     original_sink_name: game.name.clone(),
                     original_sink_serial: game.object_serial,
                 });
-                write_state(&state)?;
+                // Keep the pre-planner behavior: a stream restored by
+                // WirePlumber is registered durably as soon as it is
+                // recognized.  A later move in this iteration can fail.
+                actions.push(RouteAction::PersistState(state.clone()));
                 changed = true;
                 continue;
             }
@@ -1204,21 +1305,20 @@ fn run_route_iteration() -> Result<(), String> {
                 // Persist the quarantine before moving the stream. A stream
                 // evacuated to Game by this supervisor must not be mistaken
                 // for proof that the user originally selected Game.
-                write_state(&state)?;
+                actions.push(RouteAction::PersistState(state.clone()));
                 changed = true;
             }
             // A stream is allowed through the virtual sink only after it was
             // observed on the exact Game endpoint and recorded below.
-            pactl_success(&[
-                "move-sink-input",
-                &input.object_serial.to_string(),
-                &evacuation_sink.name,
-            ])?;
+            actions.push(RouteAction::MoveSinkInput {
+                input_serial: input.object_serial,
+                sink_name: evacuation_sink.name.clone(),
+            });
         }
     }
 
     for input in inputs {
-        if is_equalizer_output(&input) || is_spatial_output(&input) {
+        if is_equalizer_output(input) || is_spatial_output(input) {
             continue;
         }
         if state.unproven_streams.iter().any(|identity| {
@@ -1235,11 +1335,10 @@ fn run_route_iteration() -> Result<(), String> {
                 virtual_sink.object_serial,
                 processing_sink.object_serial,
             ) {
-                pactl_success(&[
-                    "move-sink-input",
-                    &input.object_serial.to_string(),
-                    &processing_sink.name,
-                ])?;
+                actions.push(RouteAction::MoveSinkInput {
+                    input_serial: input.object_serial,
+                    sink_name: processing_sink.name.clone(),
+                });
                 changed = true;
             }
             continue;
@@ -1260,21 +1359,51 @@ fn run_route_iteration() -> Result<(), String> {
             original_sink_serial: game.object_serial,
         });
         // Persist the proven original destination before changing the route.
-        write_state(&state)?;
-        pactl_success(&[
-            "move-sink-input",
-            &input.object_serial.to_string(),
-            &processing_sink.name,
-        ])?;
+        actions.push(RouteAction::PersistState(state.clone()));
+        actions.push(RouteAction::MoveSinkInput {
+            input_serial: input.object_serial,
+            sink_name: processing_sink.name.clone(),
+        });
         changed = true;
     }
     if state.last_route_error.take().is_some() {
         changed = true;
     }
     if changed {
-        write_state(&state)?;
+        actions.push(RouteAction::PersistState(state.clone()));
+    }
+    Ok(RoutePlan { state, actions })
+}
+
+fn execute_route_plan(plan: RoutePlan) -> Result<(), String> {
+    for action in plan.actions {
+        match action {
+            RouteAction::SetDefaultSink(name) => pactl_success(&["set-default-sink", &name])?,
+            RouteAction::PersistState(state) => write_state(&state)?,
+            RouteAction::MoveSinkInput {
+                input_serial,
+                sink_name,
+            } => pactl_success(&["move-sink-input", &input_serial.to_string(), &sink_name])?,
+        }
     }
     Ok(())
+}
+
+fn run_route_iteration() -> Result<(), String> {
+    let _route_lock = route_lock()?;
+    let sinks_value = pactl_json(&["list", "sinks"])?;
+    let sinks = pulse_sinks(&sinks_value)?;
+    let default = pactl_default_sink()?;
+    let state = read_state()?.unwrap_or_default();
+    let (default_plan, _) = plan_default_recovery(&sinks, &default, state)?;
+    let state = default_plan.state.clone();
+    execute_route_plan(default_plan)?;
+    if state.routing_paused {
+        return Ok(());
+    }
+    let game = pulse_game_sink(&sinks_value)?;
+    let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
+    execute_route_plan(plan_route_iteration(&sinks, &inputs, &game, state)?)
 }
 
 fn record_route_error(error: &str) -> Result<(), String> {
@@ -1669,49 +1798,16 @@ pub fn restore_routes() -> Result<(), String> {
     state.routing_paused = true;
     write_state(&state)?;
     let sinks = pulse_sinks(&pactl_json(&["list", "sinks"])?)?;
-    let virtual_sink_serial = sinks
-        .iter()
-        .find(|sink| sink.name == VIRTUAL_SINK)
-        .map(|sink| sink.object_serial);
     let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
-    let mut remaining_routes = Vec::new();
-    for route in &state.routed_streams {
-        let Some(input) = inputs.iter().find(|input| {
-            input.object_serial == route.object_serial && input.stream_key == route.stream_key
-        }) else {
-            // The stream ended; no restoration remains to perform.
-            continue;
-        };
-        if Some(input.sink_serial) != virtual_sink_serial {
-            // The user or session manager already moved it elsewhere. Respect
-            // that newer destination instead of overwriting it on shutdown.
-            continue;
-        }
-        let original = sinks
-            .iter()
-            .find(|sink| sink.name == route.original_sink_name)
-            .or_else(|| {
-                sinks
-                    .iter()
-                    .find(|sink| sink.object_serial == route.original_sink_serial)
-            });
-        if let Some(original) = original {
-            pactl_success(&[
-                "move-sink-input",
-                &input.object_serial.to_string(),
-                &original.name,
-            ])?;
-        } else {
-            // Keep the proof and original destination for a later reconnect.
-            remaining_routes.push(route.clone());
-        }
-    }
-    if is_managed_processing_sink(&pactl_default_sink()?)
-        && let Some(default) = safe_default_sink(&sinks, state.default_sink_before.as_deref())
+    let plan = plan_restore_routes(&sinks, &inputs, state);
+    let state = plan.state.clone();
+    execute_route_plan(plan)?;
+    let default = pactl_default_sink()?;
+    if is_managed_processing_sink(&default)
+        && let Some(fallback) = safe_default_sink(&sinks, state.default_sink_before.as_deref())
     {
-        pactl_success(&["set-default-sink", &default.name])?;
+        pactl_success(&["set-default-sink", &fallback.name])?;
     }
-    state.routed_streams = remaining_routes;
     write_state(&state)
 }
 
@@ -1825,6 +1921,347 @@ mod tests {
             safe_default_sink(&sinks, Some(SPATIAL_SINK_NODE)).map(|sink| sink.name.as_str()),
             Some("physical-a")
         );
+    }
+
+    fn routing_sinks() -> (Vec<PulseSink>, PulseSink) {
+        let game = PulseSink {
+            object_serial: 200,
+            name: "alsa_output.usb_quantum.game".into(),
+        };
+        (
+            vec![
+                game.clone(),
+                PulseSink {
+                    object_serial: 100,
+                    name: VIRTUAL_SINK.into(),
+                },
+                PulseSink {
+                    object_serial: 300,
+                    name: "alsa_output.analog.safe".into(),
+                },
+            ],
+            game,
+        )
+    }
+
+    fn playback_input(serial: u64, sink_serial: u64, key: &str) -> PulseInput {
+        PulseInput {
+            object_serial: serial,
+            sink_serial,
+            stream_key: key.into(),
+            node_name: "application.output".into(),
+            media_name: "Application audio".into(),
+        }
+    }
+
+    #[test]
+    fn route_plan_records_a_new_game_stream_before_moving_it() {
+        let (sinks, game) = routing_sinks();
+        let plan = plan_route_iteration(
+            &sinks,
+            &[playback_input(10, game.object_serial, "game-stream")],
+            &game,
+            BackendState::default(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.state.routed_streams.len(), 1);
+        assert_eq!(plan.state.proven_stream_keys, ["game-stream"]);
+        assert!(matches!(plan.actions[0], RouteAction::PersistState(_)));
+        assert!(matches!(
+            plan.actions[1],
+            RouteAction::MoveSinkInput { input_serial: 10, ref sink_name } if sink_name == VIRTUAL_SINK
+        ));
+    }
+
+    #[test]
+    fn route_plan_persists_each_route_snapshot_before_its_move() {
+        let (sinks, game) = routing_sinks();
+        let plan = plan_route_iteration(
+            &sinks,
+            &[
+                playback_input(10, game.object_serial, "first"),
+                playback_input(11, game.object_serial, "second"),
+            ],
+            &game,
+            BackendState::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &plan.actions[0],
+            RouteAction::PersistState(state)
+                if state.routed_streams.iter().map(|route| route.stream_key.as_str()).eq(["first"])
+                    && state.last_route_error.is_none()
+        ));
+        assert!(matches!(
+            &plan.actions[1],
+            RouteAction::MoveSinkInput {
+                input_serial: 10,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &plan.actions[2],
+            RouteAction::PersistState(state)
+                if state.routed_streams.iter().map(|route| route.stream_key.as_str()).eq(["first", "second"])
+                    && state.last_route_error.is_none()
+        ));
+        assert!(matches!(
+            &plan.actions[3],
+            RouteAction::MoveSinkInput {
+                input_serial: 11,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn route_plan_quarantines_an_unproven_virtual_stream_before_evacuation() {
+        let (sinks, game) = routing_sinks();
+        let plan = plan_route_iteration(
+            &sinks,
+            &[playback_input(11, 100, "unknown-stream")],
+            &game,
+            BackendState::default(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.state.unproven_streams.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            RouteAction::PersistState(state)
+                if state.unproven_streams.iter().map(|stream| stream.stream_key.as_str()).eq(["unknown-stream"])
+        ));
+        assert!(matches!(
+            plan.actions[1],
+            RouteAction::MoveSinkInput { input_serial: 11, ref sink_name } if sink_name == "alsa_output.usb_quantum.game"
+        ));
+    }
+
+    #[test]
+    fn route_plan_promotes_registered_stream_when_spatial_is_ready() {
+        let (mut sinks, game) = routing_sinks();
+        sinks.push(PulseSink {
+            object_serial: 400,
+            name: SPATIAL_SINK_NODE.into(),
+        });
+        let mut spatial_output = playback_input(99, 100, "spatial-output");
+        spatial_output.node_name = SPATIAL_OUTPUT_NODE.into();
+        let state = BackendState {
+            routed_streams: vec![RoutedStream {
+                object_serial: 12,
+                stream_key: "registered".into(),
+                original_sink_name: game.name.clone(),
+                original_sink_serial: game.object_serial,
+            }],
+            ..BackendState::default()
+        };
+        let plan = plan_route_iteration(
+            &sinks,
+            &[spatial_output, playback_input(12, 100, "registered")],
+            &game,
+            state,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [RouteAction::MoveSinkInput { input_serial: 12, sink_name } , RouteAction::PersistState(_)]
+                if sink_name == SPATIAL_SINK_NODE
+        ));
+    }
+
+    #[test]
+    fn default_recovery_never_selects_a_managed_sink() {
+        let sinks = vec![
+            PulseSink {
+                object_serial: 100,
+                name: VIRTUAL_SINK.into(),
+            },
+            PulseSink {
+                object_serial: 101,
+                name: SPATIAL_SINK_NODE.into(),
+            },
+            PulseSink {
+                object_serial: 200,
+                name: "physical-safe".into(),
+            },
+        ];
+        for recorded_default in [VIRTUAL_SINK, SPATIAL_SINK_NODE] {
+            let state = BackendState {
+                default_sink_before: Some(recorded_default.into()),
+                ..BackendState::default()
+            };
+            let (plan, effective_default) =
+                plan_default_recovery(&sinks, VIRTUAL_SINK, state).unwrap();
+
+            assert!(matches!(
+                plan.actions.first(),
+                Some(RouteAction::SetDefaultSink(name)) if name == "physical-safe"
+            ));
+            assert_eq!(effective_default, "physical-safe");
+            assert!(!plan.actions.iter().any(|action| matches!(
+                action,
+                RouteAction::SetDefaultSink(name) if is_managed_processing_sink(name)
+            )));
+        }
+    }
+
+    #[test]
+    fn default_recovery_records_a_new_physical_default() {
+        let (sinks, _) = routing_sinks();
+        let (plan, effective_default) =
+            plan_default_recovery(&sinks, "alsa_output.analog.safe", BackendState::default())
+                .unwrap();
+
+        assert_eq!(effective_default, "alsa_output.analog.safe");
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [RouteAction::PersistState(state)]
+                if state.default_sink_before.as_deref() == Some("alsa_output.analog.safe")
+        ));
+    }
+
+    #[test]
+    fn default_recovery_fails_without_a_physical_fallback() {
+        let sinks = vec![PulseSink {
+            object_serial: 100,
+            name: VIRTUAL_SINK.into(),
+        }];
+        let error =
+            plan_default_recovery(&sinks, VIRTUAL_SINK, BackendState::default()).unwrap_err();
+        assert!(error.contains("no physical fallback"));
+    }
+
+    #[test]
+    fn default_recovery_does_nothing_while_routing_is_paused() {
+        let (sinks, _) = routing_sinks();
+        let state = BackendState {
+            routing_paused: true,
+            ..BackendState::default()
+        };
+        let (plan, effective_default) = plan_default_recovery(&sinks, VIRTUAL_SINK, state).unwrap();
+        assert!(plan.actions.is_empty());
+        assert_eq!(effective_default, VIRTUAL_SINK);
+    }
+
+    #[test]
+    fn route_plan_recognizes_a_proven_stream_restored_to_the_equalizer() {
+        let (sinks, game) = routing_sinks();
+        let state = BackendState {
+            proven_stream_keys: vec!["known".into()],
+            ..BackendState::default()
+        };
+        let plan = plan_route_iteration(&sinks, &[playback_input(13, 100, "known")], &game, state)
+            .unwrap();
+
+        assert!(plan.state.unproven_streams.is_empty());
+        assert_eq!(plan.state.routed_streams[0].object_serial, 13);
+        assert!(matches!(
+            plan.actions.first(),
+            Some(RouteAction::PersistState(state))
+                if state.routed_streams.iter().map(|route| route.stream_key.as_str()).eq(["known"])
+        ));
+        assert!(
+            plan.actions
+                .iter()
+                .all(|action| !matches!(action, RouteAction::MoveSinkInput { .. }))
+        );
+    }
+
+    #[test]
+    fn restore_routes_prefers_the_recorded_sink_name_then_serial() {
+        let route = RoutedStream {
+            object_serial: 14,
+            stream_key: "restore".into(),
+            original_sink_name: "renamed-sink".into(),
+            original_sink_serial: 300,
+        };
+        let sinks = vec![
+            PulseSink {
+                object_serial: 300,
+                name: "fallback-by-serial".into(),
+            },
+            PulseSink {
+                object_serial: 301,
+                name: "renamed-sink".into(),
+            },
+        ];
+        assert_eq!(
+            restore_target(&sinks, &route).map(|sink| sink.name.as_str()),
+            Some("renamed-sink")
+        );
+
+        let without_name = &sinks[..1];
+        assert_eq!(
+            restore_target(without_name, &route).map(|sink| sink.name.as_str()),
+            Some("fallback-by-serial")
+        );
+    }
+
+    #[test]
+    fn restore_plan_preserves_a_stream_moved_to_a_newer_destination() {
+        let (sinks, game) = routing_sinks();
+        let state = BackendState {
+            routed_streams: vec![RoutedStream {
+                object_serial: 14,
+                stream_key: "restore".into(),
+                original_sink_name: game.name.clone(),
+                original_sink_serial: game.object_serial,
+            }],
+            ..BackendState::default()
+        };
+        let plan = plan_restore_routes(&sinks, &[playback_input(14, 300, "restore")], state);
+
+        assert!(
+            plan.actions
+                .iter()
+                .all(|action| !matches!(action, RouteAction::MoveSinkInput { .. }))
+        );
+        assert!(plan.state.routed_streams.is_empty());
+    }
+
+    #[test]
+    fn restore_plan_moves_a_virtual_stream_back_to_its_recorded_sink_name() {
+        let (sinks, game) = routing_sinks();
+        let state = BackendState {
+            routed_streams: vec![RoutedStream {
+                object_serial: 14,
+                stream_key: "restore".into(),
+                original_sink_name: game.name.clone(),
+                original_sink_serial: game.object_serial,
+            }],
+            ..BackendState::default()
+        };
+        let plan = plan_restore_routes(&sinks, &[playback_input(14, 100, "restore")], state);
+
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [RouteAction::MoveSinkInput { input_serial: 14, sink_name }]
+                if sink_name == &game.name
+        ));
+        assert!(plan.state.routed_streams.is_empty());
+    }
+
+    #[test]
+    fn restore_plan_keeps_route_when_its_recorded_sink_is_missing() {
+        let (mut sinks, game) = routing_sinks();
+        sinks.retain(|sink| sink.object_serial != game.object_serial);
+        let state = BackendState {
+            routed_streams: vec![RoutedStream {
+                object_serial: 14,
+                stream_key: "restore".into(),
+                original_sink_name: game.name,
+                original_sink_serial: game.object_serial,
+            }],
+            ..BackendState::default()
+        };
+        let plan = plan_restore_routes(&sinks, &[playback_input(14, 100, "restore")], state);
+
+        assert!(plan.actions.is_empty());
+        assert_eq!(plan.state.routed_streams.len(), 1);
+        assert_eq!(plan.state.routed_streams[0].stream_key, "restore");
     }
 
     #[test]

@@ -26,7 +26,7 @@ test("control arguments are quoted by the shared command builder", () => {
     assert.doesNotMatch(match[1], /'\$\{value\}'/)
 })
 
-test("shared builder passes control metacharacters literally through both shell layers", async () => {
+test("shared builder passes control metacharacters literally through both shell layers", async (t) => {
     const shellQuote = widgetSource.match(
         /    function shellQuote\(value\) \{([\s\S]*?)^    \}\n\n    function soniccoreCommand/m)
     const soniccoreCommand = widgetSource.match(
@@ -67,6 +67,14 @@ test("shared builder passes control metacharacters literally through both shell 
                 SIDE_EFFECT_FILE: sideEffectPath
             }
         })
+
+        // Some restricted CI sandboxes permit Node itself but prohibit child
+        // processes. The static source assertions above still run there; the
+        // integration assertion needs a shell and is not a product failure.
+        if (result.error?.code === "EPERM") {
+            t.skip("the sandbox prohibits spawning /bin/sh")
+            return
+        }
 
         assert.equal(result.error, undefined)
         assert.equal(result.status, 0, result.stderr)
