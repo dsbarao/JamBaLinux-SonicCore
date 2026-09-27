@@ -298,9 +298,11 @@ virtual sink and convolves its eight inputs through sixteen HRIR paths into a
 stereo wet output. In parallel, its dry path makes an ITU-style 7.1-to-stereo
 downmix: left is `FL + 0.707·FC + 0.707·SL + 0.707·RL`, right is
 `FR + 0.707·FC + 0.707·SR + 0.707·RR`; LFE is intentionally omitted. Final
-per-channel mixers start wet at `1.0` and dry at `0.0`, so the rendered output
-is identical to the former binaural-only graph until a future live transition
-changes those controls. Thus a stereo source using only FL/FR exits dry as
+per-channel mixers are initialized from the persisted gate: binaural starts wet
+at `1.0` / dry at `0.0`, while a disabled graph starts wet at `0.0` / dry at
+`1.0`. The enabled gate changes only those controls through a short live
+`Props` ramp: binaural is wet `1.0` / dry `0.0`, and bypass is wet `0.0` /
+dry `1.0`. Thus a stereo source using only FL/FR exits dry as
 left=FL and right=FR. The PipeWire `channelmix` behavior for a stereo client
 connected to the 7.1 sink remains an upmix assumption to verify on hardware.
 That output disables session-manager autoconnection and is
@@ -308,9 +310,12 @@ linked explicitly, channel by channel, only to the existing equalizer input;
 the complete authorized path is `application -> Spatial -> EQ -> Quantum
 Game`. The spatial sink cannot become the default, and health fails closed if
 the target, stereo links, Chat isolation, capture isolation, formats, or
-dataset cannot be proven. Before removing a live graph, the supervisor
-registers and transfers its streams to the exact EQ sink so playback can
-continue without bypassing the equalizer.
+dataset cannot be proven. While the mode remains `binaural-stereo` and
+readiness holds, disabling spatial leaves that graph, its links, and its routed
+streams in place and selects dry bypass by live controls only. `mode off` and
+lost readiness still remove a live graph only after the supervisor registers
+and transfers its streams to the exact EQ sink, so playback can continue
+without bypassing the equalizer.
 
 The hardware acceptance on 2026-09-20 used a locally generated synthetic HRIR
 fixture. It correlated all eight input channels digitally, measured the EQ
@@ -358,26 +363,20 @@ one-line message when either is missing. `python3` (node summary) and
 
 ### A — spatial toggle pauses playback
 
-The spatial switch only records intent in `spatial.json`
-(`spatial::set_enabled`). Two independent 500 ms loops then act on it: the
-spatial supervisor (`src/spatial_pipewire.rs`, `run`) starts or kills a child
-`pipewire -c` process that owns the 7.1 spatial sink, and the equalizer route
-supervisor (`src/pipewire.rs`, `run_route_iteration`) moves registered
-streams between the stereo EQ sink and the spatial sink.
+The spatial switch records intent in `spatial.json` (`spatial::set_enabled`) and
+immediately updates the observable graph's wet/dry controls with `pw-cli
+set-param`. The spatial supervisor reconciles the same controls every 500 ms.
+The child graph instead belongs to `mode=binaural-stereo` plus readiness, so
+the equalizer route supervisor can keep registered streams on the spatial sink
+through both binaural and bypass states.
 
-**H1 — the stream is moved between a 2-channel and an 8-channel sink.**
-On enable, once the spatial output is linked to the EQ, `run_route_iteration`
-selects the spatial sink as `processing_sink` and promotes every registered
-stream from the EQ sink to it with `pactl move-sink-input`
-(`registered_route_needs_promotion`). On disable, `restore_streams` moves them
-back with the same command. Each move reconnects the client stream to a sink
-with a different channel map (stereo ↔ 7.1), so pipewire-pulse renegotiates
-the stream and the client receives a move/format change. Browsers that treat
-an output-device change as a device loss may pause the media element or the
-MPRIS player. Expected evidence: an `inputs` line whose `sink=` changes from
-the EQ index to the spatial index (or back) while every node stays present,
-followed within a few hundred milliseconds by `corked=yes` and/or an MPRIS
-`Paused` line.
+**Former H1 — the stream was moved between a 2-channel and an 8-channel sink.**
+Before the persistent/bypass lifecycle, enabling promoted registered streams
+from EQ to the spatial sink and disabling restored them with
+`pactl move-sink-input`. That stereo ↔ 7.1 change could make a browser treat
+its output device as lost and pause media. It remains relevant only when the
+graph is first created or safely torn down; it is no longer part of an
+enable/disable transition with an existing ready graph.
 
 **H2 — streams are still attached when the spatial graph is killed.**
 `stop_graph` (`src/spatial_pipewire.rs:331`) calls `restore_streams()` and
@@ -402,8 +401,13 @@ default are moved by the session manager itself for up to one iteration
 (≤ 500 ms), independently of H1. Expected evidence: `default` lines that
 change and change back around the toggle.
 
-The hypotheses are not exclusive; the log orders their effects in time, so the
-first event that precedes the pause identifies the cause to fix first.
+The persistence/bypass implementation removes the H1 toggle path: an existing
+graph's enable/disable command sequence is limited to `pw-dump` and `pw-cli
+set-param`, never `move-sink-input`, `pw-link --disconnect`, or a child kill.
+H2 and H3 remain diagnostic concerns for teardown (`mode off`/lost readiness),
+not for the gate. Manual acceptance remains pending: with a browser video
+playing, perform ten enable/disable changes and confirm neither playback nor
+the graph node identities pause/change.
 
 ### B — equalizer band latency decomposition
 

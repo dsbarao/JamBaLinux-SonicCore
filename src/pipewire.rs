@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::equalizer::{BANDS_HZ, Band, EqualizerProfile};
-use crate::spatial::graph::{SPATIAL_OUTPUT_NODE, SPATIAL_SINK_NODE, TARGET_EQUALIZER_SINK};
+use crate::spatial::graph::{
+    SPATIAL_OUTPUT_NODE, SPATIAL_SINK_NODE, TARGET_EQUALIZER_SINK, spatial_mix,
+};
 
 const UNIT_NAME: &str = "jambalinux-soniccore-equalizer.service";
 const SPATIAL_UNIT_NAME: &str = "jambalinux-soniccore-spatial.service";
@@ -134,6 +136,7 @@ pub struct SpatialStatus {
     pub configured: bool,
     pub enabled: bool,
     pub active: bool,
+    pub processing_mode: &'static str,
     pub service_active: bool,
     pub dataset_valid: bool,
     pub target_equalizer_connected: bool,
@@ -160,7 +163,6 @@ pub struct SpatialStatus {
 struct SpatialHealth<'a> {
     service_active: bool,
     configured: bool,
-    enabled: bool,
     graph_observable: bool,
     input_format_7_1: bool,
     output_format_stereo: bool,
@@ -537,9 +539,6 @@ fn spatial_error(
     if !health.configured {
         return Some("spatial mode is not configured for binaural-stereo".into());
     }
-    if !health.enabled {
-        return Some("the spatial gate is disabled".into());
-    }
     if !capability.dataset.valid {
         return Some(
             capability
@@ -583,6 +582,21 @@ fn spatial_error(
     None
 }
 
+/// Reports what the observable filter controls are actually doing, rather
+/// than echoing the persisted gate while a live update is pending or failed.
+fn spatial_processing_mode(nodes: &[Value], input: Option<&Target>) -> &'static str {
+    let Some(input) = input else { return "unknown" };
+    let Some(node) = nodes
+        .iter()
+        .find(|node| node.get("id").and_then(Value::as_u64) == Some(u64::from(input.id)))
+    else {
+        return "unknown";
+    };
+    spatial_mix(node)
+        .map(|mix| mix.processing_mode().as_str())
+        .unwrap_or("unknown")
+}
+
 /// Inspects the spatial lifecycle and graph without changing PipeWire state.
 /// Command failures become a fail-closed status report instead of hiding the
 /// health fields from scripts and the widget.
@@ -606,12 +620,14 @@ pub fn spatial_status(
     let mut chat_isolated = true;
     let mut capture_isolated = true;
     let mut routing_healthy = false;
+    let mut processing_mode = "unknown";
 
     match pw_dump() {
         Ok(nodes) => {
             input = single_named_node(&nodes, SPATIAL_SINK_NODE);
             output = single_named_node(&nodes, SPATIAL_OUTPUT_NODE);
             target = single_named_audio_sink(&nodes, TARGET_EQUALIZER_SINK);
+            processing_mode = spatial_processing_mode(&nodes, input.as_ref());
             input_format_7_1 = input
                 .as_ref()
                 .and_then(|node| audio_channels(&nodes, node.id))
@@ -685,7 +701,6 @@ pub fn spatial_status(
     let health = SpatialHealth {
         service_active: service,
         configured,
-        enabled,
         graph_observable,
         input_format_7_1,
         output_format_stereo,
@@ -703,6 +718,7 @@ pub fn spatial_status(
         configured,
         enabled,
         active,
+        processing_mode,
         service_active: service,
         dataset_valid: capability.dataset.valid,
         target_equalizer_connected,
@@ -1727,6 +1743,7 @@ pub fn disable() -> Result<Status, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spatial::graph::{SPATIAL_DRY_CONTROLS, SPATIAL_WET_CONTROLS};
     use std::sync::Arc;
 
     fn node(id: u32, serial: u64, properties: Value) -> Value {
@@ -2118,7 +2135,6 @@ mod tests {
         SpatialHealth {
             service_active: true,
             configured: true,
-            enabled: true,
             graph_observable: true,
             input_format_7_1: true,
             output_format_stereo: true,
@@ -2162,6 +2178,45 @@ mod tests {
         assert_eq!(
             spatial_error(&capture_link, &capability).as_deref(),
             Some("unsafe spatial route detected to Chat or a capture node")
+        );
+    }
+
+    #[test]
+    fn healthy_bypass_remains_active_and_reports_its_processing_mode() {
+        let capability = ready_spatial_capability();
+        // `enabled` is intentionally not a health prerequisite: a ready
+        // persistent graph in dry bypass is still observable and safe.
+        assert!(spatial_error(&otherwise_healthy_spatial_graph(), &capability).is_none());
+        let controls = |wet: f32, dry: f32| {
+            serde_json::json!([{
+                "id": 600,
+                "info": {
+                    "params": { "Props": [{ "params": [
+                        SPATIAL_WET_CONTROLS[0], wet, SPATIAL_WET_CONTROLS[1], wet,
+                        SPATIAL_DRY_CONTROLS[0], dry, SPATIAL_DRY_CONTROLS[1], dry
+                    ] }] }
+                }
+            }])
+        };
+        let input = Target {
+            id: 600,
+            object_serial: 1,
+            node_name: SPATIAL_SINK_NODE.into(),
+        };
+        let binaural = controls(1.0, 0.0);
+        let bypass = controls(0.0, 1.0);
+        let transitioning = controls(0.5, 0.5);
+        assert_eq!(
+            spatial_processing_mode(binaural.as_array().unwrap(), Some(&input)),
+            "binaural"
+        );
+        assert_eq!(
+            spatial_processing_mode(bypass.as_array().unwrap(), Some(&input)),
+            "bypass"
+        );
+        assert_eq!(
+            spatial_processing_mode(transitioning.as_array().unwrap(), Some(&input)),
+            "transitioning"
         );
     }
 

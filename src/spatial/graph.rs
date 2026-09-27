@@ -23,6 +23,8 @@
 
 use std::path::Path;
 
+use serde_json::Value;
+
 /// Stable, vendor-neutral node name of the spatial capture sink (the 7.1 input
 /// applications select).
 pub const SPATIAL_SINK_NODE: &str = "jambalinux-soniccore-game-spatial";
@@ -176,6 +178,100 @@ pub const SPATIAL_WET_CONTROLS: [&str; 2] = ["wetDryL:Gain 1", "wetDryR:Gain 1"]
 /// behavior until a later lifecycle phase changes them live.
 pub const SPATIAL_DRY_CONTROLS: [&str; 2] = ["wetDryL:Gain 2", "wetDryR:Gain 2"];
 
+/// The live wet/dry controls exposed by the spatial capture node.  Both the
+/// lifecycle supervisor and read-only status reporting use this one parser and
+/// tolerance, so the status cannot disagree with the controls the supervisor
+/// actually applies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SpatialMix {
+    pub wet: [f32; 2],
+    pub dry: [f32; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpatialProcessingMode {
+    Binaural,
+    Bypass,
+    Transitioning,
+}
+
+impl SpatialMix {
+    pub(crate) fn target(enabled: bool) -> Self {
+        let wet = if enabled { 1.0 } else { 0.0 };
+        Self {
+            wet: [wet; 2],
+            dry: [1.0 - wet; 2],
+        }
+    }
+
+    pub(crate) fn matches(self, other: Self) -> bool {
+        self.wet
+            .into_iter()
+            .chain(self.dry)
+            .zip(other.wet.into_iter().chain(other.dry))
+            .all(|(actual, expected)| (actual - expected).abs() <= 0.05)
+    }
+
+    pub(crate) fn processing_mode(self) -> SpatialProcessingMode {
+        if self.matches(Self::target(true)) {
+            SpatialProcessingMode::Binaural
+        } else if self.matches(Self::target(false)) {
+            SpatialProcessingMode::Bypass
+        } else {
+            SpatialProcessingMode::Transitioning
+        }
+    }
+}
+
+impl SpatialProcessingMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Binaural => "binaural",
+            Self::Bypass => "bypass",
+            Self::Transitioning => "transitioning",
+        }
+    }
+}
+
+/// Reads the complete live wet/dry mix from a PipeWire node's Props array.
+/// PipeWire represents controls as alternating name/value pairs; incomplete
+/// pairs and unrelated controls are deliberately ignored.
+pub(crate) fn spatial_mix(node: &Value) -> Result<SpatialMix, String> {
+    let mut values = std::collections::HashMap::<&str, f32>::new();
+    let props = node
+        .get("info")
+        .and_then(|info| info.get("params"))
+        .and_then(|params| params.get("Props"))
+        .and_then(Value::as_array)
+        .ok_or("the spatial capture node does not expose Props controls")?;
+    for props in props {
+        let Some(params) = props.get("params").and_then(Value::as_array) else {
+            continue;
+        };
+        for pair in params.chunks_exact(2) {
+            if let (Some(name), Some(value)) = (pair[0].as_str(), pair[1].as_f64()) {
+                values.insert(name, value as f32);
+            }
+        }
+    }
+    let control = |name| {
+        values
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("the spatial capture node does not expose `{name}`"))
+    };
+    Ok(SpatialMix {
+        wet: [
+            control(SPATIAL_WET_CONTROLS[0])?,
+            control(SPATIAL_WET_CONTROLS[1])?,
+        ],
+        dry: [
+            control(SPATIAL_DRY_CONTROLS[0])?,
+            control(SPATIAL_DRY_CONTROLS[1])?,
+        ],
+    })
+}
+
 /// ITU-style dry downmix links. LFE is intentionally omitted. Left receives
 /// FL, FC, SL and RL; right receives FR, FC, SR and RR.
 const DRY_DOWNMIX_LINKS: [(&str, &str, u8); 8] = [
@@ -269,7 +365,10 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> String {
 /// the undecodable bytes with U+FFFD and hand PipeWire a config naming a
 /// *different* file, so the error is raised instead of silently rewriting the
 /// user's path.
-pub fn render_filter_chain_config(hrir_path: &Path) -> Result<String, String> {
+/// Renders the graph with an initial mix that matches the persisted gate. The
+/// live supervisor still reconciles after spawning, but a graph must never
+/// begin wet while spatial processing is disabled.
+pub fn render_filter_chain_config(hrir_path: &Path, enabled: bool) -> Result<String, String> {
     let hrir_text = hrir_path.to_str().ok_or_else(|| {
         format!(
             "the HRIR path {} is not valid UTF-8, so it cannot be written into a PipeWire \
@@ -304,12 +403,14 @@ pub fn render_filter_chain_config(hrir_path: &Path) -> Result<String, String> {
     nodes.push_str(
         "                    { type = builtin label = mixer name = dryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
     );
-    nodes.push_str(
-        "                    { type = builtin label = mixer name = wetDryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
-    );
-    nodes.push_str(
-        "                    { type = builtin label = mixer name = wetDryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
-    );
+    let wet = if enabled { 1.0 } else { 0.0 };
+    let dry = 1.0 - wet;
+    nodes.push_str(&format!(
+        "                    {{ type = builtin label = mixer name = wetDryL control = {{ \"Gain 1\" = {wet:.1} \"Gain 2\" = {dry:.1} }} }}\n",
+    ));
+    nodes.push_str(&format!(
+        "                    {{ type = builtin label = mixer name = wetDryR control = {{ \"Gain 1\" = {wet:.1} \"Gain 2\" = {dry:.1} }} }}\n",
+    ));
 
     let mut links = String::new();
     for (output, input) in INPUT_LINKS {
@@ -413,12 +514,12 @@ mod tests {
     const TEST_HRIR: &str = "/home/user/.config/jambalinux-soniccore/spatial/hrtf/hrir.wav";
 
     fn render() -> String {
-        render_hrir(TEST_HRIR)
+        render_hrir(TEST_HRIR, true)
     }
 
     /// Renders the config for an arbitrary (valid UTF-8) HRIR path.
-    fn render_hrir(path: &str) -> String {
-        let rendered = render_filter_chain_config(&PathBuf::from(path));
+    fn render_hrir(path: &str, enabled: bool) -> String {
+        let rendered = render_filter_chain_config(&PathBuf::from(path), enabled);
         rendered.expect("a UTF-8 HRIR path renders")
     }
 
@@ -745,7 +846,7 @@ mod tests {
 
     #[test]
     fn paths_are_escaped() {
-        let config = render_hrir("/weird/pa\"th\\dir/hrir.wav");
+        let config = render_hrir("/weird/pa\"th\\dir/hrir.wav", true);
         assert!(config.contains("filename = \"/weird/pa\\\"th\\\\dir/hrir.wav\""));
         // The raw, unescaped quote must not appear mid-path.
         assert!(!config.contains("pa\"th"));
@@ -757,7 +858,7 @@ mod tests {
         // substitute-then-substitute-again scheme these would be rewritten with
         // the node names, the whole nodes block, and so on.
         let path = "/hrir/{nodes}{links}{inputs}{positions}{sink}{output}{target}/hrir.wav";
-        let config = render_hrir(path);
+        let config = render_hrir(path, true);
 
         assert!(
             config.contains(&format!("filename = \"{path}\"")),
@@ -791,7 +892,7 @@ mod tests {
         // Valid on a Unix filesystem, not valid UTF-8. `to_string_lossy` would
         // turn 0xFF into U+FFFD and name a different file.
         let path = PathBuf::from(OsStr::from_bytes(b"/hrir/\xffbroken/hrir.wav"));
-        let rendered = render_filter_chain_config(&path);
+        let rendered = render_filter_chain_config(&path, true);
         let error = rendered.expect_err("non-UTF-8 path must not render");
 
         assert!(
@@ -813,6 +914,21 @@ mod tests {
         // No unsubstituted placeholder markers remain.
         for marker in TEMPLATE_MARKERS {
             assert!(!config.contains(marker), "leftover marker {marker}");
+        }
+    }
+
+    #[test]
+    fn initial_wet_dry_controls_match_the_spatial_gate() {
+        let wet = render_hrir(TEST_HRIR, true);
+        let bypass = render_hrir(TEST_HRIR, false);
+
+        for channel in ["wetDryL", "wetDryR"] {
+            assert!(wet.contains(&format!(
+                "name = {channel} control = {{ \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 }}"
+            )));
+            assert!(bypass.contains(&format!(
+                "name = {channel} control = {{ \"Gain 1\" = 0.0 \"Gain 2\" = 1.0 }}"
+            )));
         }
     }
 

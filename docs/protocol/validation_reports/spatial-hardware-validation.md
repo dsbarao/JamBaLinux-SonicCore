@@ -1,6 +1,6 @@
 # Validação de hardware — spatial binaural
 
-**Estado:** aprovado com fixture sintética; HRIR de distribuição continua sujeita a revisão jurídica  
+**Estado:** aprovado com fixture sintética; HRIR de distribuição continua sujeita a revisão jurídica; transição persistente/bypass requer aceite auditivo posterior
 **Data do procedimento:** 2026-09-20  
 **Responsável presente:** mantenedor do projeto  
 **Versão/commit testado:** `7338ccb` (`migration/jambalinux`)

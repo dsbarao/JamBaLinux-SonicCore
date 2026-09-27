@@ -78,6 +78,10 @@ PlasmoidItem {
     property bool spatialReady: false
     property bool spatialDatasetValid: false
     property bool spatialActive: false
+    property string spatialProcessingMode: "bypass"
+    readonly property bool spatialMixPending: spatialActive
+        && ((spatialEnabled && spatialProcessingMode !== "binaural")
+            || (!spatialEnabled && spatialProcessingMode !== "bypass"))
     property bool spatialServiceActive: false
     property string spatialError: ""
     property string spatialActionMessage: ""
@@ -170,7 +174,7 @@ PlasmoidItem {
             return
         }
         spatialBusy = true
-        spatialActionMessage = enabled ? "Preparando o áudio espacial…" : "Desativando o áudio espacial…"
+        spatialActionMessage = enabled ? "Ativando o mix binaural…" : "Ativando bypass sem interromper a reprodução…"
         spatialControlExecutable.connectSource(enabled ? spatialEnableCommand : spatialDisableCommand)
     }
 
@@ -179,10 +183,16 @@ PlasmoidItem {
             return root.spatialActionMessage
         if (!root.spatialDatasetValid)
             return "Dataset HRIR ausente ou inválido"
+        if (!root.spatialEnabled && root.spatialActive && root.spatialProcessingMode === "bypass")
+            return "Desativado (bypass)"
+        if (!root.spatialEnabled && root.spatialActive)
+            return "Desativação pendente; aguardando confirmação do bypass"
         if (!root.spatialEnabled)
             return "Desativado"
-        if (root.spatialActive)
+        if (root.spatialActive && root.spatialProcessingMode === "binaural")
             return `Ativo · modo ${root.spatialMode}`
+        if (root.spatialActive)
+            return "Ativação pendente; aguardando o mix binaural"
         if (root.spatialError.length > 0)
             return "Erro · áudio espacial não está ativo"
         return root.spatialServiceActive ? "Preparando o processamento espacial" : "Preparando o serviço espacial"
@@ -1624,7 +1634,11 @@ PlasmoidItem {
                         text: !root.spatialDatasetValid
                             ? "Dataset: ausente ou inválido — adicione-o manualmente em spatial/hrtf/"
                             : root.spatialActive
-                                ? "Estado: ativo e saudável"
+                                ? root.spatialProcessingMode === "bypass"
+                                    ? "Estado: desativado (bypass) e saudável"
+                                    : root.spatialProcessingMode === "binaural"
+                                        ? "Estado: binaural ativo e saudável"
+                                        : "Estado: mix em transição ou ainda não confirmado"
                                 : root.spatialEnabled
                                     ? "Estado: preparando; aguardando um caminho saudável"
                                     : "Estado: desativado"
@@ -1832,6 +1846,7 @@ PlasmoidItem {
                 root.spatialEnabled = result.enabled === true
                 root.spatialMode = String(result.mode ?? "off")
                 root.spatialActive = result.active === true
+                root.spatialProcessingMode = String(result.processing_mode ?? (root.spatialEnabled ? "binaural" : "bypass"))
                 root.spatialServiceActive = result.service_active === true
                 const capability = result.capability ?? {}
                 root.spatialReady = capability.ready === true
@@ -1928,7 +1943,7 @@ PlasmoidItem {
     }
 
     Timer {
-        interval: root.spatialEnabled && !root.spatialActive ? 1000 : 15000
+        interval: (root.spatialEnabled && !root.spatialActive) || root.spatialMixPending ? 1000 : 15000
         repeat: true
         running: root.openSection === "spatial"
         triggeredOnStart: true

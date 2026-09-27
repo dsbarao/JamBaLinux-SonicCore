@@ -24,6 +24,11 @@ pub const SCHEMA: u8 = 1;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MUTATION_LOCK_NAME: &str = "spatial.lock";
+/// Serializes the short PipeWire wet/dry ramps issued by the CLI and the
+/// persistent supervisor.  This is deliberately separate from
+/// `MUTATION_LOCK_NAME`: the latter protects the profile file, while this one
+/// protects the observable graph after an intent has been saved.
+const MIX_LOCK_NAME: &str = "spatial-mix.lock";
 
 const FILTER_CHAIN_MODULE_CANDIDATES: [&str; 2] = [
     "/usr/lib/pipewire-0.3/libpipewire-module-filter-chain.so",
@@ -893,19 +898,50 @@ fn sha256_hex(data: &[u8]) -> String {
 /// Serializes the complete load -> validate -> save transaction.
 /// The returned file must remain in scope until the transaction completes.
 pub fn mutation_lock() -> Result<File, String> {
-    let directory = config_directory()?;
-    fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
-    let path = directory.join(MUTATION_LOCK_NAME);
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    lock.lock()
-        .map_err(|error| format!("could not lock {}: {error}", path.display()))?;
-    Ok(lock)
+    lock_file(MUTATION_LOCK_NAME)
+}
+
+/// Holds the wet/dry transition lock until the caller finishes observing,
+/// ramping, and verifying the PipeWire controls.  Both the foreground CLI and
+/// the systemd supervisor use this lock, so they cannot interleave two ramps
+/// and briefly bounce audio to an obsolete gate value.
+pub fn mix_lock() -> Result<File, String> {
+    lock_file(MIX_LOCK_NAME)
+}
+
+fn lock_file(name: &str) -> Result<File, String> {
+    #[cfg(test)]
+    {
+        // Unit tests use synthetic files and command runners.  Do not create
+        // persistent locks below the developer's real configuration directory
+        // merely to exercise their in-process synchronization contract.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .map_err(|error| format!("could not open test {name}: {error}"))?;
+        lock.lock()
+            .map_err(|error| format!("could not lock test {name}: {error}"))?;
+        return Ok(lock);
+    }
+
+    #[cfg(not(test))]
+    {
+        let directory = config_directory()?;
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        let path = directory.join(name);
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        lock.lock()
+            .map_err(|error| format!("could not lock {}: {error}", path.display()))?;
+        Ok(lock)
+    }
 }
 
 fn config_path() -> Result<PathBuf, String> {

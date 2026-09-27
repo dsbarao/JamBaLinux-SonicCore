@@ -292,14 +292,21 @@ The read-only preflight validates the `pipewire` binary, filter-chain module,
 and a user-provided 14-channel HRIR dataset (`manifest.json` plus `hrir.wav`)
 under `spatial/hrtf/` in the configuration directory. `enable` refuses with an
 actionable error when readiness or the existing equalizer target cannot be
-proven. When enabled, a supervised 7.1 input is convolved to stereo and linked
-only through the existing chain `Spatial -> EQ -> Quantum Game`; it never
-becomes the default sink, and Chat and capture nodes remain excluded. Disabling
-moves live spatial streams to the proven EQ before removing the graph. The
-Plasma **Espacial** section exposes the same gate and health state. Only the
+proven. While mode is `binaural-stereo` and readiness holds, the supervised 7.1
+graph persists and is linked only through `Spatial -> EQ -> Quantum Game`; it
+never becomes the default sink, and Chat and capture nodes remain excluded.
+The enable gate crossfades its wet binaural and dry downmix controls in place.
+Thus disabling reports **Desativado (bypass)** while retaining the selected
+spatial sink and its streams; selecting mode `off` or losing readiness still
+uses the safe stream-restoring teardown. The Plasma **Espacial** section
+exposes the same gate and health state. Only the
 open, vendor-neutral mode name `binaural-stereo` is used; vendor names or files
 are intentionally never used. Technical hardware acceptance is recorded in
 [`docs/protocol/validation_reports/spatial-hardware-validation.md`](docs/protocol/validation_reports/spatial-hardware-validation.md).
+
+The persistence/bypass transition still needs an in-person auditory acceptance:
+keep a browser video playing and toggle spatial ten times, confirming that it
+never pauses and that the graph node identities remain unchanged.
 
 For real-time state tracking, install and enable the user service:
 

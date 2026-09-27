@@ -1962,6 +1962,16 @@ fn print_spatial_status(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The persisted gate is authoritative. PipeWire may be restarting exactly
+/// when a user disables spatial, so the immediate live update is deliberately
+/// best-effort and the persistent supervisor reconciles it shortly after.
+fn apply_spatial_mix_best_effort(enabled: bool) {
+    if let Err(error) = spatial_pipewire::set_mix_if_graph_exists() {
+        let action = if enabled { "enable" } else { "disable" };
+        eprintln!("spatial {action}: live mix update deferred to the supervisor: {error}");
+    }
+}
+
 fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
     match args.next().as_deref() {
         None => {
@@ -2009,9 +2019,10 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
         }
         Some("enable") if args.next().is_none() => {
             let profile = spatial::set_enabled(true)?;
+            apply_spatial_mix_best_effort(true);
             println!(
-                "spatial gate enabled (mode: {}); the persistent supervisor will create the \
-                 graph only while the equalizer target and preflight remain valid",
+                "spatial binaural mix enabled (mode: {}); the persistent supervisor keeps the \
+                 graph while the mode, equalizer target, and preflight remain valid",
                 profile.mode.as_str()
             );
             Ok(true)
@@ -2019,7 +2030,10 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
         Some("enable") => Err("spatial enable accepts no value".into()),
         Some("disable") if args.next().is_none() => {
             spatial::set_enabled(false)?;
-            println!("spatial gate disabled");
+            // Disabling is the recovery path. The saved gate must succeed even
+            // if PipeWire is temporarily unavailable; the supervisor retries.
+            apply_spatial_mix_best_effort(false);
+            println!("spatial mix disabled; the ready binaural graph remains in bypass");
             Ok(true)
         }
         Some("disable") => Err("spatial disable accepts no value".into()),
@@ -2085,6 +2099,80 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn spatial_disable_mix_failure_is_best_effort() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        runner.push_error("pw-dump did not finish within 5000 ms and was killed");
+        let _guard = crate::command::set_runner(runner.clone());
+
+        apply_spatial_mix_best_effort(false);
+
+        assert_eq!(runner.command_lines(), vec!["pw-dump"]);
+    }
+
+    #[test]
+    fn spatial_status_json_exposes_healthy_bypass_processing_mode() {
+        let output = SpatialStatusOutput {
+            schema: spatial::SCHEMA,
+            mode: spatial::SpatialMode::BinauralStereo,
+            experimental: true,
+            health: pipewire::SpatialStatus {
+                configured: true,
+                enabled: false,
+                active: true,
+                processing_mode: "bypass",
+                service_active: true,
+                dataset_valid: true,
+                target_equalizer_connected: true,
+                default_safe: true,
+                chat_isolated: true,
+                capture_isolated: true,
+                routing_healthy: true,
+                graph_observable: true,
+                input_format_7_1: true,
+                output_format_stereo: true,
+                input_node_id: Some(400),
+                input_object_serial: Some(400),
+                output_node_id: Some(401),
+                output_object_serial: Some(401),
+                target_equalizer_node_id: Some(100),
+                target_equalizer_object_serial: Some(100),
+                target_equalizer_node_name: crate::spatial::graph::TARGET_EQUALIZER_SINK,
+                error: None,
+            },
+            capability: spatial::CapabilityReport {
+                schema: spatial::SCHEMA,
+                pipewire_binary_present: true,
+                filter_chain_module_present: true,
+                hrtf_dataset_present: true,
+                dataset: spatial::DatasetReport {
+                    schema: spatial::DATASET_SCHEMA,
+                    manifest_path: Some("/fixture/manifest.json".into()),
+                    hrir_path: Some("/fixture/hrir.wav".into()),
+                    format: Some(spatial::SUPPORTED_DATASET_FORMAT.into()),
+                    name: Some("fixture".into()),
+                    license: Some("test-only".into()),
+                    source_url: Some("https://example.invalid/hrir".into()),
+                    expected_sha256: Some("0".repeat(64)),
+                    observed_sha256: Some("0".repeat(64)),
+                    channels: Some(spatial::REQUIRED_HRIR_CHANNELS),
+                    sample_rate: Some(48_000),
+                    legal_review_required: true,
+                    valid: true,
+                    error: None,
+                },
+                ready: true,
+                error: None,
+            },
+        };
+
+        let json = serde_json::to_value(output).expect("serialize spatial status");
+        assert_eq!(json["active"], true);
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["processing_mode"], "bypass");
+    }
 
     #[test]
     fn parses_interface_and_endpoint() {
