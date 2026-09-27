@@ -12,6 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,11 @@ const MUTATION_LOCK_NAME: &str = "spatial.lock";
 /// `MUTATION_LOCK_NAME`: the latter protects the profile file, while this one
 /// protects the observable graph after an intent has been saved.
 const MIX_LOCK_NAME: &str = "spatial-mix.lock";
+
+#[cfg(test)]
+static TEST_CONFIG_DIRECTORY: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+static TEST_CONFIG_DIRECTORY_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const FILTER_CHAIN_MODULE_CANDIDATES: [&str; 2] = [
     "/usr/lib/pipewire-0.3/libpipewire-module-filter-chain.so",
@@ -90,6 +96,15 @@ pub struct CapabilityReport {
 }
 
 pub fn config_directory() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(directory) = TEST_CONFIG_DIRECTORY
+        .lock()
+        .map_err(|_| "test spatial configuration directory lock is poisoned")?
+        .clone()
+    {
+        return Ok(directory);
+    }
+
     let root = match env::var_os("XDG_CONFIG_HOME") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => PathBuf::from(
@@ -1021,6 +1036,53 @@ fn save_to_path(profile: &SpatialProfile, path: &Path) -> Result<(), String> {
     atomic_write(path, format!("{content}\n").as_bytes())
 }
 
+fn corrupt_profile_path(path: &Path) -> Result<PathBuf, String> {
+    let directory = path.parent().ok_or("invalid spatial configuration path")?;
+    let file_name = path
+        .file_name()
+        .ok_or("invalid spatial configuration path")?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("could not timestamp corrupt spatial profile: {error}"))?
+        .as_nanos();
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut name = file_name.to_os_string();
+    name.push(format!(
+        ".corrupt-{timestamp}-{}-{sequence}",
+        std::process::id()
+    ));
+    Ok(directory.join(name))
+}
+
+/// Preserves an unreadable profile before restoring the safe, disabled default.
+/// This is called only while the spatial mutation lock is held.
+fn recover_disabled_profile(path: &Path, load_error: &str) -> Result<SpatialProfile, String> {
+    let corrupt_path = corrupt_profile_path(path)?;
+    fs::rename(path, &corrupt_path).map_err(|error| {
+        format!(
+            "could not preserve unreadable spatial profile {} as {}: {error}",
+            path.display(),
+            corrupt_path.display()
+        )
+    })?;
+
+    let profile = SpatialProfile::default();
+    if let Err(error) = save_to_path(&profile, path) {
+        // Do not leave the user without their original bytes when the recovery
+        // write fails after the successful preservation rename.
+        let _ = fs::rename(&corrupt_path, path);
+        return Err(format!(
+            "could not write disabled replacement for unreadable spatial profile: {error}"
+        ));
+    }
+
+    eprintln!(
+        "spatial disable: unreadable profile preserved at {}; wrote disabled default ({load_error})",
+        corrupt_path.display()
+    );
+    Ok(profile)
+}
+
 pub fn load() -> Result<SpatialProfile, String> {
     load_from_path(&config_path()?)
 }
@@ -1131,7 +1193,12 @@ fn moded_profile(profile: &SpatialProfile, mode: SpatialMode) -> Result<SpatialP
 /// supervisor observes that intent and owns any later PipeWire work.
 pub fn set_enabled(enabled: bool) -> Result<SpatialProfile, String> {
     let _lock = mutation_lock()?;
-    let profile = load()?;
+    let path = config_path()?;
+    let profile = match load_from_path(&path) {
+        Ok(profile) => profile,
+        Err(error) if !enabled => return recover_disabled_profile(&path, &error),
+        Err(error) => return Err(error),
+    };
     // Disabling is the recovery path.  It must remain available when the
     // dataset, PipeWire installation, or another preflight prerequisite has
     // disappeared, so only an enable request performs the read-only check.
@@ -1143,7 +1210,7 @@ pub fn set_enabled(enabled: bool) -> Result<SpatialProfile, String> {
         next.enabled = false;
         validate(next)?
     };
-    save(&next)?;
+    save_to_path(&next, &path)?;
     Ok(next)
 }
 
@@ -1186,6 +1253,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    struct TestConfigDirectory {
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TestConfigDirectory {
+        fn drop(&mut self) {
+            *TEST_CONFIG_DIRECTORY
+                .lock()
+                .expect("clear spatial test configuration directory") = None;
+        }
+    }
+
+    fn select_test_config_directory(directory: &TemporaryDirectory) -> TestConfigDirectory {
+        let serial = TEST_CONFIG_DIRECTORY_SERIAL
+            .lock()
+            .expect("lock spatial test configuration directory");
+        *TEST_CONFIG_DIRECTORY
+            .lock()
+            .expect("set spatial test configuration directory") = Some(directory.0.clone());
+        TestConfigDirectory { _serial: serial }
     }
 
     fn valid_dataset_report() -> DatasetReport {
@@ -1534,6 +1623,61 @@ mod tests {
         assert_eq!(
             load_from_path(&path).expect("default profile"),
             SpatialProfile::default()
+        );
+    }
+
+    #[test]
+    fn disabling_recovers_an_invalid_profile_and_preserves_its_bytes() {
+        let directory = TemporaryDirectory::new();
+        let _config = select_test_config_directory(&directory);
+        let path = directory.profile_path();
+        let corrupt = b"{ this is not valid spatial json }";
+        fs::write(&path, corrupt).expect("write corrupt profile");
+
+        let profile = set_enabled(false).expect("disable recovers corrupt profile");
+        assert_eq!(profile, SpatialProfile::default());
+        assert!(!profile.enabled);
+        assert_eq!(
+            load_from_path(&path).expect("load disabled replacement"),
+            SpatialProfile::default()
+        );
+
+        let preserved = fs::read_dir(&directory.0)
+            .expect("read profile directory")
+            .map(|entry| entry.expect("read profile entry").path())
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("spatial.json.corrupt-"))
+            })
+            .expect("preserved corrupt profile");
+        assert_eq!(
+            fs::read(preserved).expect("read preserved profile"),
+            corrupt
+        );
+    }
+
+    #[test]
+    fn enabling_with_an_invalid_profile_fails_closed_without_altering_it() {
+        let directory = TemporaryDirectory::new();
+        let _config = select_test_config_directory(&directory);
+        let path = directory.profile_path();
+        let corrupt = b"{ this is not valid spatial json }";
+        fs::write(&path, corrupt).expect("write corrupt profile");
+
+        assert!(set_enabled(true).is_err());
+        assert_eq!(
+            fs::read(&path).expect("read unchanged corrupt profile"),
+            corrupt
+        );
+        assert!(
+            fs::read_dir(&directory.0)
+                .expect("read profile directory")
+                .all(|entry| !entry
+                    .expect("read profile entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("spatial.json.corrupt-"))
         );
     }
 
