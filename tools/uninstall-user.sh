@@ -5,6 +5,7 @@ readonly PLASMOID_ID="org.jambalinux.soniccore"
 readonly PLASMOID_TARGET="$HOME/.local/share/plasma/plasmoids/$PLASMOID_ID"
 readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service"
 readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
+readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 readonly CARGO_BINARY="$HOME/.cargo/bin/soniccore"
 
@@ -13,6 +14,7 @@ show_plan() {
     printf '  %s\n' "$PLASMOID_TARGET"
     printf '  %s\n' "$SERVICE_TARGET"
     printf '  %s\n' "$EQUALIZER_SERVICE_TARGET"
+    printf '  %s\n' "$SPATIAL_SERVICE_TARGET"
     printf '  %s\n' "$LAUNCHER_TARGET"
     printf '  %s\n' "$CARGO_BINARY"
     printf '%s\n' 'Não serão removidos: repositório, capturas, documentação ou regra udev.'
@@ -31,14 +33,16 @@ fi
 
 show_plan
 
-systemctl --user disable --now jambalinux-soniccore.service 2>/dev/null || true
+# Stop spatial first: its shutdown restores streams to the equalizer sink.
+systemctl --user disable --now jambalinux-soniccore-spatial.service 2>/dev/null || true
 systemctl --user disable --now jambalinux-soniccore-equalizer.service 2>/dev/null || true
+systemctl --user disable --now jambalinux-soniccore.service 2>/dev/null || true
 
 if command -v kpackagetool6 >/dev/null 2>&1 && [[ -d "$PLASMOID_TARGET" ]]; then
     kpackagetool6 --type Plasma/Applet --remove "$PLASMOID_ID"
 fi
 
-rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$LAUNCHER_TARGET"
+rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET"
 systemctl --user daemon-reload
 
 if command -v cargo >/dev/null 2>&1 && [[ -x "$CARGO_BINARY" ]]; then
