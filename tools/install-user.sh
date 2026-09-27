@@ -14,6 +14,7 @@ readonly SPATIAL_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-sonic
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore.desktop"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
+readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"
 
 fail() {
     printf 'erro: %s\n' "$*" >&2
@@ -29,6 +30,7 @@ check_prerequisites() {
     require_command kpackagetool6
     require_command pactl
     require_command pipewire
+    require_command pw-link
     require_command pw-cli
     require_command pw-dump
     require_command systemctl
@@ -51,6 +53,7 @@ check_prerequisites
 
 cd -- "$PROJECT_DIR"
 cargo install --path . --bins --force
+[[ -x "$CARGO_BINARY" ]] || fail "soniccore não foi encontrado em $CARGO_BINARY após a instalação"
 
 if [[ -d "$PLASMOID_TARGET" ]]; then
     kpackagetool6 --type Plasma/Applet --upgrade "$PLASMOID_SOURCE"

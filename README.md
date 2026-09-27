@@ -288,7 +288,7 @@ soniccore spatial enable        # requires a passing preflight and proven EQ tar
 soniccore spatial disable
 ```
 
-The read-only preflight validates the `pipewire` binary, filter-chain module,
+The read-only preflight validates the `pipewire` binary from `PATH`, filter-chain module,
 and a user-provided 14-channel HRIR dataset (`manifest.json` plus `hrir.wav`)
 under `spatial/hrtf/` in the configuration directory. `enable` refuses with an
 actionable error when readiness or the existing equalizer target cannot be
@@ -303,6 +303,19 @@ exposes the same gate and health state. Only the
 open, vendor-neutral mode name `binaural-stereo` is used; vendor names or files
 are intentionally never used. Technical hardware acceptance is recorded in
 [`docs/protocol/validation_reports/spatial-hardware-validation.md`](docs/protocol/validation_reports/spatial-hardware-validation.md).
+
+When `PIPEWIRE_MODULE_DIR` is unset or empty, module preflight checks the
+standard `/usr/lib/pipewire-0.3` and `/usr/lib64/pipewire-0.3` directories,
+plus the applicable Debian-style multiarch directory
+(`/usr/lib/x86_64-linux-gnu/pipewire-0.3` or
+`/usr/lib/aarch64-linux-gnu/pipewire-0.3`). When it is set, PipeWire treats it
+as the complete module search path: set it to the directory or colon-separated
+directory list containing `libpipewire-module-filter-chain.so`; standard paths
+are not also checked. Configure it in the user systemd manager environment
+(for example through `environment.d`), not only in an interactive shell, so
+the preflight and spawned PipeWire graph see the same value. No files are
+downloaded or installed automatically. The installation and removal helpers
+locate the CLI under `${CARGO_HOME:-$HOME/.cargo}/bin`.
 
 The persistence/bypass transition still needs an in-person auditory acceptance:
 keep a browser video playing and toggle spatial ten times, confirming that it

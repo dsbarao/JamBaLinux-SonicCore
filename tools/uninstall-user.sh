@@ -7,7 +7,7 @@ readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service
 readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
-readonly CARGO_BINARY="$HOME/.cargo/bin/soniccore"
+readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"
 
 show_plan() {
     printf '%s\n' 'Componentes do usuário que serão removidos:'

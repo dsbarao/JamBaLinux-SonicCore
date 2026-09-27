@@ -1288,7 +1288,7 @@ fn record_route_error(error: &str) -> Result<(), String> {
 }
 
 fn spawn_pipewire(config: &Path) -> Result<Child, String> {
-    Command::new("/usr/bin/pipewire")
+    Command::new(crate::spatial::pipewire_binary()?)
         .arg("-c")
         .arg(config)
         .spawn()

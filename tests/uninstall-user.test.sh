@@ -28,7 +28,49 @@ EOF
 chmod +x -- "$TEMP_BIN/systemctl"
 
 run_uninstaller() {
-    HOME="$TEMP_HOME" PATH="$TEMP_BIN:$PATH" "$UNINSTALLER" "$@"
+    HOME="$TEMP_HOME" CARGO_HOME="$TEMP_HOME/.cargo" PATH="$TEMP_BIN:$PATH" "$UNINSTALLER" "$@"
+}
+
+run_uninstaller_with_cargo_home() {
+    local cargo_home="$1"
+    shift
+    HOME="$TEMP_HOME" CARGO_HOME="$cargo_home" PATH="$TEMP_BIN:$PATH" "$UNINSTALLER" "$@"
+}
+
+test_install_check_reports_each_required_audio_client() {
+    local command
+    local check_bin
+    local missing
+    local output
+    local status
+
+    for missing in pactl pw-link pw-cli pw-dump; do
+        check_bin="$TEMP_HOME/check-bin-$missing"
+        mkdir -p -- "$check_bin"
+        for command in cargo kpackagetool6 pactl pipewire pw-link pw-cli pw-dump systemctl; do
+            [[ "$command" == "$missing" ]] && continue
+            printf '#!/bin/sh\nexit 0\n' > "$check_bin/$command"
+            chmod +x -- "$check_bin/$command"
+        done
+        ln -s -- "$(command -v dirname)" "$check_bin/dirname"
+
+        set +e
+        output="$(HOME="$TEMP_HOME" PATH="$check_bin" /bin/bash "$INSTALLER" --check 2>&1)"
+        status=$?
+        set -e
+        [[ "$status" -ne 0 ]]
+        [[ "$output" == *"comando obrigatório não encontrado: $missing" ]]
+    done
+}
+
+test_cargo_home_is_used_for_uninstaller_binary() {
+    local cargo_home="$TEMP_HOME/custom-cargo-home"
+    local check_output
+
+    check_output="$(run_uninstaller_with_cargo_home "$cargo_home" --check)"
+    [[ "$check_output" == *"$cargo_home/bin/soniccore"* ]]
+    grep -Fq 'readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"' "$INSTALLER"
+    grep -Fq 'readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"' "$UNINSTALLER"
 }
 
 test_check_changes_nothing() {
@@ -78,6 +120,8 @@ test_confirm_stops_spatial_first_and_removes_units() {
 }
 
 test_check_changes_nothing
+test_install_check_reports_each_required_audio_client
+test_cargo_home_is_used_for_uninstaller_binary
 test_install_uninstall_unit_parity
 test_confirm_stops_spatial_first_and_removes_units
 

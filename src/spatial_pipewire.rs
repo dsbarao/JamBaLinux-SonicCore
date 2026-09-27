@@ -587,7 +587,7 @@ fn next_action(
 }
 
 fn spawn_pipewire(config: &Path) -> Result<Child, String> {
-    Command::new("pipewire")
+    Command::new(spatial::pipewire_binary()?)
         .arg("-c")
         .arg(config)
         .spawn()

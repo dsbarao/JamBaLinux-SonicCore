@@ -8,9 +8,10 @@
 //! Spatial must never appear here.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Mutex,
@@ -46,10 +47,10 @@ static TEST_CONFIG_DIRECTORY: std::sync::Mutex<Option<PathBuf>> = std::sync::Mut
 #[cfg(test)]
 static TEST_CONFIG_DIRECTORY_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const FILTER_CHAIN_MODULE_CANDIDATES: [&str; 2] = [
-    "/usr/lib/pipewire-0.3/libpipewire-module-filter-chain.so",
-    "/usr/lib64/pipewire-0.3/libpipewire-module-filter-chain.so",
-];
+const FILTER_CHAIN_MODULE_NAME: &str = "libpipewire-module-filter-chain.so";
+/// PipeWire's standard module-search override. The preflight must use the
+/// same directory that a subsequently spawned PipeWire process will inherit.
+const PIPEWIRE_MODULE_DIRECTORY_ENV: &str = "PIPEWIRE_MODULE_DIR";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1199,18 +1200,85 @@ pub fn save(profile: &SpatialProfile) -> Result<(), String> {
     save_to_path(profile, &config_path()?)
 }
 
+fn binary_path_from_path(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    env::split_paths(&path_var)
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            candidate.is_file()
+                && candidate
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        })
+}
+
+fn binary_path(name: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    binary_path_from_path(name, &path_var)
+}
+
 fn binary_present(name: &str) -> bool {
-    let path_var = match env::var_os("PATH") {
-        Some(value) => value,
-        None => return false,
-    };
-    env::split_paths(&path_var).any(|directory| directory.join(name).is_file())
+    binary_path(name).is_some()
+}
+
+/// Resolves the PipeWire executable from `PATH` for both host-side graphs.
+///
+/// Keeping the lookup here makes the equalizer and spatial services behave the
+/// same way on distributions that do not install PipeWire under `/usr/bin`.
+pub fn pipewire_binary() -> Result<PathBuf, String> {
+    binary_path("pipewire").ok_or_else(|| "the `pipewire` binary was not found on PATH".into())
+}
+
+fn multiarch_triplet(architecture: &str) -> Option<&'static str> {
+    match architecture {
+        "x86_64" => Some("x86_64-linux-gnu"),
+        "aarch64" => Some("aarch64-linux-gnu"),
+        _ => None,
+    }
+}
+
+fn filter_chain_module_candidates_for_arch(architecture: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/usr/lib/pipewire-0.3").join(FILTER_CHAIN_MODULE_NAME),
+        PathBuf::from("/usr/lib64/pipewire-0.3").join(FILTER_CHAIN_MODULE_NAME),
+    ];
+    if let Some(triplet) = multiarch_triplet(architecture) {
+        candidates.push(
+            PathBuf::from("/usr/lib")
+                .join(triplet)
+                .join("pipewire-0.3")
+                .join(FILTER_CHAIN_MODULE_NAME),
+        );
+    }
+    candidates
+}
+
+fn filter_chain_module_candidates_for_env(
+    architecture: &str,
+    module_directories: Option<OsString>,
+) -> Vec<PathBuf> {
+    match module_directories.filter(|directories| !directories.is_empty()) {
+        // PipeWire treats this environment variable as its complete module
+        // search path. Do not fall back to compiled-in locations here: that
+        // would let preflight pass even though the child PipeWire process
+        // cannot load the module.
+        Some(directories) => env::split_paths(&directories)
+            .map(|directory| directory.join(FILTER_CHAIN_MODULE_NAME))
+            .collect(),
+        None => filter_chain_module_candidates_for_arch(architecture),
+    }
+}
+
+fn filter_chain_module_candidates() -> Vec<PathBuf> {
+    filter_chain_module_candidates_for_env(
+        std::env::consts::ARCH,
+        env::var_os(PIPEWIRE_MODULE_DIRECTORY_ENV),
+    )
 }
 
 fn filter_chain_module_present() -> bool {
-    FILTER_CHAIN_MODULE_CANDIDATES
+    filter_chain_module_candidates()
         .iter()
-        .any(|candidate| Path::new(candidate).is_file())
+        .any(|candidate| candidate.is_file())
 }
 
 fn capability_report(
@@ -1640,6 +1708,90 @@ mod tests {
         assert!(!missing_dataset.ready);
         assert!(!missing_dataset.hrtf_dataset_present);
         assert!(missing_dataset.error.as_deref().unwrap().contains("HRTF"));
+    }
+
+    #[test]
+    fn filter_chain_candidates_cover_multiarch_and_configured_directory() {
+        let x86_64 = filter_chain_module_candidates_for_env("x86_64", None);
+        assert!(x86_64.contains(&PathBuf::from(
+            "/usr/lib/x86_64-linux-gnu/pipewire-0.3/libpipewire-module-filter-chain.so"
+        )));
+
+        let aarch64 = filter_chain_module_candidates_for_env("aarch64", None);
+        assert!(aarch64.contains(&PathBuf::from(
+            "/usr/lib/aarch64-linux-gnu/pipewire-0.3/libpipewire-module-filter-chain.so"
+        )));
+
+        let configured = filter_chain_module_candidates_for_env(
+            "x86_64",
+            Some(OsString::from(
+                "/opt/pipewire-modules-a:/opt/pipewire-modules-b",
+            )),
+        );
+        assert_eq!(
+            configured,
+            vec![
+                PathBuf::from("/opt/pipewire-modules-a").join(FILTER_CHAIN_MODULE_NAME),
+                PathBuf::from("/opt/pipewire-modules-b").join(FILTER_CHAIN_MODULE_NAME),
+            ]
+        );
+        assert!(!configured.iter().any(|candidate| {
+            candidate.starts_with("/usr/lib/pipewire-0.3")
+                || candidate.starts_with("/usr/lib64/pipewire-0.3")
+                || candidate.starts_with("/usr/lib/x86_64-linux-gnu/pipewire-0.3")
+        }));
+
+        assert_eq!(
+            filter_chain_module_candidates_for_env("x86_64", Some(OsString::new())),
+            x86_64
+        );
+    }
+
+    #[test]
+    fn filter_chain_candidates_without_module_directory_cover_only_known_paths() {
+        let candidates = filter_chain_module_candidates_for_env("riscv64", None);
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/usr/lib/pipewire-0.3").join(FILTER_CHAIN_MODULE_NAME),
+                PathBuf::from("/usr/lib64/pipewire-0.3").join(FILTER_CHAIN_MODULE_NAME),
+            ]
+        );
+    }
+
+    #[test]
+    fn binary_path_requires_an_executable_and_honors_path_order() {
+        let test_directory = env::temp_dir().join(format!(
+            "jambalinux-soniccore-spatial-binary-path-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&test_directory).expect("create test binary directory");
+        let first = test_directory.join("first");
+        let second = test_directory.join("second");
+        fs::create_dir_all(&first).expect("create first PATH entry");
+        fs::create_dir_all(&second).expect("create second PATH entry");
+        let first_pipewire = first.join("pipewire");
+        let second_pipewire = second.join("pipewire");
+        fs::write(&first_pipewire, "#!/bin/sh\n").expect("write non-executable candidate");
+        fs::write(&second_pipewire, "#!/bin/sh\n").expect("write executable candidate");
+        fs::set_permissions(&second_pipewire, fs::Permissions::from_mode(0o755))
+            .expect("make second candidate executable");
+        let path = env::join_paths([first.as_path(), second.as_path()]).expect("build PATH");
+
+        assert_eq!(
+            binary_path_from_path("pipewire", &path),
+            Some(second_pipewire.clone())
+        );
+
+        fs::set_permissions(&first_pipewire, fs::Permissions::from_mode(0o755))
+            .expect("make first candidate executable");
+        assert_eq!(
+            binary_path_from_path("pipewire", &path),
+            Some(first_pipewire)
+        );
+
+        fs::remove_dir_all(test_directory).expect("remove test binary directory");
     }
 
     #[test]
