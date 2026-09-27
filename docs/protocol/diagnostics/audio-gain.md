@@ -117,6 +117,35 @@ não forem conhecidos.
 
 ## Sequência passiva para as próximas fases
 
+## Observador de grafo (ag02)
+
+`tools/diagnose-audio-gain.sh` materializa a primeira etapa sem mudar o
+grafo. Ele consulta somente `pactl`, `pw-dump`, `pw-metadata` quando presente,
+os status JSON do SonicCore e metadados do arquivo HRIR apontado pelo status.
+Não cria captura de áudio, não cria arquivo temporário de áudio e não escreve
+em PipeWire, no estado SonicCore ou em HID.
+
+```bash
+tools/diagnose-audio-gain.sh --duration 30 --interval 1 --output /caminho/novo.log
+```
+
+`pactl`, `pw-dump` e `soniccore` são obrigatórios; uma ausência falha com o
+nome da ferramenta. `pw-metadata` e `sha256sum` são opcionais: seu bloco é
+marcado como `unavailable`, sem preencher valores supostos. Cada amostra tem
+`monotonic_us` obtido de `/proc/uptime`, além de hora de parede para correlação
+humana, e conserva os resultados brutos delimitados de `pactl list sinks`,
+`pactl list sink-inputs`, `pw-dump`, metadados e três status JSON. Assim ficam
+observáveis volumes/mute, Game/Chat quando anunciados, nós/links, `Props`,
+wet/dry, formatos, taxas, mapas de canal e conversões expostas — mas não se
+infere que uma propriedade anunciada seja um formato negociado ou um ganho
+audível.
+
+O caminho padrão usa um arquivo novo sob `$XDG_RUNTIME_DIR`; um destino já
+existente é recusado. O log pode conter `application.name` e `media.name`, que
+podem ser sensíveis, e a ferramenta avisa antes da coleta e no próprio arquivo.
+O observador não rotula bytes HID, não altera VID/PID ou allowlists, e não
+relaciona a posição Game/Chat a ganho sem o A/B posterior.
+
 1. Coletar instantâneos somente-leitura simultâneos de `pw-dump`, `pactl list
    sinks`, `pactl list sink-inputs`, `pactl get-default-sink` e os status JSON
    já existentes. Registrar comandos, hora monotônica, saída, nó/serial e
