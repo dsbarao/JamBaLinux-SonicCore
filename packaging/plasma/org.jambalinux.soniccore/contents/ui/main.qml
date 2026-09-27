@@ -12,12 +12,15 @@ import org.kde.plasma.workspace.dbus as DBus
 PlasmoidItem {
     id: root
 
-    readonly property string command: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore status --format json\""
-    readonly property string cachedCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore cached-status --format json\""
-    readonly property string equalizerCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore equalizer status --format json\""
-    readonly property string spatialCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial status --format json\""
-    readonly property string spatialEnableCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial enable\""
-    readonly property string spatialDisableCommand: "/bin/sh -lc \"$HOME/.cargo/bin/soniccore spatial disable\""
+    // Keep the unexpanded home reference in one place. The non-interactive
+    // shell in soniccoreCommand expands it once when it starts the CLI.
+    readonly property string soniccoreBinary: "$HOME/.cargo/bin/soniccore"
+    readonly property string command: soniccoreCommand(["status", "--format", "json"])
+    readonly property string cachedCommand: soniccoreCommand(["cached-status", "--format", "json"])
+    readonly property string equalizerCommand: soniccoreCommand(["equalizer", "status", "--format", "json"])
+    readonly property string spatialCommand: soniccoreCommand(["spatial", "status", "--format", "json"])
+    readonly property string spatialEnableCommand: soniccoreCommand(["spatial", "enable"])
+    readonly property string spatialDisableCommand: soniccoreCommand(["spatial", "disable"])
     readonly property url equipmentImage: Qt.resolvedUrl("../images/jbl-quantum-810.png")
     property int batteryPercent: -1
     property bool charging: false
@@ -151,7 +154,7 @@ PlasmoidItem {
         controlBusy = true
         clearAction.stop()
         actionMessage = "Aplicando…"
-        const controlCommand = `/bin/sh -lc "$HOME/.cargo/bin/soniccore set ${feature} '${value}'"`
+        const controlCommand = soniccoreCommand(["set", feature, value])
         executable.connectSource(controlCommand)
     }
 
@@ -281,18 +284,20 @@ PlasmoidItem {
         return "'" + String(value).replace(/'/g, "'\"'\"'") + "'"
     }
 
-    function equalizerCliCommand(cliArguments) {
-        // Quote every argument for the inner login shell, then quote the whole
-        // program for the layer that runs it. Typed profile names and stored
-        // IDs therefore reach the CLI as data even when they contain quotes,
-        // spaces or other shell metacharacters.
+    function soniccoreCommand(cliArguments) {
+        // Quote every argument before joining the command. User-entered
+        // profile names, control values, and future arguments remain data even
+        // when they contain quotes, spaces, or shell metacharacters.
         const quotedArguments = cliArguments.map(shellQuote).join(" ")
-        const program = "$HOME/.cargo/bin/soniccore equalizer"
+        const program = soniccoreBinary
             + (quotedArguments.length > 0 ? " " + quotedArguments : "")
-        // A plain (non-login) shell: `sh -l` sources the whole login profile on
-        // every call and tripled the latency of a band change (243 ms vs 90 ms,
-        // measured 26/09). $HOME is still expanded by the shell.
+        // A plain, non-interactive shell avoids sourcing login profiles on
+        // every widget poll while still expanding soniccoreBinary's $HOME.
         return "/bin/sh -c " + shellQuote(program)
+    }
+
+    function equalizerCliCommand(cliArguments) {
+        return soniccoreCommand(["equalizer"].concat(cliArguments))
     }
 
     function startEqualizerAction(action, cliArguments) {
