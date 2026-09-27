@@ -10,8 +10,12 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +28,12 @@ pub mod graph;
 pub const SCHEMA: u8 = 1;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// A valid HRIR dataset is immutable from the supervisor's point of view until
+/// either input file's identity or timestamps change.  Retaining the report
+/// here avoids re-reading and re-hashing up to 64 MiB on every 500 ms
+/// supervisor preflight. Invalid reports and read errors are deliberately not
+/// cached: a corrected dataset must be noticed on the very next preflight.
+static DATASET_VALIDATION_CACHE: Mutex<Option<DatasetValidationCache>> = Mutex::new(None);
 const MUTATION_LOCK_NAME: &str = "spatial.lock";
 /// Serializes the short PipeWire wet/dry ramps issued by the CLI and the
 /// persistent supervisor.  This is deliberately separate from
@@ -223,6 +233,32 @@ pub struct DatasetReport {
     pub error: Option<String>,
 }
 
+/// The metadata identity used to invalidate the in-memory preflight cache.
+/// `dev` and `inode` identify replacement files, while size and nanosecond
+/// mtime identify normal in-place updates. Paths remain part of the key so a
+/// report never leaks between distinct dataset directories that happen to use
+/// hard links to the same files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatasetFileFingerprint {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    size: u64,
+    mtime_ns: i128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatasetCacheKey {
+    manifest: DatasetFileFingerprint,
+    hrir: DatasetFileFingerprint,
+}
+
+#[derive(Debug, Clone)]
+struct DatasetValidationCache {
+    key: DatasetCacheKey,
+    report: DatasetReport,
+}
+
 impl DatasetReport {
     fn empty() -> Self {
         Self {
@@ -301,6 +337,27 @@ fn resolve_regular_file(dataset_dir: &Path, file_name: &str) -> Result<PathBuf, 
         ));
     }
     Ok(resolved)
+}
+
+fn dataset_file_fingerprint(path: PathBuf) -> Result<DatasetFileFingerprint, String> {
+    let metadata = fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(DatasetFileFingerprint {
+        path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        mtime_ns: i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec()),
+    })
+}
+
+/// Captures the two inputs' metadata before validation. Resolving regular
+/// files here preserves the validator's existing no-symlink contract before a
+/// cache entry can be considered.
+fn dataset_cache_key(dataset_dir: &Path) -> Result<DatasetCacheKey, String> {
+    Ok(DatasetCacheKey {
+        manifest: dataset_file_fingerprint(resolve_regular_file(dataset_dir, MANIFEST_FILE_NAME)?)?,
+        hrir: dataset_file_fingerprint(resolve_regular_file(dataset_dir, HRIR_FILE_NAME)?)?,
+    })
 }
 
 /// Validates that `source_url` is an HTTP(S) URL with a usable host. The
@@ -613,19 +670,70 @@ fn read_file_limited(path: &Path, max: u64) -> Result<Vec<u8>, String> {
 
 /// Validates the dataset directory end to end, capturing the first actionable
 /// error rather than returning `Err`, so callers always get a full report.
+///
+/// A successful report is cached only after both inputs have the same metadata
+/// identity they had before reading. This makes the common supervisor case
+/// cheap without allowing a file rewritten during validation to enter the
+/// cache under a stale key.
 fn validate_dataset_directory(dataset_dir: &Path) -> DatasetReport {
+    validate_dataset_directory_with(dataset_dir, &sha256_hex, &DATASET_VALIDATION_CACHE)
+}
+
+/// Internal form with injected dependencies so cache tests remain independent
+/// of the process-wide production cache and may run in parallel.
+fn validate_dataset_directory_with<F>(
+    dataset_dir: &Path,
+    hash: &F,
+    cache: &Mutex<Option<DatasetValidationCache>>,
+) -> DatasetReport
+where
+    F: Fn(&[u8]) -> String,
+{
+    let key = dataset_cache_key(dataset_dir).ok();
+    if let Some(key) = key.as_ref() {
+        let cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.as_ref().filter(|cached| &cached.key == key) {
+            return cached.report.clone();
+        }
+    }
+
     let mut report = DatasetReport::empty();
-    match validate_dataset_into(dataset_dir, &mut report) {
+    match validate_dataset_into(dataset_dir, &mut report, hash) {
         Ok(()) => report.valid = true,
         Err(error) => {
             report.valid = false;
             report.error = Some(error);
         }
     }
+
+    // Do not cache malformed datasets or read errors. A subsequent preflight
+    // must retry them so an operator can repair the dataset without restarting
+    // the service.
+    if report.valid
+        && let (Some(before), Ok(after)) = (key, dataset_cache_key(dataset_dir))
+        && before == after
+    {
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cache = Some(DatasetValidationCache {
+            key: before,
+            report: report.clone(),
+        });
+    }
     report
 }
 
-fn validate_dataset_into(dataset_dir: &Path, report: &mut DatasetReport) -> Result<(), String> {
+fn validate_dataset_into<F>(
+    dataset_dir: &Path,
+    report: &mut DatasetReport,
+    hash: &F,
+) -> Result<(), String>
+where
+    F: Fn(&[u8]) -> String,
+{
     let manifest_path = resolve_regular_file(dataset_dir, MANIFEST_FILE_NAME)?;
     report.manifest_path = Some(manifest_path.display().to_string());
     let manifest_bytes = read_file_limited(&manifest_path, MAX_MANIFEST_BYTES)?;
@@ -644,7 +752,7 @@ fn validate_dataset_into(dataset_dir: &Path, report: &mut DatasetReport) -> Resu
     report.hrir_path = Some(hrir_path.display().to_string());
     let hrir_bytes = read_file_limited(&hrir_path, MAX_HRIR_BYTES)?;
 
-    let observed = sha256_hex(&hrir_bytes);
+    let observed = hash(&hrir_bytes);
     report.observed_sha256 = Some(observed.clone());
     if observed != expected {
         return Err(format!(
@@ -1352,6 +1460,18 @@ mod tests {
         install_dataset_with_wav(dir, &synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000))
     }
 
+    fn set_modified_time(path: &Path, offset_seconds: u64) {
+        let modified = SystemTime::now()
+            .checked_add(std::time::Duration::from_secs(offset_seconds))
+            .expect("test timestamp is representable");
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open file to set mtime")
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .expect("set test file mtime");
+    }
+
     /// Wraps a caller-built `fmt ` chunk body and `data` payload into a RIFF
     /// container, so tests can craft precise (and deliberately malformed) WAVs.
     fn assemble_wav(fmt_body: &[u8], data: &[u8]) -> Vec<u8> {
@@ -1691,6 +1811,119 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn valid_dataset_validation_reuses_the_cached_hash() {
+        let cache = Mutex::new(None);
+        let hash_calls = std::cell::Cell::new(0);
+        let counting_sha256 = |data: &[u8]| {
+            hash_calls.set(hash_calls.get() + 1);
+            sha256_hex(data)
+        };
+
+        let directory = TemporaryDirectory::new();
+        install_valid_dataset(&directory.0);
+
+        let first = validate_dataset_directory_with(&directory.0, &counting_sha256, &cache);
+        let second = validate_dataset_directory_with(&directory.0, &counting_sha256, &cache);
+
+        assert!(first.valid, "first validation failed: {:?}", first.error);
+        assert!(second.valid, "cached validation failed: {:?}", second.error);
+        assert_eq!(
+            hash_calls.get(),
+            1,
+            "unchanged files must not be hashed again"
+        );
+    }
+
+    #[test]
+    fn dataset_cache_invalidates_when_content_size_or_mtime_changes() {
+        let cache = Mutex::new(None);
+        let hash_calls = std::cell::Cell::new(0);
+        let counting_sha256 = |data: &[u8]| {
+            hash_calls.set(hash_calls.get() + 1);
+            sha256_hex(data)
+        };
+
+        let directory = TemporaryDirectory::new();
+        let original = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        install_dataset_with_wav(&directory.0, &original);
+        assert!(validate_dataset_directory_with(&directory.0, &counting_sha256, &cache).valid);
+
+        // Same-size content replacement must be noticed through its mtime.
+        let mut changed_contents = original.clone();
+        changed_contents[44] ^= 0x01;
+        install_dataset_with_wav(&directory.0, &changed_contents);
+        set_modified_time(&directory.0.join(HRIR_FILE_NAME), 10);
+        assert!(validate_dataset_directory_with(&directory.0, &counting_sha256, &cache).valid);
+
+        // A size change is independently part of the cache key.
+        let mut changed_size = changed_contents;
+        let extra_frame = usize::from(REQUIRED_HRIR_CHANNELS) * 2;
+        changed_size.extend(std::iter::repeat_n(0, extra_frame));
+        let data_size = u32::try_from(changed_size.len() - 44).expect("small synthetic WAV");
+        changed_size[40..44].copy_from_slice(&data_size.to_le_bytes());
+        let riff_size = u32::try_from(changed_size.len() - 8).expect("small synthetic WAV");
+        changed_size[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        install_dataset_with_wav(&directory.0, &changed_size);
+        set_modified_time(&directory.0.join(HRIR_FILE_NAME), 20);
+        assert!(validate_dataset_directory_with(&directory.0, &counting_sha256, &cache).valid);
+
+        // Metadata-only changes also require a fresh validation/hash.
+        set_modified_time(&directory.0.join(HRIR_FILE_NAME), 30);
+        assert!(validate_dataset_directory_with(&directory.0, &counting_sha256, &cache).valid);
+
+        assert_eq!(
+            hash_calls.get(),
+            4,
+            "each changed cache key must trigger a new HRIR hash"
+        );
+    }
+
+    #[test]
+    fn invalid_dataset_and_read_errors_are_not_cached_as_valid() {
+        let cache = Mutex::new(None);
+        let hash_calls = std::cell::Cell::new(0);
+        let counting_sha256 = |data: &[u8]| {
+            hash_calls.set(hash_calls.get() + 1);
+            sha256_hex(data)
+        };
+
+        let directory = TemporaryDirectory::new();
+        let wav = synthetic_hrir_wav(REQUIRED_HRIR_CHANNELS, 48_000);
+        install_dataset_with_wav(&directory.0, &wav);
+        assert!(validate_dataset_directory_with(&directory.0, &counting_sha256, &cache).valid);
+
+        // A readable WAV with a stale manifest hash reaches the hashing path,
+        // but must never become a cached valid report.
+        let mut corrupted = wav.clone();
+        corrupted[44] ^= 0x01;
+        fs::write(directory.0.join(HRIR_FILE_NAME), &corrupted).expect("corrupt HRIR contents");
+        set_modified_time(&directory.0.join(HRIR_FILE_NAME), 10);
+        let invalid_first = validate_dataset_directory_with(&directory.0, &counting_sha256, &cache);
+        let invalid_second =
+            validate_dataset_directory_with(&directory.0, &counting_sha256, &cache);
+        assert!(!invalid_first.valid, "bad hash must be rejected");
+        assert!(!invalid_second.valid, "invalid report must not be cached");
+        assert_eq!(
+            hash_calls.get(),
+            3,
+            "both invalid validations must hash HRIR"
+        );
+
+        fs::remove_file(directory.0.join(HRIR_FILE_NAME)).expect("remove HRIR to cause read error");
+        let missing = validate_dataset_directory_with(&directory.0, &counting_sha256, &cache);
+        assert!(
+            !missing.valid,
+            "missing HRIR must never reuse a valid report"
+        );
+
+        install_dataset_with_wav(&directory.0, &wav);
+        set_modified_time(&directory.0.join(HRIR_FILE_NAME), 20);
+        let repaired = validate_dataset_directory_with(&directory.0, &counting_sha256, &cache);
+        assert!(repaired.valid, "repaired dataset must be validated again");
+        assert_eq!(hash_calls.get(), 4);
     }
 
     #[test]
