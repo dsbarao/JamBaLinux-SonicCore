@@ -612,6 +612,23 @@ PlasmoidItem {
         return "Não foi possível ler o headset"
     }
 
+    function normalizeBatteryPercent(value) {
+        // `status --dry-run` and a cache recorded before a battery sample use
+        // null. Check that sentinel before Number(), because Number(null) is
+        // zero and would falsely show an empty battery as 0%.
+        if (value === null || value === undefined
+                || (typeof value === "string" && value.trim().length === 0)) return -1
+        if (typeof value !== "number" && typeof value !== "string") {
+            throw new Error("percentual inválido")
+        }
+
+        const percentage = Number(value)
+        if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
+            throw new Error("percentual inválido")
+        }
+        return percentage
+    }
+
     function applyResult(data) {
         const exitCode = Number(data["exit code"] ?? -1)
         const stdout = String(data.stdout ?? "").trim()
@@ -627,11 +644,7 @@ PlasmoidItem {
         }
         try {
             const result = JSON.parse(stdout)
-            const percentage = Number(result.battery_percent)
-            if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
-                throw new Error("percentual inválido")
-            }
-            batteryPercent = percentage
+            batteryPercent = normalizeBatteryPercent(result.battery_percent)
             charging = result.charging === true
             rawFeature = String(result.raw_feature ?? "")
             ambientMode = String(result.ambient_mode ?? "unknown")
@@ -707,6 +720,15 @@ PlasmoidItem {
                         width: 11
                         height: 11
                         source: "audio-headphones"
+                        visible: root.batteryPercent >= 0
+                    }
+
+                    PlasmaComponents.Label {
+                        anchors.centerIn: parent
+                        visible: root.batteryPercent < 0
+                        text: "—"
+                        color: root.batteryColor
+                        font.bold: true
                     }
 
                     PlasmaComponents.Label {
@@ -778,7 +800,7 @@ PlasmoidItem {
         PlasmaComponents.Label {
             Layout.alignment: Qt.AlignHCenter
             Layout.maximumHeight: implicitHeight
-            text: root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "Indisponível"
+            text: root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "—"
             color: root.batteryColor
             font.pixelSize: Kirigami.Units.gridUnit * 1.7
             font.bold: true
