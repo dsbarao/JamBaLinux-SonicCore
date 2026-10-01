@@ -62,6 +62,16 @@ uma propriedade declarada pelo nó não prova, sozinha, o formato do fluxo.
 - EVT-009 confirma que o dial físico emite posições Game/Chat e que ALSA não
   mudou nessa observação. Isso não mede ganho, endpoint, volume percebido nem
   explica o comportamento histórico relatado.
+- EVT-046 confirma a causa raiz no profile-set ACP upstream
+  (`usb-gaming-headset-gamefirst.conf` associado a `0ecb:2069` via
+  `/usr/lib/udev/rules.d/90-pipewire-alsa.rules`): o mapeamento
+  `stereo-game-output` (`hw:%f,0,0`) usa `paths-output = usb-gaming-headset-output-stereo`
+  que controla apenas `[Element PCM,1]` (volume de hardware do Chat). O controle de
+  hardware `PCM,0` (Game) nunca era controlado pelo sink Game do PipeWire, tendo ficado
+  atenuado (-23 dB). O ajuste manual de `PCM,0` para 100% (0 dB) e sua persistência
+  restauraram o volume e a fidelidade nominais. Essa evidência confirma estritamente
+  o estágio ACP/mixer de hardware e não atribui efeito ao dial HID, SPL, HRIR,
+  resampling ou outros estágios.
 
 ## Hipóteses explicitamente não confirmadas
 

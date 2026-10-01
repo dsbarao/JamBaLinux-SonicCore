@@ -71,7 +71,6 @@ by the user to a different output (such as HDMI or analog) is never hijacked bac
 When the spatial graph is stopped, all streams on the spatial capture sink are
 safely evacuated to the equalizer sink before the graph process is terminated.
 
-
 `soniccore equalizer status` and the widget expose actionable errors for an
 inactive service, unavailable Game output, missing or disconnected filter,
 unsafe default or links, unobservable DSP controls, and a mismatch between the
@@ -330,6 +329,16 @@ investigar volume espacial, seguir o contrato passivo de evidência em
 [`diagnostics/audio-gain.md`](diagnostics/audio-gain.md). Ele não transforma a
 topologia documentada em uma medição de ganho ou em autorização para alterar o
 grafo.
+
+A causa raiz da atenuação de ganho observada no endpoint Game foi isolada em
+EVT-046: o profile-set ACP upstream (`usb-gaming-headset-gamefirst.conf`)
+mapeava o controle de volume do sink Game para `[Element PCM,1]` (o controle de
+hardware do canal Chat), deixando o controle de hardware do Game (`PCM,0`)
+inalterado em -23 dB. A correção desse estágio pertence exclusivamente à camada
+ALSA Card Profile (ACP), restaurando o controle de `PCM,0` para Game e `PCM,1`
+para Chat sem modificações no sistema sob `/usr`, sem tocar VID/PID, allowlists
+ou HID, e mantendo inalteradas as rotas downstream de DSP (`aplicação ->
+Spatial -> EQ -> Quantum Game`).
 
 ## Diagnóstico de transições
 
