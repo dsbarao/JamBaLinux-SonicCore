@@ -10,6 +10,40 @@ The equalizer is host-side DSP, not a dongle/headset setting. A Linux
 implementation should use PipeWire filters, EasyEffects-compatible processing,
 or another host DSP layer rather than vendor USB writes.
 
+## Hardware volume of the Game and Chat outputs (ACP overlay)
+
+The dongle exposes two playback PCMs with their own hardware volume controls:
+PCM 0 (Game) is the ALSA simple control `PCM` and PCM 1 (Chat) is `PCM,1`.
+The upstream ACP profile-set selected by udev for `0ecb:2069`,
+`usb-gaming-headset-gamefirst.conf`, maps `stereo-game-output` (`hw:%f,0,0`)
+to the path `usb-gaming-headset-output-stereo`, whose only element is
+`[Element PCM,1]`. Its `mono-chat-output` path drives `[Element PCM]`. The Game
+sink volume therefore moves the Chat hardware volume, and `PCM` (Game) is never
+driven (EVT-046).
+
+JamBaLinux ships a user-level overlay installed by `tools/acp-overlay.sh`:
+
+| File (under `$XDG_CONFIG_HOME`, default `~/.config`) | Role |
+|---|---|
+| `alsa-card-profile/mixer/profile-sets/jambalinux-quantum810.conf` | Same mappings and profiles as upstream, with corrected paths |
+| `alsa-card-profile/mixer/paths/jambalinux-quantum810-game.conf` | Game output, `[Element PCM]` |
+| `alsa-card-profile/mixer/paths/jambalinux-quantum810-chat.conf` | Chat stereo output, `[Element PCM,1]` |
+| `alsa-card-profile/mixer/paths/jambalinux-quantum810-chat-mono.conf` | Chat mono output, `[Element PCM,1]` |
+| `wireplumber/wireplumber.conf.d/51-jambalinux-quantum810-acp.conf` | Sets `device.profile-set` for the Quantum 810 card only |
+
+PipeWire's ACP looks up profile-sets and paths in `$XDG_CONFIG_HOME/alsa-card-profile/mixer`
+before `/etc` and `/usr/share`, and WirePlumber applies `monitor.alsa.rules` to
+the device properties before creating the card. Mapping and profile names are
+unchanged, so node names, saved profiles, and the equalizer route keep working.
+The microphone keeps the upstream `usb-gaming-headset-input` path.
+
+Activation requires WirePlumber to recreate the card (reconnect the dongle or
+`systemctl --user restart wireplumber`). From then on the Game sink volume
+drives `PCM` and starts from the sink's current level. Removing the overlay
+(`tools/acp-overlay.sh --uninstall`) and restarting WirePlumber restores the
+upstream behavior; files changed outside JamBaLinux are kept and reported.
+The overlay never touches `/usr`, udev rules, HID, VID/PID, or allowlists.
+
 ## JamBaLinux profile and persistent service
 
 JamBaLinux stores the active 10-band setting, the current selection, and a

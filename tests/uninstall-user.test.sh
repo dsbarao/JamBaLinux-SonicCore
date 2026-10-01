@@ -119,10 +119,30 @@ test_confirm_stops_spatial_first_and_removes_units() {
     [[ ! -e "$SPATIAL_UNIT" ]]
 }
 
+test_partial_overlay_removal_is_reported_and_fails() {
+    local edited="$TEMP_HOME/.config/alsa-card-profile/mixer/paths/jambalinux-quantum810-chat.conf"
+    local output status
+
+    HOME="$TEMP_HOME" "$PROJECT_DIR/tools/acp-overlay.sh" --install >/dev/null
+    printf '# editado\n' >> "$edited"
+
+    set +e
+    output="$(run_uninstaller --confirm 2>&1)"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]]
+    [[ "$output" == *"Remoção parcial"* ]]
+    [[ "$output" != *"foram removidos."* ]]
+    [[ -f "$edited" ]]
+    rm -f -- "$edited"
+}
+
 test_check_changes_nothing
 test_install_check_reports_each_required_audio_client
 test_cargo_home_is_used_for_uninstaller_binary
 test_install_uninstall_unit_parity
 test_confirm_stops_spatial_first_and_removes_units
+test_partial_overlay_removal_is_reported_and_fails
 
 printf '%s\n' 'uninstall-user tests passed'

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly ACP_OVERLAY="$SCRIPT_DIR/acp-overlay.sh"
 readonly PLASMOID_ID="org.jambalinux.soniccore"
 readonly PLASMOID_TARGET="$HOME/.local/share/plasma/plasmoids/$PLASMOID_ID"
 readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service"
@@ -17,6 +19,7 @@ show_plan() {
     printf '  %s\n' "$SPATIAL_SERVICE_TARGET"
     printf '  %s\n' "$LAUNCHER_TARGET"
     printf '  %s\n' "$CARGO_BINARY"
+    "$ACP_OVERLAY" --check
     printf '%s\n' 'Não serão removidos: repositório, capturas, documentação ou regra udev.'
 }
 
@@ -43,11 +46,18 @@ if command -v kpackagetool6 >/dev/null 2>&1 && [[ -d "$PLASMOID_TARGET" ]]; then
 fi
 
 rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET"
+# Files edited outside JamBaLinux are kept and reported; the rest still goes.
+overlay_kept=0
+"$ACP_OVERLAY" --uninstall || overlay_kept=1
 systemctl --user daemon-reload
 
 if command -v cargo >/dev/null 2>&1 && [[ -x "$CARGO_BINARY" ]]; then
     cargo uninstall jambalinux-soniccore
 fi
 
-printf '%s\n' 'Componentes do JamBaLinux SonicCore instalados para o usuário foram removidos.'
 printf '%s\n' 'Reinicie o Plasma manualmente se o widget ainda aparecer no painel.'
+if [[ "$overlay_kept" -ne 0 ]]; then
+    printf '%s\n' 'Remoção parcial: arquivos do overlay ACP modificados fora do JamBaLinux foram mantidos (veja acima).' >&2
+    exit 1
+fi
+printf '%s\n' 'Componentes do JamBaLinux SonicCore instalados para o usuário foram removidos.'

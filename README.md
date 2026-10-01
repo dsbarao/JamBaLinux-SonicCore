@@ -193,6 +193,44 @@ captures, documentation, and the system-wide udev rule:
 tools/uninstall-user.sh --confirm
 ```
 
+#### Game volume fix (user-level ACP overlay)
+
+On the JBL Quantum 810 Wireless, the upstream PipeWire profile-set
+(`usb-gaming-headset-gamefirst.conf`) wires the **Game** sink volume to the
+dongle's `PCM,1` control, which is the **Chat** hardware volume. The real Game
+hardware volume, `PCM,0`, is never driven and keeps its last stored value
+(observed at -23 dB), so the dongle sounds quiet and the extra gain ends up
+being pushed digitally until it clips.
+
+`tools/install-user.sh` therefore also installs a small user-level overlay
+(`tools/acp-overlay.sh --install`): a profile-set and three mixer paths under
+`~/.config/alsa-card-profile/mixer/`, plus a WirePlumber rule that selects that
+profile-set only for the Quantum 810 card. With it, Game drives `PCM,0` and
+Chat drives `PCM,1`; node, mapping, and profile names stay the same. Nothing is
+written under `/usr`, no `sudo` is used, and udev, HID, VID/PID, and allowlists
+are untouched.
+
+The overlay takes effect when WirePlumber recreates the card. Reconnect the
+dongle or run:
+
+```bash
+systemctl --user restart wireplumber
+```
+
+Check, install, or remove only the overlay with:
+
+```bash
+tools/acp-overlay.sh --check
+tools/acp-overlay.sh --install
+tools/acp-overlay.sh --uninstall
+```
+
+`tools/uninstall-user.sh --confirm` removes the overlay too. Files edited
+outside JamBaLinux are kept and reported instead of deleted. After removal and
+a WirePlumber restart, the upstream profile-set applies again. A draft report
+for upstream is in
+[`docs/bug-reports/quantum810-acp-game-volume.md`](docs/bug-reports/quantum810-acp-game-volume.md).
+
 For manual widget installation, use:
 
 ```bash

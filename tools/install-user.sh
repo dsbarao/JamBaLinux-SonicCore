@@ -15,6 +15,7 @@ readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore
 readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore.desktop"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"
+readonly ACP_OVERLAY="$SCRIPT_DIR/acp-overlay.sh"
 
 fail() {
     printf 'erro: %s\n' "$*" >&2
@@ -40,10 +41,12 @@ check_prerequisites() {
     [[ -f "$EQUALIZER_SERVICE_SOURCE" ]] || fail "serviço systemd do equalizador não encontrado"
     [[ -f "$SPATIAL_SERVICE_SOURCE" ]] || fail "serviço systemd espacial não encontrado"
     [[ -f "$LAUNCHER_SOURCE" ]] || fail "lançador KDE não encontrado"
+    [[ -x "$ACP_OVERLAY" ]] || fail "script do overlay ACP não encontrado"
 }
 
 if [[ "${1:-}" == "--check" ]]; then
     check_prerequisites
+    "$ACP_OVERLAY" --check
     printf 'Pré-requisitos do JamBaLinux SonicCore verificados. Nenhuma alteração foi feita.\n'
     exit 0
 fi
@@ -75,6 +78,9 @@ systemctl --user enable jambalinux-soniccore-spatial.service
 systemctl --user restart jambalinux-soniccore.service
 systemctl --user restart jambalinux-soniccore-equalizer.service
 systemctl --user restart jambalinux-soniccore-spatial.service
+# The ACP overlay only takes effect when WirePlumber recreates the card; the
+# installer does not restart it, so audio is never cut without being asked.
+"$ACP_OVERLAY" --install
 
 printf '\nJamBaLinux SonicCore instalado para o usuário atual.\n'
 printf 'O Plasma não foi reiniciado automaticamente.\n'
