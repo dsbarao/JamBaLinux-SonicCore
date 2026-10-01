@@ -1,0 +1,6 @@
+{
+  "schema": "jambalinux-audio-gain-ledger/v1",
+  "spatial": {"wet_dry_gains": {"wet": [1, 1], "dry": [0, 0]}},
+  "eq": {"requested_bands_db": [6, 0, 0, 0, 0, 0, 0, 0, 0, 12], "applied_bands_db": [6, 0, 0, 0, 0, 0, 0, 0, 0, 12]},
+  "measured_peaks_dbfs": {"eq_output": 0.2}
+}

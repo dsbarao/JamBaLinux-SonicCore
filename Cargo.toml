@@ -1,9 +1,9 @@
 [package]
-name = "janbalinux-soniccore"
+name = "jambalinux-soniccore"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "JanBaLinux SonicCore — open-source gaming headset control and audio platform for Linux"
+description = "JamBaLinux SonicCore — open-source gaming headset control and audio platform for Linux"
 
 [[bin]]
 name = "soniccore"

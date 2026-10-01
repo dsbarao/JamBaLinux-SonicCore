@@ -1,4 +1,4 @@
-# JanBaLinux SonicCore
+# JamBaLinux SonicCore
 
 Read `README.md`, `docs/rebranding.md`, and the relevant protocol documentation
 before changing behavior.
@@ -6,8 +6,8 @@ before changing behavior.
 ## Maintainer context
 
 The owner maintains additional non-public project context in the companion
-repository `JanBaLinux-SonicCore-private`. When it is available as a sibling
-directory, read `../JanBaLinux-SonicCore-private/PROJECT_CONTEXT.md` before
+repository `JamBaLinux-SonicCore-private`. When it is available as a sibling
+directory, read `../JamBaLinux-SonicCore-private/PROJECT_CONTEXT.md` before
 starting substantive work. Do not copy private notes, credentials, personal
 data, or unpublished plans into this public repository.
 

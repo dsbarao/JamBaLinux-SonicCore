@@ -13,7 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+mod command;
+mod equalizer;
 mod hid;
+mod pipewire;
+mod spatial;
+mod spatial_pipewire;
 mod state;
 
 const USB_ROOT: &str = "/sys/bus/usb/devices";
@@ -186,6 +191,7 @@ struct StatusOutput {
     schema: u8,
     device: &'static str,
     hidraw: String,
+    interface_number: Option<u8>,
     access: &'static str,
     dry_run: bool,
     battery_percent: Option<u8>,
@@ -198,9 +204,21 @@ struct StatusOutput {
     lighting_color: Option<String>,
     logo_color: Option<String>,
     ring_color: Option<String>,
+    logo_colors: Option<Vec<String>>,
+    ring_colors: Option<Vec<String>>,
+    logo_effect: Option<String>,
+    ring_effect: Option<String>,
+    logo_speed: Option<String>,
+    ring_speed: Option<String>,
     game_chat_value: Option<u8>,
     bluetooth: Option<String>,
     sidetone_level: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct HidrawInterfaceNumber {
+    number: Option<u8>,
+    warning: Option<String>,
 }
 
 fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
@@ -239,7 +257,7 @@ fn spawn_charging_watcher() -> Result<(), String> {
     thread::Builder::new()
         .name("soniccore-usb-power".into())
         .spawn(|| {
-            let mut confirmed = state::load().and_then(|cached| cached.charging);
+            let mut confirmed = state::load().ok().and_then(|cached| cached.charging);
             let mut candidate = None;
             let mut candidate_samples = 0_u8;
             loop {
@@ -259,9 +277,11 @@ fn spawn_charging_watcher() -> Result<(), String> {
                     candidate_samples = 1;
                 }
                 if candidate_samples >= 3 {
-                    let mut cached = state::load().unwrap_or_default();
-                    cached.charging = Some(current);
-                    if let Err(error) = state::save(&mut cached) {
+                    if let Err(error) = state::update_recovering_if(|cached| {
+                        let changed = cached.charging != Some(current);
+                        cached.charging = Some(current);
+                        changed
+                    }) {
                         eprintln!("failed to cache USB power state: {error}");
                     } else {
                         confirmed = Some(current);
@@ -452,6 +472,9 @@ fn scan() -> io::Result<bool> {
 
 fn inspect() -> Result<bool, String> {
     let reports = device_reports()?;
+    let hidraw_interface = quantum_hidraw_node()?
+        .as_deref()
+        .map(hidraw_interface_number);
     for report in &reports {
         println!("Device {JBL_VENDOR_ID}:{QUANTUM_810_PRODUCT_ID}");
         println!("  manufacturer: {}", report.manufacturer);
@@ -460,6 +483,16 @@ fn inspect() -> Result<bool, String> {
         println!("  speed: {} Mbit/s", report.speed_mbps);
         println!("  sysfs: {}", report.sysfs);
         println!("  descriptor bytes: {}", report.descriptor_bytes);
+        if let Some(interface) = &hidraw_interface {
+            print!("  ");
+            match interface.number {
+                Some(number) => println!("hidraw interface_number: {number:02x}"),
+                None => println!("hidraw interface_number: unknown"),
+            }
+            if let Some(warning) = &interface.warning {
+                eprintln!("warning: {warning}");
+            }
+        }
         println!("  interfaces:");
         for interface in &report.interfaces {
             let marker = if interface.active {
@@ -593,6 +626,84 @@ fn quantum_hidraw_node() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+// This is deliberately diagnostic only.  HID identity remains the selection
+// criterion until interface matching has been validated on the target hardware.
+fn interface_number_from_sysfs(sysfs_interface: &Path) -> HidrawInterfaceNumber {
+    let value = match read_trimmed(sysfs_interface.join("bInterfaceNumber")) {
+        Some(value) => value,
+        None => {
+            return HidrawInterfaceNumber {
+                number: None,
+                warning: Some(format!(
+                    "could not read bInterfaceNumber from {}; expected 05",
+                    sysfs_interface.display()
+                )),
+            };
+        }
+    };
+    match u8::from_str_radix(&value, 16) {
+        Ok(5) => HidrawInterfaceNumber {
+            number: Some(5),
+            warning: None,
+        },
+        Ok(number) => HidrawInterfaceNumber {
+            number: Some(number),
+            warning: Some(format!(
+                "hidraw bInterfaceNumber is {number:02x}; the repository udev rule documents 05"
+            )),
+        },
+        Err(_) => HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "malformed bInterfaceNumber `{value}` in {}; expected hexadecimal 05",
+                sysfs_interface.display()
+            )),
+        },
+    }
+}
+
+fn hidraw_interface_number(node: &Path) -> HidrawInterfaceNumber {
+    let Some(name) = node.file_name() else {
+        return HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "could not resolve hidraw sysfs path for {}",
+                node.display()
+            )),
+        };
+    };
+    let hid_device = Path::new("/sys/class/hidraw").join(name).join("device");
+    let Ok(hid_device) = fs::canonicalize(hid_device) else {
+        return HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "could not resolve hidraw sysfs path for {}",
+                node.display()
+            )),
+        };
+    };
+    let Some(interface) = hid_device.parent() else {
+        return HidrawInterfaceNumber {
+            number: None,
+            warning: Some(format!(
+                "could not find USB interface for {}",
+                node.display()
+            )),
+        };
+    };
+    interface_number_from_sysfs(interface)
+}
+
+fn print_hidraw_interface_number(report: &HidrawInterfaceNumber) {
+    match report.number {
+        Some(number) => println!("interface_number: {number:02x}"),
+        None => println!("interface_number: unknown"),
+    }
+    if let Some(warning) = &report.warning {
+        eprintln!("warning: {warning}");
+    }
+}
+
 fn format_hid_report(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -606,6 +717,8 @@ fn monitor(dry_run: bool) -> Result<bool, String> {
         return Ok(false);
     };
     println!("matched JBL Quantum 810 HID node: {}", node.display());
+    let interface = hidraw_interface_number(&node);
+    print_hidraw_interface_number(&interface);
     println!("access mode: read-only (no Output/Feature reports)");
     if dry_run {
         match fs::metadata(&node) {
@@ -663,27 +776,46 @@ fn monitor(dry_run: bool) -> Result<bool, String> {
 fn daemon() -> Result<bool, String> {
     state::init_signal_service()?;
     spawn_charging_watcher()?;
-    let mut runtime = state::load().unwrap_or_default();
+    let mut runtime = match state::load() {
+        Ok(state) => state,
+        Err(state::LoadError::Missing) => state::RuntimeState::default(),
+        Err(error) => {
+            eprintln!("failed to load runtime state: {error}");
+            state::RuntimeState::default()
+        }
+    };
     loop {
         let Some(node) = quantum_hidraw_node()? else {
-            if let Some(cached) = state::load() {
+            if let Ok(cached) = state::load() {
                 runtime = cached;
             }
             if runtime.headset_connected != Some(false) {
-                runtime.headset_connected = Some(false);
-                state::save(&mut runtime)?;
+                match state::update_recovering_if(|cached| {
+                    let changed = cached.headset_connected != Some(false);
+                    cached.headset_connected = Some(false);
+                    changed
+                }) {
+                    Ok(updated) => runtime = updated,
+                    Err(error) => eprintln!("failed to cache headset disconnect: {error}"),
+                }
             }
             thread::sleep(Duration::from_secs(2));
             continue;
         };
 
-        if let Some(cached) = state::load() {
+        if let Ok(cached) = state::load() {
             runtime = cached;
         }
         if let Ok((battery, _)) = query_battery(&node) {
-            runtime.battery_percent = Some(battery);
+            match state::update_recovering_if(|cached| {
+                let changed = cached.battery_percent != Some(battery);
+                cached.battery_percent = Some(battery);
+                changed
+            }) {
+                Ok(updated) => runtime = updated,
+                Err(error) => eprintln!("failed to cache battery state: {error}"),
+            }
         }
-        state::save(&mut runtime)?;
 
         let mut device = match fs::File::open(&node) {
             Ok(device) => device,
@@ -698,11 +830,10 @@ fn daemon() -> Result<bool, String> {
             match device.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if let Some(cached) = state::load() {
-                        runtime = cached;
-                    }
-                    if runtime.apply_input(&buffer[..count]) {
-                        state::save(&mut runtime)?;
+                    let report = &buffer[..count];
+                    match state::update_recovering_if(|cached| cached.apply_input(report)) {
+                        Ok(updated) => runtime = updated,
+                        Err(error) => eprintln!("failed to cache headset input: {error}"),
                     }
                 }
                 Err(error) => {
@@ -825,30 +956,128 @@ fn canonical_color(value: &str) -> Option<String> {
     Some(format!("#{red:02x}{green:02x}{blue:02x}"))
 }
 
-fn solid_zone_profile(zone: u8, color: (u8, u8, u8)) -> Vec<Vec<u8>> {
-    let (red, green, blue) = color;
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LightingZone {
+    colors: Vec<String>,
+    effect: String,
+    speed: String,
+}
+
+fn effect_id(value: &str) -> Option<u8> {
+    match value {
+        "breathing" => Some(0x00),
+        "solid" => Some(0x01),
+        "wave" => Some(0x02),
+        "glitch" => Some(0x03),
+        _ => None,
+    }
+}
+
+fn speed_byte(value: &str) -> Option<u8> {
+    match value {
+        "0.5" => Some(0x64),
+        "1.0" => Some(0x4b),
+        "1.5" => Some(0x32),
+        "2.0" => Some(0x19),
+        _ => None,
+    }
+}
+
+fn zone_profile(zone: u8, profile: &LightingZone) -> Result<Vec<Vec<u8>>, String> {
+    if profile.colors.len() != 5 {
+        return Err("lighting profile must contain exactly five colors".into());
+    }
+    let speed = speed_byte(&profile.speed).ok_or("unsupported cached lighting speed")?;
+    let effect = effect_id(&profile.effect).ok_or("unsupported cached lighting effect")?;
     let mut reports = Vec::with_capacity(6);
-    reports.push(vec![0x4c, zone, 0x64, 0x05]);
-    for segment in 0..5 {
+    reports.push(vec![0x4c, zone, speed, 0x05]);
+    for (segment, color) in profile.colors.iter().enumerate() {
+        let (red, green, blue) = color_rgb(color).ok_or("unsupported cached lighting color")?;
         reports.push(vec![
             0x4d,
             zone,
-            segment,
+            segment as u8,
             red,
             green,
             blue,
-            0x01,
-            segment * 2,
+            effect,
+            segment as u8 * 2,
         ]);
     }
-    reports
+    Ok(reports)
 }
 
 fn solid_color_profile(logo: (u8, u8, u8), ring: (u8, u8, u8)) -> Vec<Vec<u8>> {
-    let mut reports = solid_zone_profile(0, logo);
-    reports.extend(solid_zone_profile(1, ring));
+    let to_hex = |(red, green, blue)| format!("#{red:02x}{green:02x}{blue:02x}");
+    let logo = LightingZone {
+        colors: vec![to_hex(logo); 5],
+        effect: "solid".into(),
+        speed: "0.5".into(),
+    };
+    let ring = LightingZone {
+        colors: vec![to_hex(ring); 5],
+        effect: "solid".into(),
+        speed: "0.5".into(),
+    };
+    let mut reports = zone_profile(0, &logo).expect("built-in solid profile is valid");
+    reports.extend(zone_profile(1, &ring).expect("built-in solid profile is valid"));
     reports.push(vec![0x4b, 0x01]);
     reports
+}
+
+fn cached_zone(
+    colors: Option<Vec<String>>,
+    legacy_color: Option<String>,
+    effect: Option<String>,
+    speed: Option<String>,
+    name: &str,
+) -> Result<LightingZone, String> {
+    let colors = match colors {
+        Some(colors)
+            if colors.len() == 5 && colors.iter().all(|color| color_rgb(color).is_some()) =>
+        {
+            colors
+        }
+        _ => vec![
+            legacy_color.ok_or_else(|| {
+                format!("{name} color is unknown; apply a synchronized color first")
+            })?;
+            5
+        ],
+    };
+    Ok(LightingZone {
+        colors,
+        effect: effect.unwrap_or_else(|| "solid".into()),
+        speed: speed.unwrap_or_else(|| "0.5".into()),
+    })
+}
+
+fn lighting_reports(logo: &LightingZone, ring: &LightingZone) -> Result<Vec<Vec<u8>>, String> {
+    let mut reports = zone_profile(0, logo)?;
+    reports.extend(zone_profile(1, ring)?);
+    reports.push(vec![0x4b, 0x01]);
+    Ok(reports)
+}
+
+fn segment_feature(value: &str) -> Option<(&'static str, usize)> {
+    match value {
+        "segment-0" => Some(("segment-0", 0)),
+        "segment-1" => Some(("segment-1", 1)),
+        "segment-2" => Some(("segment-2", 2)),
+        "segment-3" => Some(("segment-3", 3)),
+        "segment-4" => Some(("segment-4", 4)),
+        "logo-segment-0" => Some(("logo-segment-0", 0)),
+        "logo-segment-1" => Some(("logo-segment-1", 1)),
+        "logo-segment-2" => Some(("logo-segment-2", 2)),
+        "logo-segment-3" => Some(("logo-segment-3", 3)),
+        "logo-segment-4" => Some(("logo-segment-4", 4)),
+        "ring-segment-0" => Some(("ring-segment-0", 0)),
+        "ring-segment-1" => Some(("ring-segment-1", 1)),
+        "ring-segment-2" => Some(("ring-segment-2", 2)),
+        "ring-segment-3" => Some(("ring-segment-3", 3)),
+        "ring-segment-4" => Some(("ring-segment-4", 4)),
+        _ => None,
+    }
 }
 
 fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetCommand, String> {
@@ -902,6 +1131,41 @@ fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetComman
                 reports: Vec::new(),
             }
         }
+        (feature @ ("effect" | "logo-effect" | "ring-effect"), value)
+            if effect_id(value).is_some() =>
+        {
+            SetCommand {
+                feature: match feature {
+                    "effect" => "effect",
+                    "logo-effect" => "logo-effect",
+                    _ => "ring-effect",
+                },
+                value: value.into(),
+                reports: Vec::new(),
+            }
+        }
+        (feature @ ("speed" | "logo-speed" | "ring-speed"), value)
+            if speed_byte(value).is_some() =>
+        {
+            SetCommand {
+                feature: match feature {
+                    "speed" => "speed",
+                    "logo-speed" => "logo-speed",
+                    _ => "ring-speed",
+                },
+                value: value.into(),
+                reports: Vec::new(),
+            }
+        }
+        (feature, value) if segment_feature(feature).is_some() && color_rgb(value).is_some() => {
+            SetCommand {
+                feature: segment_feature(feature)
+                    .expect("validated segment feature")
+                    .0,
+                value: canonical_color(value).expect("validated RGB color"),
+                reports: Vec::new(),
+            }
+        }
         ("sidetone", "off") => SetCommand {
             feature: "sidetone",
             value: "off".into(),
@@ -927,42 +1191,136 @@ fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetComman
     Ok(command)
 }
 
+fn partial_lighting_error(device_error: &str, cache_error: Option<&str>) -> String {
+    match cache_error {
+        Some(cache_error) => format!(
+            "aplicação parcial do perfil de iluminação; não foi possível marcar o cache como desconhecido ({cache_error}). Reaplique o perfil. Erro do dispositivo: {device_error}"
+        ),
+        None => format!(
+            "aplicação parcial do perfil de iluminação; o estado da zona afetada é desconhecido. Reaplique o perfil. Erro do dispositivo: {device_error}"
+        ),
+    }
+}
+
 fn set_control(command: SetCommand) -> Result<bool, String> {
     let Some(node) = quantum_hidraw_node()? else {
         return Ok(false);
     };
-    let mut resolved_zone_colors = None;
-    let reports = if matches!(command.feature, "logo-color" | "ring-color") {
-        let cached = state::load().unwrap_or_default();
-        let legacy = cached.lighting_color.as_deref();
-        let logo = if command.feature == "logo-color" {
-            command.value.as_str()
-        } else {
-            cached.logo_color.as_deref().or(legacy).ok_or(
-                "logo color is unknown; apply a synchronized color before separating zones",
-            )?
+    let is_profile_control = matches!(
+        command.feature,
+        "color"
+            | "logo-color"
+            | "ring-color"
+            | "effect"
+            | "logo-effect"
+            | "ring-effect"
+            | "speed"
+            | "logo-speed"
+            | "ring-speed"
+    ) || segment_feature(command.feature).is_some();
+    let mut resolved_profile = None;
+    let reports = if is_profile_control {
+        let cached = match state::load() {
+            Ok(state) => state,
+            Err(state::LoadError::Missing) => state::RuntimeState::default(),
+            Err(error) => return Err(error.to_string()),
         };
-        let ring = if command.feature == "ring-color" {
-            command.value.as_str()
+        let (mut logo, mut ring) = if command.feature == "color" {
+            let initial = LightingZone {
+                colors: vec![command.value.clone(); 5],
+                effect: "solid".into(),
+                speed: "0.5".into(),
+            };
+            (initial.clone(), initial)
         } else {
-            cached.ring_color.as_deref().or(legacy).ok_or(
-                "ring color is unknown; apply a synchronized color before separating zones",
-            )?
+            let legacy = cached.lighting_color.clone();
+            (
+                cached_zone(
+                    cached.logo_colors,
+                    cached.logo_color.or_else(|| legacy.clone()),
+                    cached.logo_effect,
+                    cached.logo_speed,
+                    "logo",
+                )?,
+                cached_zone(
+                    cached.ring_colors,
+                    cached.ring_color.or(legacy),
+                    cached.ring_effect,
+                    cached.ring_speed,
+                    "ring",
+                )?,
+            )
         };
-        let reports = solid_color_profile(
-            color_rgb(logo).ok_or("cached logo color is unsupported")?,
-            color_rgb(ring).ok_or("cached ring color is unsupported")?,
-        );
-        resolved_zone_colors = Some((logo.to_owned(), ring.to_owned()));
+
+        match command.feature {
+            "color" => {
+                logo.colors.fill(command.value.clone());
+                ring.colors.fill(command.value.clone());
+            }
+            "logo-color" => logo.colors.fill(command.value.clone()),
+            "ring-color" => ring.colors.fill(command.value.clone()),
+            "effect" => {
+                logo.effect.clone_from(&command.value);
+                ring.effect.clone_from(&command.value);
+            }
+            "logo-effect" => logo.effect.clone_from(&command.value),
+            "ring-effect" => ring.effect.clone_from(&command.value),
+            "speed" => {
+                logo.speed.clone_from(&command.value);
+                ring.speed.clone_from(&command.value);
+            }
+            "logo-speed" => logo.speed.clone_from(&command.value),
+            "ring-speed" => ring.speed.clone_from(&command.value),
+            feature => {
+                let (_, segment) = segment_feature(feature).ok_or("invalid segment control")?;
+                if feature.starts_with("logo-") {
+                    logo.colors[segment] = command.value.clone();
+                } else if feature.starts_with("ring-") {
+                    ring.colors[segment] = command.value.clone();
+                } else {
+                    logo.colors[segment] = command.value.clone();
+                    ring.colors[segment] = command.value.clone();
+                }
+            }
+        }
+        let reports = lighting_reports(&logo, &ring)?;
+        resolved_profile = Some((logo, ring));
         reports
     } else {
         command.reports.clone()
     };
-    for report in &reports {
-        set_feature_report_allowlisted(&node, report)?;
+    for (failed_report_index, report) in reports.iter().enumerate() {
+        if let Err(error) = set_feature_report_allowlisted(&node, report) {
+            if let Some((logo, ring)) = resolved_profile.as_ref() {
+                let cache_update =
+                    state::lighting_profile_cache_update(reports.len(), Some(failed_report_index));
+                if cache_update == state::LightingProfileCacheUpdate::Keep {
+                    return Err(error);
+                }
+                state::update_partial_lighting_profile(
+                    cache_update,
+                    &logo.colors,
+                    &ring.colors,
+                    &logo.effect,
+                    &ring.effect,
+                    &logo.speed,
+                    &ring.speed,
+                )
+                .map_err(|cache_error| partial_lighting_error(&error, Some(&cache_error)))?;
+                return Err(partial_lighting_error(&error, None));
+            }
+            return Err(error);
+        }
     }
-    if let Some((logo, ring)) = resolved_zone_colors {
-        state::update_lighting_colors(&logo, &ring)?;
+    if let Some((logo, ring)) = resolved_profile {
+        state::update_lighting_profile(
+            &logo.colors,
+            &ring.colors,
+            &logo.effect,
+            &ring.effect,
+            &logo.speed,
+            &ring.speed,
+        )?;
     } else {
         state::update_control(command.feature, &command.value)?;
     }
@@ -998,6 +1356,59 @@ fn print_status_json(output: &StatusOutput) -> Result<(), String> {
     Ok(())
 }
 
+fn status_output_from_cached_state(cached: state::RuntimeState) -> StatusOutput {
+    StatusOutput {
+        schema: 1,
+        device: "0ecb:2069",
+        hidraw: "runtime-cache".into(),
+        interface_number: None,
+        access: "runtime-cache-read-only",
+        dry_run: false,
+        battery_percent: cached.battery_percent,
+        charging: cached.charging,
+        raw_feature: None,
+        headset_connected: cached.headset_connected,
+        ambient_mode: cached.ambient_mode,
+        microphone: cached.microphone,
+        lighting_enabled: cached.lighting_enabled,
+        lighting_color: cached.lighting_color,
+        logo_color: cached.logo_color,
+        ring_color: cached.ring_color,
+        logo_colors: cached.logo_colors,
+        ring_colors: cached.ring_colors,
+        logo_effect: cached.logo_effect,
+        ring_effect: cached.ring_effect,
+        logo_speed: cached.logo_speed,
+        ring_speed: cached.ring_speed,
+        game_chat_value: cached.game_chat_value,
+        bluetooth: cached.bluetooth,
+        sidetone_level: cached.sidetone_level,
+    }
+}
+
+fn cached_status_json() -> Result<(), String> {
+    let cached = state::load().map_err(|error| match error {
+        state::LoadError::Missing => {
+            "runtime state is unavailable; start jambalinux-soniccore.service or use status for a direct read".to_owned()
+        }
+        error => error.to_string(),
+    })?;
+    print_status_json(&status_output_from_cached_state(cached))
+}
+
+fn cached_status(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match (args.next().as_deref(), args.next()) {
+        (Some("--format"), Some(format)) if format == "json" => {
+            if args.next().is_some() {
+                return Err("cached-status --format accepts only `json`".into());
+            }
+            cached_status_json()?;
+            Ok(true)
+        }
+        _ => Err("usage: soniccore cached-status --format json".into()),
+    }
+}
+
 fn query_battery(node: &Path) -> Result<(u8, String), String> {
     let report =
         read_feature_report_read_only(node, BATTERY_FEATURE_REPORT_ID, BATTERY_FEATURE_REPORT_LEN)?;
@@ -1022,9 +1433,13 @@ fn status(options: StatusOptions) -> Result<bool, String> {
     let Some(node) = quantum_hidraw_node()? else {
         return Ok(false);
     };
+    let interface = hidraw_interface_number(&node);
     if !options.json {
         println!("matched JBL Quantum 810 HID node: {}", node.display());
+        print_hidraw_interface_number(&interface);
         println!("access mode: read-only HID GET_FEATURE (no SET_FEATURE/output reports)");
+    } else if let Some(warning) = &interface.warning {
+        eprintln!("warning: {warning}");
     }
     if options.dry_run {
         let metadata =
@@ -1037,6 +1452,7 @@ fn status(options: StatusOptions) -> Result<bool, String> {
                 schema: 1,
                 device: "0ecb:2069",
                 hidraw: node.display().to_string(),
+                interface_number: interface.number,
                 access: "hid-get-feature-read-only",
                 dry_run: true,
                 battery_percent: None,
@@ -1049,6 +1465,12 @@ fn status(options: StatusOptions) -> Result<bool, String> {
                 lighting_color: None,
                 logo_color: None,
                 ring_color: None,
+                logo_colors: None,
+                ring_colors: None,
+                logo_effect: None,
+                ring_effect: None,
+                logo_speed: None,
+                ring_speed: None,
                 game_chat_value: None,
                 bluetooth: None,
                 sidetone_level: None,
@@ -1061,7 +1483,11 @@ fn status(options: StatusOptions) -> Result<bool, String> {
         return Ok(true);
     }
     let (battery, raw_feature) = query_battery(&node)?;
-    let cached = state::load().unwrap_or_default();
+    let cached = match state::load() {
+        Ok(state) => state,
+        Err(state::LoadError::Missing) => state::RuntimeState::default(),
+        Err(error) => return Err(error.to_string()),
+    };
     let charging = match cached.charging {
         Some(charging) => charging,
         None => charging_usb_connected().map_err(|error| error.to_string())?,
@@ -1071,6 +1497,7 @@ fn status(options: StatusOptions) -> Result<bool, String> {
             schema: 1,
             device: "0ecb:2069",
             hidraw: node.display().to_string(),
+            interface_number: interface.number,
             access: "hid-get-feature-read-only",
             dry_run: false,
             battery_percent: Some(battery),
@@ -1083,6 +1510,12 @@ fn status(options: StatusOptions) -> Result<bool, String> {
             lighting_color: cached.lighting_color,
             logo_color: cached.logo_color,
             ring_color: cached.ring_color,
+            logo_colors: cached.logo_colors,
+            ring_colors: cached.ring_colors,
+            logo_effect: cached.logo_effect,
+            ring_effect: cached.ring_effect,
+            logo_speed: cached.logo_speed,
+            ring_speed: cached.ring_speed,
             game_chat_value: cached.game_chat_value,
             bluetooth: cached.bluetooth,
             sidetone_level: cached.sidetone_level,
@@ -1109,7 +1542,7 @@ fn notify(dry_run: bool) -> Result<bool, String> {
     let urgency = if battery <= 20 { "critical" } else { "normal" };
     let process = Command::new("notify-send")
         .args([
-            "--app-name=JanBaLinux SonicCore",
+            "--app-name=JamBaLinux SonicCore",
             "--icon=audio-headphones",
             &format!("--urgency={urgency}"),
             "JBL Quantum 810",
@@ -1138,7 +1571,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
     let process = Command::new("kdialog")
         .args([
             "--title",
-            "JanBaLinux SonicCore",
+            "JamBaLinux SonicCore",
             "--msgbox",
             &format!("JBL Quantum 810 Wireless\nBateria: {battery}%"),
         ])
@@ -1151,11 +1584,644 @@ fn show(dry_run: bool) -> Result<bool, String> {
 }
 
 fn usage() {
-    eprintln!("JanBaLinux SonicCore — gaming headset control for Linux");
+    eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|probe-status|set <ambient|lighting|color|logo-color|ring-color|sidetone> <value>|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
-    eprintln!("set permits only confirmed two-byte Feature Reports from the built-in allowlist");
+    eprintln!(
+        "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
+    );
+    eprintln!(
+        "set permits only confirmed controls and complete lighting profiles from the built-in allowlist"
+    );
+}
+
+fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(profile).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("Host-side equalizer profile (dB):");
+        for band in &profile.bands {
+            let frequency = if band.frequency_hz >= 1_000 {
+                format!("{} kHz", band.frequency_hz / 1_000)
+            } else {
+                format!("{} Hz", band.frequency_hz)
+            };
+            println!("  {frequency:>6}: {:+.1}", band.gain_db);
+        }
+        let selection = profile
+            .active_profile_id
+            .as_deref()
+            .and_then(|id| {
+                equalizer::PRESETS
+                    .iter()
+                    .find(|preset| preset.id == id)
+                    .map(|preset| preset.name.to_owned())
+                    .or_else(|| {
+                        profile
+                            .custom_profiles
+                            .iter()
+                            .find(|custom| custom.id == id)
+                            .map(|custom| custom.name.clone())
+                    })
+            })
+            .unwrap_or_else(|| "Manual (not saved as a profile)".to_owned());
+        println!("Selected: {selection}");
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct EqualizerStatusOutput {
+    schema: u8,
+    bands: Vec<equalizer::Band>,
+    active_profile_id: Option<String>,
+    custom_profiles: Vec<equalizer::CustomEqualizerProfile>,
+    preset: Option<&'static str>,
+    pipewire: pipewire::Status,
+}
+
+fn print_equalizer_status(json: bool) -> Result<(), String> {
+    let profile = equalizer::load()?;
+    let pipewire = pipewire::status(&profile)?;
+    let preset = equalizer::matching_preset(&profile).map(|preset| preset.id);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&EqualizerStatusOutput {
+                schema: profile.schema,
+                bands: profile.bands,
+                active_profile_id: profile.active_profile_id,
+                custom_profiles: profile.custom_profiles,
+                preset,
+                pipewire,
+            })
+            .map_err(|error| error.to_string())?
+        );
+    } else {
+        print_equalizer(&profile, false)?;
+        println!(
+            "PipeWire: {}{}",
+            if pipewire.active {
+                "active"
+            } else {
+                "inactive"
+            },
+            pipewire
+                .target_node_name
+                .as_deref()
+                .map(|target| format!(" (Game target: {target})"))
+                .unwrap_or_default()
+        );
+        println!(
+            "Routing: proven Game streams are routed automatically to {}",
+            pipewire.virtual_sink_name
+        );
+        if let Some(error) = pipewire.error.as_deref() {
+            println!("Action required: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn commit_equalizer_profile(
+    previous: &equalizer::EqualizerProfile,
+    requested: &equalizer::EqualizerProfile,
+) -> Result<(), String> {
+    pipewire::apply_profile(requested, previous)?;
+    if let Err(error) = equalizer::save(requested) {
+        let rollback = pipewire::apply_profile(previous, requested)
+            .map(|_| "live DSP rolled back".to_owned())
+            .unwrap_or_else(|rollback| format!("DSP rollback also failed: {rollback}"));
+        return Err(format!(
+            "could not persist the equalizer profile ({error}); {rollback}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct EqualizerMutationOutput<'a> {
+    schema: u8,
+    applied_bands: &'a [equalizer::Band],
+    active_profile_id: Option<&'a str>,
+    error: Option<String>,
+}
+
+fn execute_equalizer_mutation(
+    format_json: bool,
+    previous: &equalizer::EqualizerProfile,
+    requested: &equalizer::EqualizerProfile,
+) -> Result<bool, String> {
+    match commit_equalizer_profile(previous, requested) {
+        Ok(()) => {
+            if format_json {
+                let output = EqualizerMutationOutput {
+                    schema: requested.schema,
+                    applied_bands: &requested.bands,
+                    active_profile_id: requested.active_profile_id.as_deref(),
+                    error: None,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output).unwrap_or_default()
+                );
+            } else {
+                print_equalizer(requested, false)?;
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            if format_json {
+                let output = EqualizerMutationOutput {
+                    schema: previous.schema,
+                    applied_bands: &previous.bands,
+                    active_profile_id: previous.active_profile_id.as_deref(),
+                    error: Some(error),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output).unwrap_or_default()
+                );
+                Ok(true)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn parse_mutation_args(args: impl Iterator<Item = String>) -> Result<(bool, Vec<String>), String> {
+    let mut format_json = false;
+    let mut values = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--format" {
+            if iter.next().as_deref() == Some("json") {
+                format_json = true;
+            } else {
+                return Err("--format requires exactly `json`".into());
+            }
+        } else {
+            values.push(arg);
+        }
+    }
+    Ok((format_json, values))
+}
+
+#[derive(Serialize)]
+struct EqualizerCustomProfileListOutput<'a> {
+    schema: u8,
+    active_profile_id: Option<&'a str>,
+    custom_profiles: &'a [equalizer::CustomEqualizerProfile],
+}
+
+fn print_equalizer_custom_profiles(
+    profile: &equalizer::EqualizerProfile,
+    json: bool,
+) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&EqualizerCustomProfileListOutput {
+                schema: profile.schema,
+                active_profile_id: profile.active_profile_id.as_deref(),
+                custom_profiles: &profile.custom_profiles,
+            })
+            .map_err(|error| error.to_string())?
+        );
+    } else if profile.custom_profiles.is_empty() {
+        println!("No custom equalizer profiles.");
+    } else {
+        println!("Custom equalizer profiles:");
+        for custom in &profile.custom_profiles {
+            let selected = if profile.active_profile_id.as_deref() == Some(&custom.id) {
+                " (selected)"
+            } else {
+                ""
+            };
+            println!("  {}: {}{selected}", custom.id, custom.name);
+        }
+    }
+    Ok(())
+}
+
+/// Handles only user-owned profile-library operations. Factory presets remain
+/// available exclusively through `equalizer preset <id>`.
+fn equalizer_profile(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        Some("list") => match args.next().as_deref() {
+            None => {
+                print_equalizer_custom_profiles(&equalizer::load()?, false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_equalizer_custom_profiles(&equalizer::load()?, true)?;
+                Ok(true)
+            }
+            _ => Err("equalizer profile list accepts only --format json".into()),
+        },
+        Some("create") => {
+            let name = args
+                .next()
+                .ok_or("equalizer profile create requires a profile name")?;
+            if args.next().is_some() {
+                return Err("equalizer profile create accepts exactly one profile name".into());
+            }
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let requested = equalizer::create_custom_profile(&previous, &name)?;
+            commit_equalizer_profile(&previous, &requested)?;
+            let created = requested
+                .custom_profiles
+                .iter()
+                .find(|custom| requested.active_profile_id.as_deref() == Some(&custom.id))
+                .expect("newly created custom profile is selected");
+            println!(
+                "Created custom equalizer profile `{}` ({})",
+                created.name, created.id
+            );
+            Ok(true)
+        }
+        Some("apply") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if values.len() != 1 {
+                return Err("equalizer profile apply accepts exactly one custom profile id".into());
+            }
+            let id = &values[0];
+            if equalizer::is_factory_profile_id(id) {
+                return Err(
+                    "factory equalizer presets must be selected with `equalizer preset <id>`"
+                        .into(),
+                );
+            }
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let requested = equalizer::select_profile(&previous, id)?;
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        Some("update") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile update requires a custom profile id")?;
+            if args.next().is_some() {
+                return Err(
+                    "equalizer profile update accepts exactly one custom profile id".into(),
+                );
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err("factory equalizer presets are immutable".into());
+            }
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            // Capture the currently active ten bands. The live transaction is
+            // deliberately retained even when the bands do not change, so the
+            // DSP readback succeeds before the library mutation is persisted.
+            let requested =
+                equalizer::update_custom_profile(&previous, &id, previous.bands.clone())?;
+            commit_equalizer_profile(&previous, &requested)?;
+            println!("Updated custom equalizer profile `{id}` from the active bands");
+            Ok(true)
+        }
+        Some("rename") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile rename requires a custom profile id")?;
+            let name = args
+                .next()
+                .ok_or("equalizer profile rename requires a profile name")?;
+            if args.next().is_some() {
+                return Err("equalizer profile rename accepts exactly one id and one name".into());
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err("factory equalizer presets are immutable".into());
+            }
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let requested = equalizer::rename_custom_profile(&previous, &id, &name)?;
+            equalizer::save(&requested)?;
+            println!("Renamed custom equalizer profile `{id}` to `{name}`");
+            Ok(true)
+        }
+        Some("delete") => {
+            let id = args
+                .next()
+                .ok_or("equalizer profile delete requires a custom profile id")?;
+            if args.next().is_some() {
+                return Err(
+                    "equalizer profile delete accepts exactly one custom profile id".into(),
+                );
+            }
+            if equalizer::is_factory_profile_id(&id) {
+                return Err("factory equalizer presets are immutable".into());
+            }
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let deleted_was_active = previous.active_profile_id.as_deref() == Some(&id);
+            let deleted = equalizer::delete_custom_profile(&previous, &id)?;
+            if deleted_was_active {
+                // Removing the selected profile must not leave an ambiguous
+                // manual selection. Flat is an immutable, deterministic safe
+                // fallback and is applied before the deletion is saved.
+                let requested = equalizer::select_profile(&deleted, "flat")?;
+                commit_equalizer_profile(&previous, &requested)?;
+            } else {
+                equalizer::save(&deleted)?;
+            }
+            println!("Deleted custom equalizer profile `{id}`");
+            Ok(true)
+        }
+        _ => Err("unknown equalizer profile command".into()),
+    }
+}
+
+fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        None => {
+            let profile = equalizer::load()?;
+            print_equalizer(&profile, false)?;
+            Ok(true)
+        }
+        Some("--format") => match args.next().as_deref() {
+            Some("json") if args.next().is_none() => {
+                let profile = equalizer::load()?;
+                print_equalizer(&profile, true)?;
+                Ok(true)
+            }
+            _ => Err("equalizer --format requires exactly `json`".into()),
+        },
+        Some("status") => match args.next().as_deref() {
+            None => {
+                print_equalizer_status(false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_equalizer_status(true)?;
+                Ok(true)
+            }
+            _ => Err("equalizer status accepts only --format json".into()),
+        },
+        Some("enable") if args.next().is_none() => {
+            let profile = equalizer::load()?;
+            let status = pipewire::enable(&profile)?;
+            println!(
+                "automatic PipeWire Game equalizer active at {}",
+                status.virtual_sink_name
+            );
+            Ok(true)
+        }
+        Some("enable") => Err("equalizer enable accepts no value".into()),
+        Some("disable") if args.next().is_none() => {
+            pipewire::disable()?;
+            println!("PipeWire Game equalizer disabled");
+            Ok(true)
+        }
+        Some("disable") => Err("equalizer disable accepts no value".into()),
+        Some("prepare") if args.next().is_none() => {
+            pipewire::prepare(&equalizer::load()?)?;
+            Ok(true)
+        }
+        Some("prepare") => Err("equalizer prepare accepts no value".into()),
+        Some("run") if args.next().is_none() => {
+            pipewire::run(&equalizer::load()?)?;
+            Ok(true)
+        }
+        Some("run") => Err("equalizer run accepts no value".into()),
+        Some("restore") if args.next().is_none() => {
+            pipewire::restore_routes()?;
+            Ok(true)
+        }
+        Some("restore") => Err("equalizer restore accepts no value".into()),
+        Some("set") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if values.len() != 2 {
+                return Err(
+                    "equalizer set requires exactly a frequency in Hz and a gain in dB".into(),
+                );
+            }
+            let frequency_hz = values[0]
+                .parse::<u32>()
+                .map_err(|_| "equalizer frequency must be an integer in Hz")?;
+            let gain_db = values[1]
+                .parse::<f32>()
+                .map_err(|_| "equalizer gain must be a number in dB")?;
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let requested = equalizer::updated_profile(&previous, frequency_hz, gain_db)?;
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        Some("preset") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if values.len() != 1 {
+                return Err("equalizer preset accepts exactly one preset id".into());
+            }
+            let id = &values[0];
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            // Selecting a factory preset updates only the active bands; the
+            // persistent custom-profile library remains user-owned data.
+            let requested = if previous.custom_profiles.is_empty() {
+                equalizer::preset_profile(id)?
+            } else {
+                equalizer::select_profile(&previous, id)?
+            };
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        Some("profile") => equalizer_profile(args),
+        Some("reset") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            if !values.is_empty() {
+                return Err("equalizer reset accepts no value".into());
+            }
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let requested = if previous.custom_profiles.is_empty() {
+                equalizer::reset_profile()
+            } else {
+                equalizer::select_profile(&previous, "flat")?
+            };
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        _ => Err("unknown equalizer command".into()),
+    }
+}
+
+fn print_spatial(profile: &spatial::SpatialProfile, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(profile).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("Experimental spatial/binaural audio:");
+        println!("  enabled: {}", profile.enabled);
+        println!("  mode: {}", profile.mode.as_str());
+    }
+    Ok(())
+}
+
+fn print_spatial_preflight(json: bool) -> Result<(), String> {
+    let capability = spatial::preflight()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&capability).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "pipewire binary present: {}",
+            capability.pipewire_binary_present
+        );
+        println!(
+            "filter-chain module present: {}",
+            capability.filter_chain_module_present
+        );
+        println!(
+            "open HRTF/binaural dataset present: {}",
+            capability.hrtf_dataset_present
+        );
+        println!("ready: {}", capability.ready);
+        if let Some(error) = capability.error.as_deref() {
+            println!("Action required: {error}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SpatialStatusOutput {
+    schema: u8,
+    mode: spatial::SpatialMode,
+    experimental: bool,
+    #[serde(flatten)]
+    health: pipewire::SpatialStatus,
+    capability: spatial::CapabilityReport,
+}
+
+fn print_spatial_status(json: bool) -> Result<(), String> {
+    let profile = spatial::load()?;
+    let capability = spatial::preflight()?;
+    let health = pipewire::spatial_status(&profile, &capability);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&SpatialStatusOutput {
+                schema: profile.schema,
+                mode: profile.mode,
+                experimental: true,
+                health: health.clone(),
+                capability,
+            })
+            .map_err(|error| error.to_string())?
+        );
+    } else {
+        print_spatial(&profile, false)?;
+        println!("configured: {}", health.configured);
+        println!("active: {}", health.active);
+        println!("service active: {}", health.service_active);
+        println!("dataset valid: {}", health.dataset_valid);
+        println!(
+            "target equalizer connected: {}",
+            health.target_equalizer_connected
+        );
+        println!("routing healthy: {}", health.routing_healthy);
+        if let Some(error) = health.error.as_deref() {
+            println!("Action required: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// The persisted gate is authoritative. PipeWire may be restarting exactly
+/// when a user disables spatial, so the immediate live update is deliberately
+/// best-effort and the persistent supervisor reconciles it shortly after.
+fn apply_spatial_mix_best_effort(enabled: bool) {
+    if let Err(error) = spatial_pipewire::set_mix_if_graph_exists() {
+        let action = if enabled { "enable" } else { "disable" };
+        eprintln!("spatial {action}: live mix update deferred to the supervisor: {error}");
+    }
+}
+
+fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        None => {
+            print_spatial(&spatial::load()?, false)?;
+            Ok(true)
+        }
+        Some("--format") => match args.next().as_deref() {
+            Some("json") if args.next().is_none() => {
+                print_spatial(&spatial::load()?, true)?;
+                Ok(true)
+            }
+            _ => Err("spatial --format requires exactly `json`".into()),
+        },
+        Some("status") => match args.next().as_deref() {
+            None => {
+                print_spatial_status(false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_spatial_status(true)?;
+                Ok(true)
+            }
+            _ => Err("spatial status accepts only --format json".into()),
+        },
+        Some("preflight") => match args.next().as_deref() {
+            None => {
+                print_spatial_preflight(false)?;
+                Ok(true)
+            }
+            Some("--format") if args.next().as_deref() == Some("json") && args.next().is_none() => {
+                print_spatial_preflight(true)?;
+                Ok(true)
+            }
+            _ => Err("spatial preflight accepts only --format json".into()),
+        },
+        Some("mode") => {
+            let value = args.next().ok_or("spatial mode requires a value")?;
+            if args.next().is_some() {
+                return Err("spatial mode accepts only one value".into());
+            }
+            let mode = spatial::SpatialMode::parse(&value)?;
+            let profile = spatial::set_mode(mode)?;
+            print_spatial(&profile, false)?;
+            Ok(true)
+        }
+        Some("enable") if args.next().is_none() => {
+            let profile = spatial::set_enabled(true)?;
+            apply_spatial_mix_best_effort(true);
+            println!(
+                "spatial binaural mix enabled (mode: {}); the persistent supervisor keeps the \
+                 graph while the mode, equalizer target, and preflight remain valid",
+                profile.mode.as_str()
+            );
+            Ok(true)
+        }
+        Some("enable") => Err("spatial enable accepts no value".into()),
+        Some("disable") if args.next().is_none() => {
+            spatial::set_enabled(false)?;
+            // Disabling is the recovery path. The saved gate must succeed even
+            // if PipeWire is temporarily unavailable; the supervisor retries.
+            apply_spatial_mix_best_effort(false);
+            println!("spatial mix disabled; the ready binaural graph remains in bypass");
+            Ok(true)
+        }
+        Some("disable") => Err("spatial disable accepts no value".into()),
+        Some("run") if args.next().is_none() => {
+            spatial_pipewire::run()?;
+            Ok(true)
+        }
+        Some("run") => Err("spatial run accepts no value".into()),
+        Some("restore") if args.next().is_none() => {
+            spatial_pipewire::restore_streams()?;
+            Ok(true)
+        }
+        Some("restore") => Err("spatial restore accepts no value".into()),
+        _ => Err("unknown spatial command".into()),
+    }
 }
 
 fn main() {
@@ -1168,8 +2234,11 @@ fn main() {
         "monitor" => monitor(args.next().as_deref() == Some("--dry-run")),
         "daemon" => daemon(),
         "status" => parse_status_options(args).and_then(status),
+        "cached-status" => cached_status(args),
         "probe-status" => probe_status(),
         "set" => parse_set_command(args).and_then(set_control),
+        "equalizer" | "eq" => equalizer(args),
+        "spatial" => spatial(args),
         "notify" => notify(args.next().as_deref() == Some("--dry-run")),
         "show" => show(args.next().as_deref() == Some("--dry-run")),
         "export"
@@ -1203,6 +2272,80 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn spatial_disable_mix_failure_is_best_effort() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        runner.push_error("pw-dump did not finish within 5000 ms and was killed");
+        let _guard = crate::command::set_runner(runner.clone());
+
+        apply_spatial_mix_best_effort(false);
+
+        assert_eq!(runner.command_lines(), vec!["pw-dump"]);
+    }
+
+    #[test]
+    fn spatial_status_json_exposes_healthy_bypass_processing_mode() {
+        let output = SpatialStatusOutput {
+            schema: spatial::SCHEMA,
+            mode: spatial::SpatialMode::BinauralStereo,
+            experimental: true,
+            health: pipewire::SpatialStatus {
+                configured: true,
+                enabled: false,
+                active: true,
+                processing_mode: "bypass",
+                service_active: true,
+                dataset_valid: true,
+                target_equalizer_connected: true,
+                default_safe: true,
+                chat_isolated: true,
+                capture_isolated: true,
+                routing_healthy: true,
+                graph_observable: true,
+                input_format_7_1: true,
+                output_format_stereo: true,
+                input_node_id: Some(400),
+                input_object_serial: Some(400),
+                output_node_id: Some(401),
+                output_object_serial: Some(401),
+                target_equalizer_node_id: Some(100),
+                target_equalizer_object_serial: Some(100),
+                target_equalizer_node_name: crate::spatial::graph::TARGET_EQUALIZER_SINK,
+                error: None,
+            },
+            capability: spatial::CapabilityReport {
+                schema: spatial::SCHEMA,
+                pipewire_binary_present: true,
+                filter_chain_module_present: true,
+                hrtf_dataset_present: true,
+                dataset: spatial::DatasetReport {
+                    schema: spatial::DATASET_SCHEMA,
+                    manifest_path: Some("/fixture/manifest.json".into()),
+                    hrir_path: Some("/fixture/hrir.wav".into()),
+                    format: Some(spatial::SUPPORTED_DATASET_FORMAT.into()),
+                    name: Some("fixture".into()),
+                    license: Some("test-only".into()),
+                    source_url: Some("https://example.invalid/hrir".into()),
+                    expected_sha256: Some("0".repeat(64)),
+                    observed_sha256: Some("0".repeat(64)),
+                    channels: Some(spatial::REQUIRED_HRIR_CHANNELS),
+                    sample_rate: Some(48_000),
+                    legal_review_required: true,
+                    valid: true,
+                    error: None,
+                },
+                ready: true,
+                error: None,
+            },
+        };
+
+        let json = serde_json::to_value(output).expect("serialize spatial status");
+        assert_eq!(json["active"], true);
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["processing_mode"], "bypass");
+    }
 
     #[test]
     fn parses_interface_and_endpoint() {
@@ -1223,6 +2366,45 @@ mod tests {
                 }],
             }]
         );
+    }
+
+    #[test]
+    fn reports_hidraw_interface_number_from_temp_sysfs() {
+        let root = env::temp_dir().join(format!(
+            "jambalinux-soniccore-interface-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temporary sysfs directory");
+
+        fs::write(root.join("bInterfaceNumber"), "05\n").expect("write interface number");
+        assert_eq!(
+            interface_number_from_sysfs(&root),
+            HidrawInterfaceNumber {
+                number: Some(5),
+                warning: None,
+            }
+        );
+
+        fs::write(root.join("bInterfaceNumber"), "04\n").expect("write mismatched interface");
+        let mismatched = interface_number_from_sysfs(&root);
+        assert_eq!(mismatched.number, Some(4));
+        assert!(mismatched.warning.is_some());
+
+        fs::remove_file(root.join("bInterfaceNumber")).expect("remove interface number");
+        let missing = interface_number_from_sysfs(&root);
+        assert_eq!(missing.number, None);
+        assert!(missing.warning.is_some());
+
+        fs::write(root.join("bInterfaceNumber"), "not-hex\n").expect("write malformed interface");
+        let malformed = interface_number_from_sysfs(&root);
+        assert_eq!(malformed.number, None);
+        assert!(malformed.warning.is_some());
+
+        fs::remove_dir_all(root).expect("remove temporary sysfs directory");
     }
 
     #[test]
@@ -1289,9 +2471,45 @@ mod tests {
         assert!(parse(&["color", "112233"]).is_err());
         assert!(parse(&["color", "#11223g"]).is_err());
         assert!(parse(&["color", "#11223344"]).is_err());
+        assert_eq!(parse(&["effect", "wave"]).unwrap().feature, "effect");
+        assert_eq!(parse(&["logo-speed", "1.5"]).unwrap().value, "1.5");
+        assert_eq!(
+            parse(&["ring-segment-4", "#abcdef"]).unwrap().feature,
+            "ring-segment-4"
+        );
+        assert!(parse(&["effect", "rainbow"]).is_err());
+        assert!(parse(&["speed", "3.0"]).is_err());
+        assert!(parse(&["logo-segment-5", "#abcdef"]).is_err());
         assert!(parse(&["raw", "46ff"]).is_err());
         assert!(parse(&["ambient", "invalid"]).is_err());
         assert!(parse(&["ambient", "anc", "extra"]).is_err());
+    }
+
+    #[test]
+    fn builds_complete_animated_lighting_profile() {
+        let zone = LightingZone {
+            colors: vec![
+                "#112233".into(),
+                "#223344".into(),
+                "#334455".into(),
+                "#445566".into(),
+                "#556677".into(),
+            ],
+            effect: "wave".into(),
+            speed: "1.5".into(),
+        };
+        let reports = lighting_reports(&zone, &zone).unwrap();
+        assert_eq!(reports.len(), 13);
+        assert_eq!(reports[0], vec![0x4c, 0x00, 0x32, 0x05]);
+        assert_eq!(
+            reports[1],
+            vec![0x4d, 0x00, 0x00, 0x11, 0x22, 0x33, 0x02, 0x00]
+        );
+        assert_eq!(
+            reports[5],
+            vec![0x4d, 0x00, 0x04, 0x55, 0x66, 0x77, 0x02, 0x08]
+        );
+        assert_eq!(reports[12], vec![0x4b, 0x01]);
     }
 
     #[test]
@@ -1312,11 +2530,32 @@ mod tests {
     }
 
     #[test]
+    fn cached_status_requires_json_format() {
+        assert!(cached_status(std::iter::empty()).is_err());
+        assert!(cached_status(["--format", "text"].into_iter().map(String::from)).is_err());
+        assert!(
+            cached_status(["--format", "json", "extra"].into_iter().map(String::from)).is_err()
+        );
+    }
+
+    #[test]
+    fn partial_lighting_error_explains_recovery() {
+        let error = partial_lighting_error("write failed", None);
+        assert!(error.contains("parcial"));
+        assert!(error.contains("Reaplique"));
+
+        let cache_error = partial_lighting_error("write failed", Some("state unavailable"));
+        assert!(cache_error.contains("parcial"));
+        assert!(cache_error.contains("Reaplique"));
+    }
+
+    #[test]
     fn serializes_versioned_status_json() {
-        let output = StatusOutput {
+        let mut output = StatusOutput {
             schema: 1,
             device: "0ecb:2069",
             hidraw: "/dev/hidraw7".into(),
+            interface_number: Some(5),
             access: "hid-get-feature-read-only",
             dry_run: false,
             battery_percent: Some(60),
@@ -1329,14 +2568,111 @@ mod tests {
             lighting_color: Some("cyan".into()),
             logo_color: Some("cyan".into()),
             ring_color: Some("cyan".into()),
+            logo_colors: Some(vec!["#33ffcc".into(); 5]),
+            ring_colors: Some(vec!["#33ffcc".into(); 5]),
+            logo_effect: Some("solid".into()),
+            ring_effect: Some("solid".into()),
+            logo_speed: Some("0.5".into()),
+            ring_speed: Some("0.5".into()),
             game_chat_value: Some(8),
             bluetooth: Some("connected".into()),
             sidetone_level: Some("low".into()),
         };
-        let json = serde_json::to_value(output).unwrap();
+        let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["schema"], 1);
         assert_eq!(json["battery_percent"], 60);
         assert_eq!(json["charging"], true);
         assert_eq!(json["raw_feature"], "49 3c");
+        assert_eq!(json["interface_number"], 5);
+
+        output.dry_run = true;
+        output.interface_number = None;
+        let dry_run_json = serde_json::to_value(output).unwrap();
+        assert_eq!(dry_run_json["interface_number"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn cached_status_serializes_unknown_lighting_zone_as_null() {
+        let cached = state::RuntimeState {
+            logo_colors: None,
+            logo_effect: None,
+            logo_speed: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(status_output_from_cached_state(cached)).unwrap();
+
+        assert!(json["logo_colors"].is_null());
+        assert!(json["logo_effect"].is_null());
+        assert!(json["logo_speed"].is_null());
+    }
+
+    #[test]
+    fn serializes_custom_profile_catalog_with_current_selection() {
+        let profile =
+            equalizer::create_custom_profile(&equalizer::EqualizerProfile::default(), "Cinema")
+                .unwrap();
+        let json = serde_json::to_value(EqualizerCustomProfileListOutput {
+            schema: profile.schema,
+            active_profile_id: profile.active_profile_id.as_deref(),
+            custom_profiles: &profile.custom_profiles,
+        })
+        .unwrap();
+
+        assert_eq!(json["schema"], equalizer::PROFILE_SCHEMA);
+        assert_eq!(json["active_profile_id"], profile.custom_profiles[0].id);
+        assert_eq!(json["custom_profiles"][0]["name"], "Cinema");
+        assert_eq!(
+            json["custom_profiles"][0]["bands"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+    }
+
+    #[test]
+    fn custom_profile_commands_reject_factory_ids_before_touching_pipewire() {
+        for command in [
+            vec!["apply", "flat"],
+            vec!["update", "flat"],
+            vec!["rename", "flat", "Changed"],
+            vec!["delete", "flat"],
+        ] {
+            let error = equalizer_profile(command.into_iter().map(String::from)).unwrap_err();
+            assert!(error.contains("factory equalizer presets"));
+        }
+    }
+
+    #[test]
+    fn parses_mutation_args_with_format_json() {
+        assert_eq!(
+            parse_mutation_args(
+                ["--format", "json", "62", "3.0"]
+                    .into_iter()
+                    .map(String::from)
+            ),
+            Ok((true, vec!["62".into(), "3.0".into()]))
+        );
+        assert_eq!(
+            parse_mutation_args(["31", "1.5"].into_iter().map(String::from)),
+            Ok((false, vec!["31".into(), "1.5".into()]))
+        );
+        assert!(parse_mutation_args(["--format", "xml"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn serializes_mutation_output_json() {
+        let profile = equalizer::EqualizerProfile::default();
+        let output = EqualizerMutationOutput {
+            schema: profile.schema,
+            applied_bands: &profile.bands,
+            active_profile_id: profile.active_profile_id.as_deref(),
+            error: Some("test error".into()),
+        };
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["schema"], equalizer::PROFILE_SCHEMA);
+        assert_eq!(json["active_profile_id"], "flat");
+        assert_eq!(json["applied_bands"].as_array().unwrap().len(), 10);
+        assert_eq!(json["error"], "test error");
     }
 }

@@ -7,7 +7,8 @@ Open-source gaming headset control and audio platform for Linux.
 JamBaLinux SonicCore began with safe device detection and now includes
 HID/USB integration, state monitoring, lighting, and strictly allowlisted
 headset controls. Its independent identity leaves room for additional devices
-and future Linux audio processing, including DSP/PipeWire integration.
+while keeping host-side PipeWire audio processing separate from device
+protocol controls.
 
 > JamBaLinux SonicCore is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Harman International or JBL. JBL, Quantum, and related product names are trademarks of their respective owners.
 
@@ -192,6 +193,44 @@ captures, documentation, and the system-wide udev rule:
 tools/uninstall-user.sh --confirm
 ```
 
+#### Game volume fix (user-level ACP overlay)
+
+On the JBL Quantum 810 Wireless, the upstream PipeWire profile-set
+(`usb-gaming-headset-gamefirst.conf`) wires the **Game** sink volume to the
+dongle's `PCM,1` control, which is the **Chat** hardware volume. The real Game
+hardware volume, `PCM,0`, is never driven and keeps its last stored value
+(observed at -23 dB), so the dongle sounds quiet and the extra gain ends up
+being pushed digitally until it clips.
+
+`tools/install-user.sh` therefore also installs a small user-level overlay
+(`tools/acp-overlay.sh --install`): a profile-set and three mixer paths under
+`~/.config/alsa-card-profile/mixer/`, plus a WirePlumber rule that selects that
+profile-set only for the Quantum 810 card. With it, Game drives `PCM,0` and
+Chat drives `PCM,1`; node, mapping, and profile names stay the same. Nothing is
+written under `/usr`, no `sudo` is used, and udev, HID, VID/PID, and allowlists
+are untouched.
+
+The overlay takes effect when WirePlumber recreates the card. Reconnect the
+dongle or run:
+
+```bash
+systemctl --user restart wireplumber
+```
+
+Check, install, or remove only the overlay with:
+
+```bash
+tools/acp-overlay.sh --check
+tools/acp-overlay.sh --install
+tools/acp-overlay.sh --uninstall
+```
+
+`tools/uninstall-user.sh --confirm` removes the overlay too. Files edited
+outside JamBaLinux are kept and reported instead of deleted. After removal and
+a WirePlumber restart, the upstream profile-set applies again. A draft report
+for upstream is in
+[`docs/bug-reports/quantum810-acp-game-volume.md`](docs/bug-reports/quantum810-acp-game-volume.md).
+
 For manual widget installation, use:
 
 ```bash
@@ -210,11 +249,115 @@ Then enter Plasma edit mode, choose **Add Widgets**, search for
 **JamBaLinux SonicCore**, and drag it to the panel. The widget invokes only
 allowlisted `soniccore` commands. Its popup includes expandable controls
 for ambient mode (off/ANC/TalkThru), global lighting (on/off), an HSV color
-picker applied together or independently to the complete Logo and Ring
-profiles, and hardware sidetone
-(off/low/medium/high). These controls send only confirmed Feature Reports
-documented under `docs/protocol/`; raw reports and malformed RGB values are
-rejected by the CLI parser.
+picker with five segments per zone, four effects, four animation speeds, and
+independent or synchronized Logo and Ring profiles, plus hardware sidetone
+(off/low/medium/high), and a 10-band host-side equalizer. The hardware controls
+send only confirmed Feature Reports documented under `docs/protocol/`; raw
+reports and malformed RGB values are rejected by the CLI parser. The equalizer
+does not send a USB or HID report.
+
+The installation helper also installs and starts a persistent user service for
+the equalizer. There is no activation button: the service waits for the
+confirmed Quantum Game output and automatically processes only playback
+streams that were already routed there. Before moving a stream, it persists
+its `pactl` index and restore identifier, plus the name and `pactl` index of its
+original destination, so the route can be restored. Chat playback and capture
+sources, including the microphone, remain outside the chain. The virtual
+equalizer sink is never selected as the default; if it appears as the default,
+the service restores the recorded non-virtual default.
+
+Band changes, predefined profile selection, and **Zerar bandas** issue four
+`Props` updates to the existing
+PipeWire filter, separated by three nominal 10 ms intervals. The resulting
+30 ms ramp excludes command and scheduling overhead. Real-system validation on
+2026-09-19 measured the live audio effect and about 100 ms end-to-end command
+time while preserving the service PID and filter-node identity. The update path
+does not restart the service or deliberately recreate the filter node.
+`soniccore equalizer status` and the widget report actionable errors when the
+service, Game output, route, live DSP controls, or default-sink guard is not
+healthy. See
+[`docs/protocol/audio-processing.md`](docs/protocol/audio-processing.md) for the
+architecture, acceptance evidence, and measurement boundary.
+
+#### Equalizer profiles
+
+The 17 captured profiles are immutable factory presets. Named custom profiles
+are user-owned data, stored next to the active bands in
+`$XDG_CONFIG_HOME/jambalinux-soniccore/equalizer.json`:
+
+```bash
+soniccore equalizer preset fps                     # select a factory preset
+soniccore equalizer profile create "Noite"         # save the current bands
+soniccore equalizer profile list
+soniccore equalizer profile list --format json
+soniccore equalizer profile apply custom-4711-0
+soniccore equalizer profile rename custom-4711-0 "Noite calma"
+soniccore equalizer profile update custom-4711-0   # overwrite with active bands
+soniccore equalizer profile delete custom-4711-0
+```
+
+The `profile` subcommands accept only custom profile IDs: factory presets
+cannot be applied, updated, renamed, or deleted through them, and
+`equalizer preset <id>` remains their dedicated selector. Deleting the selected
+profile applies **Flat** in the same transaction. The widget's equalizer section
+offers the same operations through a profile selector plus **Criar perfil**,
+**Atualizar**, **Renomear**, and **Excluir**, and reads its list from
+`soniccore equalizer status --format json`, which also reports
+`active_profile_id` and `custom_profiles`. An earlier single-profile
+`equalizer.json` is migrated automatically, preserving a hand-tuned setting as a
+custom profile named `Personalizado`.
+
+Profiles are host-side DSP settings: none of these commands opens the headset,
+sends a USB or HID report, or changes what is processed — only the confirmed
+Quantum Game output is, while Chat, capture sources, and the microphone stay
+outside the chain.
+
+### Experimental open spatial/binaural processing (disabled by default)
+
+`soniccore spatial` controls an explicit, disabled-by-default open
+spatial/binaural audio processor. Its profile is stored under
+`$XDG_CONFIG_HOME/jambalinux-soniccore/spatial.json`:
+
+```bash
+soniccore spatial               # show the stored gate and mode
+soniccore spatial preflight     # read-only capability check
+soniccore spatial status --format json
+soniccore spatial enable        # requires a passing preflight and proven EQ target
+soniccore spatial disable
+```
+
+The read-only preflight validates the `pipewire` binary from `PATH`, filter-chain module,
+and a user-provided 14-channel HRIR dataset (`manifest.json` plus `hrir.wav`)
+under `spatial/hrtf/` in the configuration directory. `enable` refuses with an
+actionable error when readiness or the existing equalizer target cannot be
+proven. While mode is `binaural-stereo` and readiness holds, the supervised 7.1
+graph persists and is linked only through `Spatial -> EQ -> Quantum Game`; it
+never becomes the default sink, and Chat and capture nodes remain excluded.
+The enable gate crossfades its wet binaural and dry downmix controls in place.
+Thus disabling reports **Desativado (bypass)** while retaining the selected
+spatial sink and its streams; selecting mode `off` or losing readiness still
+uses the safe stream-restoring teardown. The Plasma **Espacial** section
+exposes the same gate and health state. Only the
+open, vendor-neutral mode name `binaural-stereo` is used; vendor names or files
+are intentionally never used. Technical hardware acceptance is recorded in
+[`docs/protocol/validation_reports/spatial-hardware-validation.md`](docs/protocol/validation_reports/spatial-hardware-validation.md).
+
+When `PIPEWIRE_MODULE_DIR` is unset or empty, module preflight checks the
+standard `/usr/lib/pipewire-0.3` and `/usr/lib64/pipewire-0.3` directories,
+plus the applicable Debian-style multiarch directory
+(`/usr/lib/x86_64-linux-gnu/pipewire-0.3` or
+`/usr/lib/aarch64-linux-gnu/pipewire-0.3`). When it is set, PipeWire treats it
+as the complete module search path: set it to the directory or colon-separated
+directory list containing `libpipewire-module-filter-chain.so`; standard paths
+are not also checked. Configure it in the user systemd manager environment
+(for example through `environment.d`), not only in an interactive shell, so
+the preflight and spawned PipeWire graph see the same value. No files are
+downloaded or installed automatically. The installation and removal helpers
+locate the CLI under `${CARGO_HOME:-$HOME/.cargo}/bin`.
+
+The persistence/bypass transition still needs an in-person auditory acceptance:
+keep a browser video playing and toggle spatial ten times, confirming that it
+never pauses and that the graph node identities remain unchanged.
 
 For real-time state tracking, install and enable the user service:
 
@@ -293,9 +436,20 @@ JamBaLinux SonicCore
 Device Control and solid RGB lighting already have confirmed implementations
 for the first supported headset. Animation effects are documented research,
 not selectable Linux controls. Game/Chat currently displays the physical dial
-state; software mixing, equalization, PipeWire DSP, and spatial audio remain
-future work. This rebranding adds no device support or audio functionality and
-does not change USB/HID safety boundaries.
+state. A persistent user service implements a customizable 10-band host-side
+equalizer for streams already destined for Game, with immutable factory presets
+plus a user-owned library of named custom profiles; routing is automatic and
+reversible, while Chat, microphone, and the system default route remain outside
+the processing policy. Its current filters are a Linux approximation, not a
+claim of QuantumENGINE parity. Real PipeWire/headset acceptance on 2026-09-19
+covered browser continuity, measured gain changes, widget/profile/DSP reset,
+Game-only isolation, default-route recovery, reversible routing, and a physical
+dongle reconnect. Software Game/Chat mixing remain future work. Experimental
+open spatial/binaural processing is implemented as a disabled-by-default,
+host-side 7.1-to-stereo PipeWire chain feeding the existing EQ; its synthetic
+HRIR hardware validation covered per-channel correlation, EQ effect, ten-minute
+stability, safe fallback, and physical dongle reconnection. This work adds no
+device-side audio functionality and does not change USB/HID safety boundaries.
 
 ## Scope
 

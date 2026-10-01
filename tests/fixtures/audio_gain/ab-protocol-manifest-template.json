@@ -1,0 +1,34 @@
+{
+  "schema": "jambalinux-audio-gain-ab-protocol/v1",
+  "purpose": "non-reproducible pre-registration template; no audio, commands, control values, hardware identifiers, or personal data",
+  "approval": {"human_explicit_for_active_session": null, "approved_at": null},
+  "baseline_passive": {
+    "source_identity_and_hash": null,
+    "application_level": null,
+    "route_and_node_serials": null,
+    "physical_dial_position_note": null,
+    "effective_stream_and_sink_volumes": null,
+    "negotiated_formats": null,
+    "spatial_props": null,
+    "eq_bands": null,
+    "hrir_manifest_hash": null
+  },
+  "randomization": {"method_or_seed_recorded_before_session": null, "repetitions_per_pair_minimum": 3, "balanced_order": "AB/BA"},
+  "pairs": {
+    "spatial_bypass_vs_binaural": null,
+    "eq_flat_vs_preregistered_profile": null,
+    "stereo_vs_7_1": null,
+    "game_vs_chat_endpoint": null
+  },
+  "measurements_required": [
+    "rms_dbfs_per_channel",
+    "peak_dbfs_per_channel",
+    "true_peak_dbfs_when_supported",
+    "correlation_delay_crosstalk_per_channel",
+    "capture_and_negotiated_format_rate_channel_order",
+    "clipping_absence"
+  ],
+  "restoration_verified_passively": null,
+  "dsp_change_blocked_until_decision_gate": true
+}
+

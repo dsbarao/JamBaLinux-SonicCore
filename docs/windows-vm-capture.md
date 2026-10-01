@@ -21,8 +21,8 @@ Target VM: `win11` under system libvirt/KVM.
    ```bash
    cp --reflink=always --sparse=always \
      /home/daniel/DiscoVM/win11.img \
-     /home/daniel/DiscoVM/win11-janbalinux-soniccore-baseline.img
-   chmod a-w /home/daniel/DiscoVM/win11-janbalinux-soniccore-baseline.img
+     /home/daniel/DiscoVM/win11-jambalinux-soniccore-baseline.img
+   chmod a-w /home/daniel/DiscoVM/win11-jambalinux-soniccore-baseline.img
    ```
 
 3. Record SHA-256 only if time permits; hashing 150 GiB is optional and slow.

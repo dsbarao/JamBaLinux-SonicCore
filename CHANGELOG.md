@@ -2,19 +2,42 @@
 
 ## 0.2.0 — unreleased
 
-- rebrand the project and desktop presentation as JanBaLinux SonicCore;
+- rebrand the project and desktop presentation as JamBaLinux SonicCore;
 - preserve installed CLI, service, Plasma, D-Bus, and cache identifiers for
   compatibility; document future migration in `docs/rebranding.md`;
-- retain hardware/protocol names and research evidence, and describe future
-  audio platform scope without implementing new functionality.
+- retain hardware/protocol names and research evidence, and document the
+  initial host-side audio platform scope.
+
+- add a persistent, host-side customizable 10-band equalizer profile with the
+  confirmed QuantumENGINE frequencies and -12 dB to +12 dB range; expose it
+  in the CLI and Plasma widget without USB/HID writes or PipeWire routing.
+
+- fix unstable identifiers when migrating a schema 1 equalizer file: the
+  migrated profile now takes the reserved, content-derived `custom-legacy-1`
+  instead of a process-dependent id, so consecutive `soniccore equalizer
+  status --format json` runs no longer report a different `active_profile_id`
+  for the same legacy profile;
+- persist that migration atomically exactly once, inside the transaction of the
+  first command that already holds the mutation lock, keeping read-only
+  commands free of writes and preserving every band and the profile name.
 
 - control synchronized, Logo-only, or Ring-only solid colors from the widget;
 - replace the fixed swatches with an embedded HSV wheel and saturation/value
   field, accepting any strictly validated `#RRGGBB` color;
+- add complete-profile Breathing, Solid, Wave, and Glitch effects with 0.5x,
+  1x, 1.5x, and 2x speeds;
+- configure five independent colors per Logo and Ring zone while preserving
+  both complete profiles on every hardware write;
 - preserve both complete five-segment zone profiles whenever either zone is
   changed;
 - migrate the previous synchronized color state without guessing unknown
   hardware values.
+
+- add a disabled-by-default configuration, explicit gate, and read-only
+  capability preflight for an experimental, open spatial/binaural audio
+  foundation (`soniccore spatial`); it performs no PipeWire connection,
+  routing, default-sink change, or DSP processing, and the widget only
+  displays its state without any control that can activate it.
 
 ## 0.1.1 — 2026-09-17
 

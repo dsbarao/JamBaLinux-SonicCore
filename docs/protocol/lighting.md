@@ -1,9 +1,10 @@
 # Lighting protocol
 
 Status: mapped from controlled QuantumENGINE USBPcap captures. Global on/off
-and full-profile solid RGB colors are implemented through the Linux client's
-strict parser and report generator. Partial-profile writes, animation
-selection, and OpenRGB integration remain out of scope.
+and complete five-segment RGB profiles are implemented through the Linux
+client's strict parser and report generator. All four confirmed effects and
+four confirmed speeds are available. Partial-profile writes and OpenRGB
+integration remain out of scope.
 
 ## Global state
 
@@ -70,16 +71,32 @@ QuantumENGINE sends complete profiles for both zones when one segment changes.
 The application's synchronization switch appears to copy/reapply zone data and
 does not expose a distinct device-side synchronization flag.
 
-## Linux solid-color control
+## Linux lighting control
 
-JanBaLinux SonicCore applies a color by writing a complete five-segment Solid
+JamBaLinux SonicCore applies a color by writing a complete five-segment Solid
 profile to both Logo and Ring, followed by global lighting enable. It never
 changes one segment in isolation. The CLI accepts only strict `#RRGGBB` values
 or the six compatibility names blue, cyan, magenta, red, green, and white.
 The widget exposes the full range through an HSV wheel and always passes a
 validated six-digit RGB value to the generator.
 
+For animated profiles, the widget can select Breathing, Solid, Wave, or
+Glitch; select 0.5x, 1x, 1.5x, or 2x; and assign an independent RGB color to
+each of the five segments. Every adjustment reconstructs and writes both
+complete zones, even when the user changes only one segment.
+
 The widget can target both zones, Logo only, or Ring only. Even for an
-independent change, JanBaLinux SonicCore reconstructs and sends both complete zone
+independent change, JamBaLinux SonicCore reconstructs and sends both complete zone
 profiles from its confirmed cache. If the other zone is unknown, it refuses
 the operation and requires a synchronized color first rather than guessing.
+
+If a complete-profile write fails after one or more reports have been accepted,
+the client marks the incomplete zone's cached colors, effect, and speed as
+unknown (`null`) and asks the user to reapply the profile. It does not retry or
+send a compensating report automatically. A failure on the first report leaves
+the existing cache intact because no profile report was accepted.
+
+The Plasma widget preserves those `null` values rather than displaying fallback
+colors, effects, or speeds. It identifies the profile as unknown and disables
+cache-dependent zone controls; applying a new synchronized solid color to both
+zones remains available as the explicit recovery action.

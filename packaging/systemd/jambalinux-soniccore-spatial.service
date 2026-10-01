@@ -1,0 +1,14 @@
+[Unit]
+Description=JamBaLinux SonicCore spatial PipeWire lifecycle supervisor
+After=graphical-session.target pipewire.service pipewire-pulse.service wireplumber.service jambalinux-soniccore-equalizer.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service jambalinux-soniccore-equalizer.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/soniccore spatial run
+ExecStop=%h/.cargo/bin/soniccore spatial restore
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

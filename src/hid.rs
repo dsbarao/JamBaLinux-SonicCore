@@ -359,6 +359,13 @@ mod tests {
         assert_eq!(battery_from_feature(&[0x49, 0x55]), Ok(85));
         assert!(battery_from_feature(&[0x49, 0x65]).is_err());
         assert!(battery_from_feature(&[0x48, 0x55]).is_err());
-        assert!(battery_from_feature(&[]).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_battery_feature_report() {
+        assert_eq!(
+            battery_from_feature(&[]),
+            Err("battery Feature Report was empty".into())
+        );
     }
 }

@@ -1,0 +1,14 @@
+[Unit]
+Description=JamBaLinux SonicCore PipeWire Game equalizer
+After=graphical-session.target pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/soniccore equalizer run
+ExecStop=%h/.cargo/bin/soniccore equalizer restore
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
