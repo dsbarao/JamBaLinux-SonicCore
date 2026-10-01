@@ -248,7 +248,7 @@ pub(crate) fn spatial_mix(node: &Value) -> Result<SpatialMix, String> {
         let Some(params) = props.get("params").and_then(Value::as_array) else {
             continue;
         };
-        for pair in params.chunks_exact(2) {
+        for pair in params.as_chunks::<2>().0 {
             if let (Some(name), Some(value)) = (pair[0].as_str(), pair[1].as_f64()) {
                 values.insert(name, value as f32);
             }

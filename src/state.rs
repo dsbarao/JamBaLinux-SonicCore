@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::raw::c_int;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -207,7 +207,7 @@ fn load_at(path: &PathBuf) -> Result<RuntimeState, LoadError> {
     serde_json::from_slice(&bytes).map_err(|error| LoadError::Corrupt(error.to_string()))
 }
 
-fn lock_path(path: &PathBuf) -> PathBuf {
+fn lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         "{}.lock",
         path.file_name()
@@ -222,7 +222,7 @@ struct StateLock<'a> {
 }
 
 impl StateLock<'static> {
-    fn acquire(path: &PathBuf) -> Result<Self, String> {
+    fn acquire(path: &Path) -> Result<Self, String> {
         let thread_lock = STATE_MUTEX
             .lock()
             .map_err(|_| "runtime-state lock was poisoned".to_owned())?;
@@ -230,6 +230,7 @@ impl StateLock<'static> {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(lock_path(path))
             .map_err(|error| format!("failed to open runtime-state lock: {error}"))?;
         // The lock file lives beside the state file in XDG_RUNTIME_DIR. flock
@@ -261,7 +262,7 @@ fn with_exclusive_lock<T>(
     operation(&path)
 }
 
-fn temporary_path(path: &PathBuf) -> PathBuf {
+fn temporary_path(path: &Path) -> PathBuf {
     let sequence = TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed);
     let thread = format!("{:?}", std::thread::current().id())
         .chars()

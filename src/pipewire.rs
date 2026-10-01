@@ -1085,15 +1085,14 @@ pub fn register_spatial_fallback_streams(input_serials: &[u64]) -> Result<(), St
         });
         if !state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
-        }) {
-            if state.proven_stream_keys.contains(&input.stream_key) {
-                state.routed_streams.push(RoutedStream {
-                    object_serial: input.object_serial,
-                    stream_key: input.stream_key.clone(),
-                    original_sink_name: game.name.clone(),
-                    original_sink_serial: game.object_serial,
-                });
-            }
+        }) && state.proven_stream_keys.contains(&input.stream_key)
+        {
+            state.routed_streams.push(RoutedStream {
+                object_serial: input.object_serial,
+                stream_key: input.stream_key.clone(),
+                original_sink_name: game.name.clone(),
+                original_sink_serial: game.object_serial,
+            });
         }
     }
     write_state(&state)

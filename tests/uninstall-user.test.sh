@@ -89,7 +89,7 @@ test_install_uninstall_unit_parity() {
     local unit
     local expected_units
 
-    if ! installed_units="$(grep -oE 'jambalinux-soniccore(-[a-z]+)?\.service' "$INSTALLER" | sort -u)"; then
+    if ! installed_units="$(grep -oE 'jambalinux-soniccore(-[a-z]+)?\.service' "$INSTALLER" | LC_ALL=C sort -u)"; then
         printf '%s\n' 'failed to find systemd units in the installer' >&2
         return 1
     fi

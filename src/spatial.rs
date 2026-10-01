@@ -1046,7 +1046,7 @@ fn lock_file(name: &str) -> Result<File, String> {
             .map_err(|error| format!("could not open test {name}: {error}"))?;
         lock.lock()
             .map_err(|error| format!("could not lock test {name}: {error}"))?;
-        return Ok(lock);
+        Ok(lock)
     }
 
     #[cfg(not(test))]
