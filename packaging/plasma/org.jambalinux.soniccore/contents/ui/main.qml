@@ -171,11 +171,15 @@ PlasmoidItem {
     }
 
     function setSpatialEnabled(enabled) {
-        if (spatialBusy || spatialUpdating) return
+        if (spatialBusy || spatialUpdating) {
+            spatialToggle.checked = Qt.binding(function() { return root.spatialEnabled })
+            return
+        }
         // The CLI repeats this check before persisting the gate. Keeping the
         // action unavailable here avoids a misleading optimistic toggle.
         if (enabled && !spatialReady) {
             spatialError = "A capacidade espacial não está pronta; instale manualmente um dataset HRIR válido e execute a pré-verificação."
+            spatialToggle.checked = Qt.binding(function() { return root.spatialEnabled })
             return
         }
         spatialBusy = true
@@ -1041,9 +1045,9 @@ PlasmoidItem {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "ambient"
                     enabled: root.deviceAvailable && !root.controlBusy
-                    PlasmaComponents.Button { text: "Desligado"; checkable: true; checked: root.ambientMode === "off"; onClicked: root.runControl("ambient", "off") }
-                    PlasmaComponents.Button { text: "ANC"; checkable: true; checked: root.ambientMode === "anc"; onClicked: root.runControl("ambient", "anc") }
-                    PlasmaComponents.Button { text: "TalkThru"; checkable: true; checked: root.ambientMode === "talkthru"; onClicked: root.runControl("ambient", "talkthru") }
+                    PlasmaComponents.Button { text: "Desligado"; checked: root.ambientMode === "off"; onClicked: root.runControl("ambient", "off") }
+                    PlasmaComponents.Button { text: "ANC"; checked: root.ambientMode === "anc"; onClicked: root.runControl("ambient", "anc") }
+                    PlasmaComponents.Button { text: "TalkThru"; checked: root.ambientMode === "talkthru"; onClicked: root.runControl("ambient", "talkthru") }
                 }
 
                 ColumnLayout {
@@ -1341,8 +1345,8 @@ PlasmoidItem {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
                     enabled: root.deviceAvailable && !root.controlBusy
-                    PlasmaComponents.Button { text: "Ligar"; icon.source: Qt.resolvedUrl("../images/light-on.svg"); checkable: true; checked: root.lightingEnabled === true; onClicked: root.runControl("lighting", "on") }
-                    PlasmaComponents.Button { text: "Desligar"; icon.source: Qt.resolvedUrl("../images/light-off.svg"); checkable: true; checked: root.lightingEnabled === false; onClicked: root.runControl("lighting", "off") }
+                    PlasmaComponents.Button { text: "Ligar"; icon.source: Qt.resolvedUrl("../images/light-on.svg"); checked: root.lightingEnabled === true; onClicked: root.runControl("lighting", "on") }
+                    PlasmaComponents.Button { text: "Desligar"; icon.source: Qt.resolvedUrl("../images/light-off.svg"); checked: root.lightingEnabled === false; onClicked: root.runControl("lighting", "off") }
                 }
 
                 PlasmaComponents.Label {
@@ -1411,10 +1415,10 @@ PlasmoidItem {
                     enabled: root.deviceAvailable && !root.controlBusy && root.lightingTargetProfileKnown()
                     spacing: Kirigami.Units.smallSpacing
 
-                    PlasmaComponents.Button { text: "Respiração"; checkable: true; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
-                    PlasmaComponents.Button { text: "Sólido"; checkable: true; checked: root.selectedLightingEffect() === "solid"; onClicked: root.runControl(root.lightingEffectFeature(), "solid") }
-                    PlasmaComponents.Button { text: "Onda"; checkable: true; checked: root.selectedLightingEffect() === "wave"; onClicked: root.runControl(root.lightingEffectFeature(), "wave") }
-                    PlasmaComponents.Button { text: "Falha"; checkable: true; checked: root.selectedLightingEffect() === "glitch"; onClicked: root.runControl(root.lightingEffectFeature(), "glitch") }
+                    PlasmaComponents.Button { text: "Respiração"; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
+                    PlasmaComponents.Button { text: "Sólido"; checked: root.selectedLightingEffect() === "solid"; onClicked: root.runControl(root.lightingEffectFeature(), "solid") }
+                    PlasmaComponents.Button { text: "Onda"; checked: root.selectedLightingEffect() === "wave"; onClicked: root.runControl(root.lightingEffectFeature(), "wave") }
+                    PlasmaComponents.Button { text: "Falha"; checked: root.selectedLightingEffect() === "glitch"; onClicked: root.runControl(root.lightingEffectFeature(), "glitch") }
                 }
 
                 PlasmaComponents.Label {
@@ -1430,10 +1434,10 @@ PlasmoidItem {
                     enabled: root.deviceAvailable && !root.controlBusy
                     spacing: Kirigami.Units.smallSpacing
 
-                    PlasmaComponents.Button { text: "0,5×"; checkable: true; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
-                    PlasmaComponents.Button { text: "1×"; checkable: true; checked: root.selectedLightingSpeed() === "1.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.0") }
-                    PlasmaComponents.Button { text: "1,5×"; checkable: true; checked: root.selectedLightingSpeed() === "1.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.5") }
-                    PlasmaComponents.Button { text: "2×"; checkable: true; checked: root.selectedLightingSpeed() === "2.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "2.0") }
+                    PlasmaComponents.Button { text: "0,5×"; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
+                    PlasmaComponents.Button { text: "1×"; checked: root.selectedLightingSpeed() === "1.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.0") }
+                    PlasmaComponents.Button { text: "1,5×"; checked: root.selectedLightingSpeed() === "1.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.5") }
+                    PlasmaComponents.Button { text: "2×"; checked: root.selectedLightingSpeed() === "2.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "2.0") }
                 }
 
                 PlasmaComponents.Label {
@@ -1658,10 +1662,10 @@ PlasmoidItem {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "sidetone"
                     enabled: root.deviceAvailable && !root.controlBusy
-                    PlasmaComponents.Button { text: "Off"; checkable: true; checked: root.sidetoneLevel === "off"; onClicked: root.runControl("sidetone", "off") }
-                    PlasmaComponents.Button { text: "Baixo"; checkable: true; checked: root.sidetoneLevel === "low"; onClicked: root.runControl("sidetone", "low") }
-                    PlasmaComponents.Button { text: "Médio"; checkable: true; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
-                    PlasmaComponents.Button { text: "Alto"; checkable: true; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
+                    PlasmaComponents.Button { text: "Off"; checked: root.sidetoneLevel === "off"; onClicked: root.runControl("sidetone", "off") }
+                    PlasmaComponents.Button { text: "Baixo"; checked: root.sidetoneLevel === "low"; onClicked: root.runControl("sidetone", "low") }
+                    PlasmaComponents.Button { text: "Médio"; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
+                    PlasmaComponents.Button { text: "Alto"; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
                 }
 
                 ColumnLayout {
@@ -1685,8 +1689,12 @@ PlasmoidItem {
                             text: "Ativar áudio espacial"
                             checked: root.spatialEnabled
                             enabled: !root.spatialBusy && !root.spatialUpdating
-                                && (root.spatialEnabled || root.spatialReady)
-                            onClicked: root.setSpatialEnabled(checked)
+                                 && (root.spatialEnabled || root.spatialReady)
+                            onClicked: {
+                                const nextState = checked
+                                checked = Qt.binding(function() { return root.spatialEnabled })
+                                root.setSpatialEnabled(nextState)
+                            }
                         }
 
                         PlasmaComponents.BusyIndicator {
@@ -1944,6 +1952,7 @@ PlasmoidItem {
         onNewData: function(sourceName, data) {
             disconnectSource(sourceName)
             root.spatialBusy = false
+            spatialToggle.checked = Qt.binding(function() { return root.spatialEnabled })
             const exitCode = Number(data["exit code"] ?? -1)
             const stderr = String(data.stderr ?? "").trim()
             if (exitCode !== 0)
