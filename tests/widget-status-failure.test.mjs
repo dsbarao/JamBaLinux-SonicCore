@@ -17,7 +17,7 @@ assert.notEqual(applyResultMatch, null, "main.qml must apply results")
 const clearHeadsetStateBody = clearHeadsetStateMatch[1]
 const applyResultBody = applyResultMatch[1]
 
-const friendlyError = (msg) => msg === "error_stderr" ? "Sem permissão para acessar o headset" : "Não foi possível ler o headset"
+const friendlyError = (msg, exitCode, context) => msg === "error_stderr" ? "Sem permissão para acessar o headset" : "Não foi possível ler o headset"
 
 function createApplyResult() {
     return new Function("friendlyError", "normalizeBatteryPercent", `

@@ -636,7 +636,11 @@ PlasmoidItem {
         return `#${colorComponent(pickerColor.r)}${colorComponent(pickerColor.g)}${colorComponent(pickerColor.b)}`
     }
 
-    function friendlyError(message) {
+    function friendlyError(message, exitCode, context) {
+        if (exitCode === 127)
+            return "CLI soniccore não encontrada. Execute tools/install-user.sh."
+        if (exitCode === 126)
+            return "CLI soniccore sem permissão de execução. Execute tools/install-user.sh."
         const normalized = message.toLowerCase()
         if (normalized.includes("not found") || normalized.includes("não encontrado"))
             return "Dongle USB desconectado"
@@ -644,6 +648,8 @@ PlasmoidItem {
                 || normalized.includes("permissão negada")
                 || normalized.includes("operation not permitted"))
             return "Sem permissão para acessar o headset"
+        if (context === "write")
+            return "Não foi possível aplicar a configuração"
         return "Não foi possível ler o headset"
     }
 
@@ -691,7 +697,7 @@ PlasmoidItem {
         const stderr = String(data.stderr ?? "").trim()
         if (exitCode !== 0) {
             clearHeadsetState()
-            errorMessage = friendlyError(stderr)
+            errorMessage = friendlyError(stderr, exitCode, "read")
             return
         }
         try {
@@ -1798,7 +1804,7 @@ PlasmoidItem {
                     clearAction.restart()
                     refreshAfterControl.restart()
                 } else {
-                    root.errorMessage = root.friendlyError(stderr)
+                    root.errorMessage = root.friendlyError(stderr, exitCode, "write")
                     root.actionMessage = root.errorMessage
                 }
                 return
