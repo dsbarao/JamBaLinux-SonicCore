@@ -64,17 +64,14 @@ test("confirmed-state buttons keep checked bound to root state", () => {
     assert.match(widgetSource, /text:\s*"2×"[^}]*checked:\s*root\.selectedLightingSpeed\(\) === "2.0"/)
 })
 
-test("spatial switch reasserts checked binding on early return and completion", () => {
-    // Spatial toggle has a helper or binding reassertion
-    assert.match(widgetSource, /spatialToggle\.checked\s*=\s*Qt\.binding\(function\(\)\s*\{\s*return\s+root\.spatialEnabled;?\s*\}\)/)
+test("spatial switch reasserts checked binding on click and is not referenced outside Switch", () => {
+    // Switch block has id spatialToggle and reasserts checked binding on click
+    const switchMatch = widgetSource.match(/PlasmaComponents\.Switch\s*\{([\s\S]*?)\n\s*\}/)
+    assert.notEqual(switchMatch, null, "PlasmaComponents.Switch must exist")
+    assert.match(switchMatch[1], /id:\s*spatialToggle/)
+    assert.match(switchMatch[1], /checked\s*=\s*Qt\.binding\(function\(\)\s*\{\s*return\s+root\.spatialEnabled;?\s*\}\)/)
 
-    // Early return in setSpatialEnabled reasserts binding
-    const setSpatialMatch = widgetSource.match(/function setSpatialEnabled\(enabled\) \{([\s\S]*?)^    \}/m)
-    assert.notEqual(setSpatialMatch, null, "setSpatialEnabled must exist")
-    assert.match(setSpatialMatch[1], /spatialToggle\.checked\s*=\s*Qt\.binding/)
-
-    // spatialControlExecutable onNewData reasserts binding
-    const spatialExecMatch = widgetSource.match(/id:\s*spatialControlExecutable[\s\S]*?onNewData:\s*function\([^)]*\)\s*\{([\s\S]*?)^        \}/m)
-    assert.notEqual(spatialExecMatch, null, "spatialControlExecutable onNewData must exist")
-    assert.match(spatialExecMatch[1], /spatialToggle\.checked\s*=\s*Qt\.binding/)
+    // spatialToggle must only be referenced inside the Switch block
+    const nonSwitchSource = widgetSource.replace(switchMatch[0], "")
+    assert.doesNotMatch(nonSwitchSource, /\bspatialToggle\b/)
 })

@@ -172,14 +172,12 @@ PlasmoidItem {
 
     function setSpatialEnabled(enabled) {
         if (spatialBusy || spatialUpdating) {
-            spatialToggle.checked = Qt.binding(function() { return root.spatialEnabled })
             return
         }
         // The CLI repeats this check before persisting the gate. Keeping the
         // action unavailable here avoids a misleading optimistic toggle.
         if (enabled && !spatialReady) {
             spatialError = "A capacidade espacial não está pronta; instale manualmente um dataset HRIR válido e execute a pré-verificação."
-            spatialToggle.checked = Qt.binding(function() { return root.spatialEnabled })
             return
         }
         spatialBusy = true
@@ -1952,7 +1950,6 @@ PlasmoidItem {
         onNewData: function(sourceName, data) {
             disconnectSource(sourceName)
             root.spatialBusy = false
-            spatialToggle.checked = Qt.binding(function() { return root.spatialEnabled })
             const exitCode = Number(data["exit code"] ?? -1)
             const stderr = String(data.stderr ?? "").trim()
             if (exitCode !== 0)
