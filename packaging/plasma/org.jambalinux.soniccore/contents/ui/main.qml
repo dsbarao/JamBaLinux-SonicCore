@@ -27,6 +27,7 @@ PlasmoidItem {
     property string rawFeature: ""
     property string errorMessage: ""
     property string actionMessage: ""
+    property bool actionFailed: false
     property string openSection: ""
     property string ambientMode: "unknown"
     property var headsetConnected: null
@@ -153,6 +154,7 @@ PlasmoidItem {
         if (controlBusy) return
         controlBusy = true
         clearAction.stop()
+        actionFailed = false
         actionMessage = "Aplicando…"
         const controlCommand = soniccoreCommand(["set", feature, value])
         executable.connectSource(controlCommand)
@@ -897,7 +899,7 @@ PlasmoidItem {
             verticalAlignment: Text.AlignVCenter
             text: root.actionMessage
             opacity: root.actionMessage.length > 0 ? 1 : 0
-            color: root.errorMessage.length > 0
+            color: root.actionFailed
                 ? Kirigami.Theme.negativeTextColor
                 : Kirigami.Theme.positiveTextColor
             wrapMode: Text.Wrap
@@ -1799,13 +1801,18 @@ PlasmoidItem {
                 const exitCode = Number(data["exit code"] ?? -1)
                 const stderr = String(data.stderr ?? "").trim()
                 if (exitCode === 0) {
+                    root.actionFailed = false
                     root.errorMessage = ""
                     root.actionMessage = "Configuração aplicada"
+                    clearAction.interval = 1800
                     clearAction.restart()
                     refreshAfterControl.restart()
                 } else {
-                    root.errorMessage = root.friendlyError(stderr, exitCode, "write")
-                    root.actionMessage = root.errorMessage
+                    root.actionFailed = true
+                    root.actionMessage = root.friendlyError(stderr, exitCode, "write")
+                    clearAction.interval = 6000
+                    clearAction.restart()
+                    refreshAfterControl.restart()
                 }
                 return
             }
@@ -1897,9 +1904,11 @@ PlasmoidItem {
             const action = root.pendingEqualizerAction
             root.pendingEqualizerAction = ""
             if (exitCode === 0) {
+                root.actionFailed = false
                 root.actionMessage = root.equalizerActionMessage(action)
                 root.equalizerActionError = ""
                 root.closeEqualizerProfileEditors()
+                clearAction.interval = 1800
                 clearAction.restart()
             } else {
                 root.equalizerActionError = stderr
@@ -2025,7 +2034,10 @@ PlasmoidItem {
         id: clearAction
         interval: 1800
         repeat: false
-        onTriggered: root.actionMessage = ""
+        onTriggered: {
+            root.actionMessage = ""
+            root.actionFailed = false
+        }
     }
 
     Timer {

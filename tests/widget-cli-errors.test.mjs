@@ -59,5 +59,5 @@ test("main.qml passes exit code and context at both invocation sites", () => {
     // Read status invocation site
     assert.match(widgetSource, /errorMessage\s*=\s*friendlyError\(stderr,\s*exitCode,\s*"read"\)/)
     // Control / set invocation site
-    assert.match(widgetSource, /root\.errorMessage\s*=\s*root\.friendlyError\(stderr,\s*exitCode,\s*"write"\)/)
+    assert.match(widgetSource, /root\.actionMessage\s*=\s*root\.friendlyError\(stderr,\s*exitCode,\s*"write"\)/)
 })
