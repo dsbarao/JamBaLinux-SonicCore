@@ -721,7 +721,7 @@ PlasmoidItem {
             ringEffect = result.ring_effect ?? null
             logoSpeed = result.logo_speed ?? null
             ringSpeed = result.ring_speed ?? null
-            gameChatValue = result.game_chat_value === null ? -1 : Number(result.game_chat_value)
+            gameChatValue = (typeof result.game_chat_value === "number" || (typeof result.game_chat_value === "string" && result.game_chat_value.trim() !== "")) && Number.isInteger(Number(result.game_chat_value)) && Number(result.game_chat_value) >= 0 && Number(result.game_chat_value) <= 16 ? Number(result.game_chat_value) : -1
             errorMessage = ""
         } catch (error) {
             clearHeadsetState()
