@@ -2039,7 +2039,7 @@ PlasmoidItem {
     Timer {
         interval: (root.spatialEnabled && !root.spatialActive) || root.spatialMixPending ? 1000 : 15000
         repeat: true
-        running: root.openSection === "spatial"
+        running: root.expanded && root.openSection === "spatial"
         triggeredOnStart: true
         onTriggered: root.refreshSpatial()
     }
