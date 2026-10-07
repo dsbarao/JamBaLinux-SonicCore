@@ -664,16 +664,33 @@ PlasmoidItem {
         return percentage
     }
 
+    function clearHeadsetState() {
+        batteryPercent = -1
+        charging = false
+        headsetConnected = null
+        rawFeature = ""
+        ambientMode = "unknown"
+        microphoneState = "unknown"
+        sidetoneLevel = "unknown"
+        lightingEnabled = null
+        lightingColor = null
+        logoColor = null
+        ringColor = null
+        logoColors = null
+        ringColors = null
+        logoEffect = null
+        ringEffect = null
+        logoSpeed = null
+        ringSpeed = null
+        gameChatValue = -1
+    }
+
     function applyResult(data) {
         const exitCode = Number(data["exit code"] ?? -1)
         const stdout = String(data.stdout ?? "").trim()
         const stderr = String(data.stderr ?? "").trim()
         if (exitCode !== 0) {
-            batteryPercent = -1
-            charging = false
-            headsetConnected = false
-            microphoneState = "unknown"
-            ambientMode = "unknown"
+            clearHeadsetState()
             errorMessage = friendlyError(stderr)
             return
         }
@@ -699,8 +716,7 @@ PlasmoidItem {
             gameChatValue = result.game_chat_value === null ? -1 : Number(result.game_chat_value)
             errorMessage = ""
         } catch (error) {
-            batteryPercent = -1
-            charging = false
+            clearHeadsetState()
             errorMessage = `Resposta inválida: ${error}`
         }
     }
