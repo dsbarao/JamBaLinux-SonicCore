@@ -120,13 +120,13 @@ PlasmoidItem {
     readonly property bool daemonAvailable: daemonWatcher.registered
     readonly property color batteryColor: headsetConnected === false
         ? Kirigami.Theme.disabledTextColor
-        : charging
-        ? "#22d3ee"
         : batteryPercent < 0
         ? Kirigami.Theme.disabledTextColor
-            : batteryPercent >= 60
-            ? "#35c759"
-            : batteryPercent >= 30 ? "#f5c542" : "#ff453a"
+        : charging
+        ? "#22d3ee"
+        : batteryPercent >= 60
+        ? "#35c759"
+        : batteryPercent >= 30 ? "#f5c542" : "#ff453a"
 
     ListModel {
         id: equalizerBandModel
@@ -705,6 +705,8 @@ PlasmoidItem {
         try {
             const result = JSON.parse(stdout)
             batteryPercent = normalizeBatteryPercent(result.battery_percent)
+            if (batteryPercent === 0 && result.headset_connected !== true)
+                batteryPercent = -1
             charging = result.charging === true
             rawFeature = String(result.raw_feature ?? "")
             ambientMode = String(result.ambient_mode ?? "unknown")
