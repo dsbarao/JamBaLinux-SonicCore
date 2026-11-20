@@ -1,0 +1,8 @@
+{
+    "Id": "org.jambalinux.soniccore.openrgb",
+    "Name": "JamBaLinux SonicCore",
+    "VersionStr": "0.1.0",
+    "Commit": "",
+    "Url": "https://github.com/dsbarao/JamBaLinux-SonicCore",
+    "OpenRGBPluginAPIVersion": 5
+}

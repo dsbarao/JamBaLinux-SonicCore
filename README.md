@@ -406,6 +406,37 @@ The rule matches only USB device `0ecb:2069`, HID interface `05`, and uses
 systemd-logind's `uaccess` mechanism. It does not use world-writable mode,
 create a privileged daemon, or grant access to unrelated hidraw devices.
 
+### OpenRGB plugin
+
+OpenRGB 1.1 does not detect the Quantum 810. The optional plugin in
+`openrgb-plugin/` registers it as an OpenRGB device, **JBL Quantum 810
+Wireless**, with two zones (Logo and Ring, five LEDs each) and the modes
+Direct, Breathing, Wave, Glitch (with speed), and Off. It never opens the
+headset itself: every change runs the `soniccore` CLI, which keeps the
+allowlisted reports, the lighting lock, and the status cache in one place.
+
+```bash
+tools/install-openrgb-plugin.sh --check
+tools/install-openrgb-plugin.sh                 # clones the matching OpenRGB release headers
+tools/install-openrgb-plugin.sh --openrgb-source /path/to/OpenRGB
+tools/install-openrgb-plugin.sh --uninstall
+```
+
+The plugin is compiled against the headers of the installed OpenRGB version
+(plugin API 5, OpenRGB 1.1); without `--openrgb-source` the script clones the
+`release_<version>` tag from the official OpenRGB repository into a temporary
+directory and removes it afterwards. It installs into
+`~/.config/OpenRGB/plugins/`; restart OpenRGB to load it.
+`tools/uninstall-user.sh --confirm` removes it too.
+
+All ten colors are written with one `soniccore set leds` command (logo 1-5,
+then ring 1-5), the same lighting-profile reports as any other color change.
+Each write sends a full profile to the headset, so the plugin sends at most
+one write every 150 ms and always the newest state: fast OpenRGB effects are
+reduced to that rate. The plugin sources are MIT licensed; because they are
+compiled against OpenRGB (GPL-2.0-or-later) headers, the built plugin binary
+is distributed under the GPL.
+
 ## Repository layout
 
 - `docs/protocol/`: evidence ledger and protocol hypotheses;
@@ -413,6 +444,7 @@ create a privileged daemon, or grant access to unrelated hidraw devices.
 - `docs/windows-vm-capture.md`: controlled QuantumENGINE/USBPcap workflow;
 - `docs/plan-v0.1.md`: milestone definition;
 - `tools/`: passive host/device inventory utilities;
+- `openrgb-plugin/`: optional OpenRGB plugin that drives the headset through the CLI;
 - `src/`: Linux CLI, HID parsing, allowlisted controls, and state service;
 - `docs/rebranding.md`: project identity and technical identifiers;
 - `captures/`: local capture staging; capture files are ignored by Git.

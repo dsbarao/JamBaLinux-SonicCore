@@ -10,6 +10,7 @@ readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-sonicco
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"
+readonly OPENRGB_PLUGIN="${XDG_CONFIG_HOME:-$HOME/.config}/OpenRGB/plugins/libJamBaLinuxSonicCorePlugin.so"
 
 show_plan() {
     printf '%s\n' 'Componentes do usuário que serão removidos:'
@@ -19,6 +20,7 @@ show_plan() {
     printf '  %s\n' "$SPATIAL_SERVICE_TARGET"
     printf '  %s\n' "$LAUNCHER_TARGET"
     printf '  %s\n' "$CARGO_BINARY"
+    printf '  %s (plugin do OpenRGB, se instalado)\n' "$OPENRGB_PLUGIN"
     "$ACP_OVERLAY" --check
     printf '%s\n' 'Não serão removidos: repositório, capturas, documentação ou regra udev.'
 }
@@ -45,7 +47,7 @@ if command -v kpackagetool6 >/dev/null 2>&1 && [[ -d "$PLASMOID_TARGET" ]]; then
     kpackagetool6 --type Plasma/Applet --remove "$PLASMOID_ID"
 fi
 
-rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET"
+rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET" "$OPENRGB_PLUGIN"
 # Files edited outside JamBaLinux are kept and reported; the rest still goes.
 overlay_kept=0
 "$ACP_OVERLAY" --uninstall || overlay_kept=1

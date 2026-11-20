@@ -1078,6 +1078,15 @@ fn lighting_reports(logo: &LightingZone, ring: &LightingZone) -> Result<Vec<Vec<
     Ok(reports)
 }
 
+/// Parses `leds`: exactly ten comma-separated colors, logo 1-5 then ring 1-5.
+fn led_colors(value: &str) -> Option<Vec<String>> {
+    let colors = value
+        .split(',')
+        .map(|color| canonical_color(color.trim()))
+        .collect::<Option<Vec<_>>>()?;
+    (colors.len() == 10).then_some(colors)
+}
+
 fn segment_feature(value: &str) -> Option<(&'static str, usize)> {
     match value {
         "segment-0" => Some(("segment-0", 0)),
@@ -1176,6 +1185,13 @@ fn parse_set_command(mut args: impl Iterator<Item = String>) -> Result<SetComman
                 reports: Vec::new(),
             }
         }
+        // All ten LEDs in one profile write: logo 1-5 then ring 1-5. Used by
+        // the OpenRGB plugin; it sends the same reports as any color change.
+        ("leds", value) if led_colors(value).is_some() => SetCommand {
+            feature: "leds",
+            value: led_colors(value).expect("validated LED colors").join(","),
+            reports: Vec::new(),
+        },
         (feature, value) if segment_feature(feature).is_some() && color_rgb(value).is_some() => {
             SetCommand {
                 feature: segment_feature(feature)
@@ -1228,6 +1244,7 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
     let is_profile_control = matches!(
         command.feature,
         "color"
+            | "leds"
             | "logo-color"
             | "ring-color"
             | "effect"
@@ -1263,8 +1280,17 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
             let legacy = cached.lighting_color.clone();
             // A zone-wide color replaces all five colors of that zone, so it
             // does not need that zone's previous colors to be known.
-            let replaced =
-                |zone: &str| (command.feature == zone).then(|| vec![command.value.clone(); 5]);
+            let replaced = |zone: &str| {
+                if command.feature == "leds" {
+                    let colors = led_colors(&command.value)?;
+                    return Some(if zone == "logo-color" {
+                        colors[..5].to_vec()
+                    } else {
+                        colors[5..].to_vec()
+                    });
+                }
+                (command.feature == zone).then(|| vec![command.value.clone(); 5])
+            };
             (
                 cached_zone(
                     replaced("logo-color").or(cached.logo_colors),
@@ -1289,6 +1315,8 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
                 ring.colors.fill(command.value.clone());
             }
             "logo-color" => logo.colors.fill(command.value.clone()),
+            // Both zones were taken whole from the command above.
+            "leds" => {}
             "ring-color" => ring.colors.fill(command.value.clone()),
             "effect" => {
                 logo.effect.clone_from(&command.value);
@@ -2336,6 +2364,33 @@ mod tests {
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    #[test]
+    fn leds_sets_all_ten_colors_in_one_command() {
+        let colors =
+            "#FF0000,#00ff00,#0000ff,#ffffff,#000000,#111111,#222222,#333333,#444444,#555555";
+        let command = parse_set_command(arguments(&["leds", colors])).unwrap();
+        assert_eq!(command.feature, "leds");
+        assert_eq!(command.value, colors.to_lowercase());
+        assert!(command.reports.is_empty(), "built from the cached profile");
+        assert!(parse_set_command(arguments(&["leds", "#ff0000,#00ff00"])).is_err());
+        assert!(parse_set_command(arguments(&["leds", &format!("{colors},#666666")])).is_err());
+        assert!(
+            parse_set_command(arguments(&["leds", &colors.replace("#111111", "red?")])).is_err()
+        );
+
+        let zone = LightingZone {
+            colors: led_colors(colors).unwrap()[..5].to_vec(),
+            effect: "solid".into(),
+            speed: "0.5".into(),
+        };
+        let ring = LightingZone {
+            colors: led_colors(colors).unwrap()[5..].to_vec(),
+            ..zone.clone()
+        };
+        // Exactly the reports any other profile change sends.
+        assert_eq!(lighting_reports(&zone, &ring).unwrap().len(), 13);
     }
 
     #[test]
