@@ -784,8 +784,12 @@ fn daemon() -> Result<bool, String> {
             state::RuntimeState::default()
         }
     };
+    // Whether `headset_connected=false` was written because the dongle
+    // vanished (as opposed to a 0x09 report saying the headset is off).
+    let mut dongle_was_missing = false;
     loop {
         let Some(node) = quantum_hidraw_node()? else {
+            dongle_was_missing = true;
             if let Ok(cached) = state::load() {
                 runtime = cached;
             }
@@ -805,6 +809,21 @@ fn daemon() -> Result<bool, String> {
 
         if let Ok(cached) = state::load() {
             runtime = cached;
+        }
+        // The dongle is back. `false` was recorded when it vanished and only
+        // a 0x09 report proves the headset's power state, so until one
+        // arrives the state is unknown rather than still "off".
+        if std::mem::take(&mut dongle_was_missing) && runtime.headset_connected == Some(false) {
+            match state::update_recovering_if(|cached| {
+                let changed = cached.headset_connected == Some(false);
+                if changed {
+                    cached.headset_connected = None;
+                }
+                changed
+            }) {
+                Ok(updated) => runtime = updated,
+                Err(error) => eprintln!("failed to cache dongle reconnect: {error}"),
+            }
         }
         if let Ok((battery, _)) = query_battery(&node) {
             match state::update_recovering_if(|cached| {
@@ -1219,6 +1238,14 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
             | "ring-speed"
     ) || segment_feature(command.feature).is_some();
     let mut resolved_profile = None;
+    // Two profile commands at once (dragging the color wheel) must not
+    // interleave their reports or overwrite each other's cache; hold the lock
+    // from the cache read until the cache update.
+    let _lighting_lock = if is_profile_control {
+        Some(state::lighting_lock()?)
+    } else {
+        None
+    };
     let reports = if is_profile_control {
         let cached = match state::load() {
             Ok(state) => state,
@@ -1234,16 +1261,20 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
             (initial.clone(), initial)
         } else {
             let legacy = cached.lighting_color.clone();
+            // A zone-wide color replaces all five colors of that zone, so it
+            // does not need that zone's previous colors to be known.
+            let replaced =
+                |zone: &str| (command.feature == zone).then(|| vec![command.value.clone(); 5]);
             (
                 cached_zone(
-                    cached.logo_colors,
+                    replaced("logo-color").or(cached.logo_colors),
                     cached.logo_color.or_else(|| legacy.clone()),
                     cached.logo_effect,
                     cached.logo_speed,
                     "logo",
                 )?,
                 cached_zone(
-                    cached.ring_colors,
+                    replaced("ring-color").or(cached.ring_colors),
                     cached.ring_color.or(legacy),
                     cached.ring_effect,
                     cached.ring_speed,
@@ -1312,7 +1343,7 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
             return Err(error);
         }
     }
-    if let Some((logo, ring)) = resolved_profile {
+    let cache_result = if let Some((logo, ring)) = resolved_profile {
         state::update_lighting_profile(
             &logo.colors,
             &ring.colors,
@@ -1320,11 +1351,16 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
             &ring.effect,
             &logo.speed,
             &ring.speed,
-        )?;
+        )
     } else {
-        state::update_control(command.feature, &command.value)?;
-    }
+        state::update_control(command.feature, &command.value)
+    };
     println!("{} set to {}", command.feature, command.value);
+    // The headset already accepted every report: the command succeeded even
+    // if the status cache could not record it.
+    if let Err(error) = cache_result {
+        eprintln!("warning: the status cache was not updated: {error}");
+    }
     Ok(true)
 }
 

@@ -72,8 +72,12 @@ test("non-numeric and out-of-range battery values are rejected", () => {
 })
 
 test("direct and cached statuses share the result normalization and unknown UI", () => {
-    const applyResultCalls = widgetSource.match(/root\.applyResult\(data\)/g) ?? []
-    assert.equal(applyResultCalls.length, 2)
+    // Both the cached and the direct read finish through finishRefresh,
+    // which applies the result with the same normalization.
+    const finishCalls = widgetSource.match(/root\.finishRefresh\(data\)/g) ?? []
+    assert.equal(finishCalls.length, 2)
+    assert.match(widgetSource,
+        /function finishRefresh\(data\) \{\n\s+updating = false\n\s+applyResult\(data\)/)
     assert.match(widgetSource,
         /visible: root\.batteryPercent < 0\n\s+text: "—"/)
     assert.match(widgetSource,

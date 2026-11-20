@@ -54,6 +54,9 @@ PlasmoidItem {
     property int gameChatValue: -1
     property bool controlBusy: false
     property bool updating: false
+    // Set when a refresh is requested while another is running, so a burst
+    // of daemon signals is never reduced to the first, stale read.
+    property bool refreshPending: false
     property bool equalizerUpdating: false
     property bool equalizerBusy: false
     property int equalizerVisualRevision: 0
@@ -116,7 +119,9 @@ PlasmoidItem {
         { "label": "LN3 Immersion", "profileId": "ln3-immersion" },
         { "label": "LN3 Thrill", "profileId": "ln3-thrill" }
     ]
-    readonly property bool deviceAvailable: batteryPercent >= 0
+    // A headset reported off keeps its last battery reading on screen (in
+    // grey), but nothing can be written to it.
+    readonly property bool deviceAvailable: batteryPercent >= 0 && headsetConnected !== false
     readonly property bool daemonAvailable: daemonWatcher.registered
     readonly property color batteryColor: headsetConnected === false
         ? Kirigami.Theme.disabledTextColor
@@ -143,11 +148,21 @@ PlasmoidItem {
 
     function refresh() {
         if (updating) {
+            refreshPending = true
             return
         }
         updating = true
         errorMessage = ""
         cachedState.connectSource(cachedCommand)
+    }
+
+    function finishRefresh(data) {
+        updating = false
+        applyResult(data)
+        if (refreshPending) {
+            refreshPending = false
+            refreshAfterControl.restart()
+        }
     }
 
     function runControl(feature, value) {
@@ -1818,8 +1833,7 @@ PlasmoidItem {
                 }
                 return
             }
-            root.updating = false
-            root.applyResult(data)
+            root.finishRefresh(data)
         }
     }
 
@@ -1831,8 +1845,7 @@ PlasmoidItem {
             disconnectSource(sourceName)
             const exitCode = Number(data["exit code"] ?? -1)
             if (exitCode === 0) {
-                root.updating = false
-                root.applyResult(data)
+                root.finishRefresh(data)
                 return
             }
             // The cache is unavailable only while the daemon starts/stops or

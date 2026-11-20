@@ -18,6 +18,7 @@ static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 // effective between daemon threads, whose independently opened descriptors do
 // not provide a portable in-process locking guarantee.
 static STATE_MUTEX: Mutex<()> = Mutex::new(());
+static LIGHTING_MUTEX: Mutex<()> = Mutex::new(());
 
 // Linux flock(2) constants. SonicCore targets Linux and uses this direct FFI
 // to avoid expanding the dependency set for a single system call.
@@ -170,7 +171,9 @@ fn replace_if_changed<T: PartialEq>(slot: &mut Option<T>, value: T) -> bool {
 }
 
 pub fn path() -> Result<PathBuf, String> {
+    // An empty value would silently resolve to the current directory.
     let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
         .ok_or("XDG_RUNTIME_DIR is not set; refusing to store runtime state elsewhere")?;
     Ok(PathBuf::from(runtime).join("jambalinux-soniccore-state.json"))
 }
@@ -249,6 +252,44 @@ impl StateLock<'static> {
 }
 
 impl Drop for StateLock<'_> {
+    fn drop(&mut self) {
+        let _ = unsafe { flock(self.file.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+/// Serializes complete lighting-profile commands (cache read, HID writes and
+/// cache update) across processes. It is separate from the state lock, which
+/// each cache update takes on its own, so holding both never deadlocks.
+pub struct LightingLock {
+    _thread_lock: MutexGuard<'static, ()>,
+    file: fs::File,
+}
+
+pub fn lighting_lock() -> Result<LightingLock, String> {
+    let thread_lock = LIGHTING_MUTEX
+        .lock()
+        .map_err(|_| "lighting lock was poisoned".to_owned())?;
+    let path = path()?.with_file_name("jambalinux-soniccore-lighting.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("failed to open lighting lock: {error}"))?;
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX) } != 0 {
+        return Err(format!(
+            "failed to lock lighting: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(LightingLock {
+        _thread_lock: thread_lock,
+        file,
+    })
+}
+
+impl Drop for LightingLock {
     fn drop(&mut self) {
         let _ = unsafe { flock(self.file.as_raw_fd(), LOCK_UN) };
     }
@@ -369,6 +410,7 @@ fn update_if_inner(
 /// Atomically load and modify the runtime state, persisting and notifying only
 /// when the mutator reports a meaningful change. Corrupt state is never
 /// overwritten by this command-facing path.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn update_if(mutator: impl FnOnce(&mut RuntimeState) -> bool) -> Result<RuntimeState, String> {
     update_if_inner(mutator, false)
 }
@@ -384,11 +426,23 @@ pub fn update_recovering_if(
 
 /// Atomically load, modify, and save the runtime state. Missing state starts
 /// from defaults; corrupt or unreadable state is never overwritten silently.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn update(mutator: impl FnOnce(&mut RuntimeState)) -> Result<RuntimeState, String> {
     update_if(|state| {
         mutator(state);
         true
     })
+}
+
+/// Records a value the headset has just accepted. The device write already
+/// happened, so a corrupt cache is quarantined (kept beside the state file)
+/// instead of turning a successful command into a reported failure.
+fn update_after_device_write(mutator: impl FnOnce(&mut RuntimeState)) -> Result<(), String> {
+    update_recovering_if(|state| {
+        mutator(state);
+        true
+    })
+    .map(|_| ())
 }
 
 pub fn init_signal_service() -> Result<(), String> {
@@ -421,7 +475,7 @@ pub fn update_control(feature: &str, value: &str) -> Result<(), String> {
     ) {
         return Err(format!("unsupported cached control: {feature}"));
     }
-    update(|state| match feature {
+    update_after_device_write(|state| match feature {
         "ambient" => state.ambient_mode = Some(value.into()),
         "lighting" => state.lighting_enabled = Some(value == "on"),
         "color" => {
@@ -443,7 +497,6 @@ pub fn update_control(feature: &str, value: &str) -> Result<(), String> {
         "sidetone" => state.sidetone_level = Some(value.into()),
         _ => unreachable!("validated above"),
     })
-    .map(|_| ())
 }
 
 pub fn update_lighting_profile(
@@ -454,7 +507,7 @@ pub fn update_lighting_profile(
     logo_speed: &str,
     ring_speed: &str,
 ) -> Result<(), String> {
-    update(|state| {
+    update_after_device_write(|state| {
         state.lighting_enabled = Some(true);
         state.logo_colors = Some(logo_colors.to_vec());
         state.ring_colors = Some(ring_colors.to_vec());
@@ -470,7 +523,6 @@ pub fn update_lighting_profile(
         state.logo_speed = Some(logo_speed.into());
         state.ring_speed = Some(ring_speed.into());
     })
-    .map(|_| ())
 }
 
 /// Persist the portions of a lighting profile that are known after a failed
@@ -490,14 +542,13 @@ pub fn update_partial_lighting_profile(
         return Ok(());
     };
 
-    update(|state| {
+    update_after_device_write(|state| {
         apply_zone_cache_update(state, true, logo, logo_colors, logo_effect, logo_speed);
         apply_zone_cache_update(state, false, ring, ring_colors, ring_effect, ring_speed);
         // A partial profile cannot safely claim that both zones share one
         // uniform color, even if the surviving cached values happen to match.
         state.lighting_color = None;
     })
-    .map(|_| ())
 }
 
 fn apply_zone_cache_update(
@@ -761,21 +812,58 @@ mod tests {
     }
 
     #[test]
+    fn lighting_lock_serializes_commands_without_blocking_cache_updates() {
+        with_test_runtime(|directory| {
+            let held = lighting_lock().unwrap();
+            // The cache update inside a lighting command takes the state lock
+            // while the lighting lock is held; they must not deadlock.
+            update_control("sidetone", "low").unwrap();
+            assert!(
+                directory
+                    .join("jambalinux-soniccore-lighting.lock")
+                    .exists()
+            );
+
+            // Another process cannot start a lighting command meanwhile.
+            let lock_file =
+                fs::File::open(directory.join("jambalinux-soniccore-lighting.lock")).unwrap();
+            const LOCK_NB: c_int = 4;
+            assert_ne!(
+                unsafe { flock(lock_file.as_raw_fd(), LOCK_EX | LOCK_NB) },
+                0,
+                "the lighting lock must be exclusive"
+            );
+            drop(held);
+            assert_eq!(
+                unsafe { flock(lock_file.as_raw_fd(), LOCK_EX | LOCK_NB) },
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn an_empty_runtime_directory_is_treated_as_unset() {
+        with_test_runtime(|_| {
+            unsafe { std::env::set_var("XDG_RUNTIME_DIR", "") };
+            assert!(path().unwrap_err().contains("XDG_RUNTIME_DIR is not set"));
+        });
+    }
+
+    #[test]
     fn corrupt_state_is_reported_and_not_overwritten() {
         with_test_runtime(|_| {
             let state_path = path().unwrap();
             fs::write(&state_path, b"{ not valid json").unwrap();
             assert!(matches!(load(), Err(LoadError::Corrupt(_))));
             let original = fs::read(&state_path).unwrap();
-            let error = update_control("sidetone", "high").unwrap_err();
+            // Plain command-facing updates never overwrite a corrupt cache.
+            let error = update(|state| state.sidetone_level = Some("low".into())).unwrap_err();
             assert!(error.contains("corrupt"));
             assert_eq!(fs::read(&state_path).unwrap(), original);
 
-            update_recovering_if(|state| {
-                state.sidetone_level = Some("high".into());
-                true
-            })
-            .unwrap();
+            // After the headset accepted a write, the cache is recovered
+            // (the corrupt copy is kept) instead of reporting a failure.
+            update_control("sidetone", "high").unwrap();
             let quarantined = fs::read_dir(state_path.parent().unwrap())
                 .unwrap()
                 .map(Result::unwrap)
