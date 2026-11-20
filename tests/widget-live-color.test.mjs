@@ -86,7 +86,7 @@ test("sem headset disponível, ou com o OpenRGB no controle, nada é enviado", (
 
 test("o seletor continua ativo enquanto um comando roda", () => {
     assert.match(widgetSource,
-        /id: colorPicker[\s\S]{0,400}enabled: root\.lightingWritable && root\.canApplyLightingColor\(\)/)
+        /id: colorPicker[\s\S]{0,600}enabled: root\.lightingWritable && root\.canApplyLightingColor\(\)/)
 })
 
 test("escolher um matiz partindo do preto gera uma cor visível", () => {

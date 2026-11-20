@@ -24,7 +24,7 @@ test("o tema Leve é o padrão e a página de configuração oferece os dois", (
 })
 
 test("o Vivo só substitui o topo e só roda com o painel aberto", () => {
-    assert.match(mainSource, /VivoPanel \{\n\s+visible: root\.vivo/)
+    assert.match(mainSource, /VivoPanel \{\n\s+id: vivoPanel\n\s+visible: root\.vivo/)
     assert.match(mainSource, /running: root\.vivo && root\.expanded/)
     // The Leve header (image and big battery label) hides only in Vivo.
     assert.match(mainSource, /Image \{\n\s+visible: !root\.vivo\n\s+source: root\.equipmentImage/)
@@ -83,4 +83,15 @@ test("cores pretas ou luzes apagadas usam a cor de destaque do sistema", () => {
     assert.equal(call("#59C319"), "#59c319")
     assert.equal(call("#000000"), "accent")
     assert.equal(call(null), "accent")
+})
+
+test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros", () => {
+    assert.match(configXml, /<entry name="background" type="String">\s*<default>aurora<\/default>/)
+    assert.match(configXml, /<entry name="backgroundIntensity" type="Int">\s*<default>1<\/default>/)
+    assert.match(configXml, /<entry name="backgroundReactive" type="Bool">\s*<default>true<\/default>/)
+    // The background is the first child of the popup, behind the controls.
+    assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && root\.vivoBackground !== "none"/)
+    assert.match(mainSource, /running: root\.vivo && root\.expanded\n\s+bass: vivoPanel\.bass/)
+    // The wallpaper is only looked up for the glass background.
+    assert.match(mainSource, /if \(expanded && vivo && vivoBackground === "glass"\)/)
 })

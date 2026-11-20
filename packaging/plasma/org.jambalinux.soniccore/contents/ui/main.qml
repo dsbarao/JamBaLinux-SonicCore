@@ -147,6 +147,9 @@ PlasmoidItem {
     // grey), but nothing can be written to it.
     // "leve" keeps the original interface; "vivo" adds the live header.
     readonly property bool vivo: Plasmoid.configuration.theme === "vivo"
+    readonly property string vivoBackground: Plasmoid.configuration.background || "aurora"
+    // The desktop wallpaper for the "glass" background, looked up on open.
+    property url wallpaperUrl
     // The lights' own colors tint the Vivo theme; black or unknown zones
     // fall back to the system accent.
     readonly property color vivoAccentA: vivoAccent(Array.isArray(logoColors) ? logoColors[0] : logoColor)
@@ -911,1047 +914,1069 @@ PlasmoidItem {
         }
     }
 
-    fullRepresentation: ColumnLayout {
-        id: expandedRepresentation
-        readonly property int equalizerColumns: width >= Kirigami.Units.gridUnit * 20 ? 10 : 5
-        readonly property real requiredGridHeight: (root.openSection === "lighting"
-            ? 52 : root.openSection === "equalizer" ? 66 : root.openSection.length > 0 ? 32 : 25)
-            + (root.vivo ? 4 : 0)
-
+    fullRepresentation: Item {
         Layout.minimumWidth: Kirigami.Units.gridUnit * 19
-        Layout.minimumHeight: Kirigami.Units.gridUnit * requiredGridHeight
+        Layout.minimumHeight: Kirigami.Units.gridUnit * expandedRepresentation.requiredGridHeight
         Layout.preferredWidth: Kirigami.Units.gridUnit * 21
-        Layout.preferredHeight: Kirigami.Units.gridUnit * requiredGridHeight
-        spacing: Kirigami.Units.smallSpacing
+        Layout.preferredHeight: Kirigami.Units.gridUnit * expandedRepresentation.requiredGridHeight
 
-        PlasmaComponents.Label {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.maximumHeight: implicitHeight
-            text: "JamBaLinux SonicCore"
-            font.bold: true
-            font.pixelSize: Kirigami.Units.gridUnit * 1.05
-        }
-
-        PlasmaComponents.Label {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.maximumHeight: implicitHeight
-            text: "JBL Quantum 810 Wireless"
-            opacity: 0.7
-        }
-
-        VivoPanel {
-            visible: root.vivo
-            Layout.fillWidth: true
-            Layout.preferredHeight: implicitHeight
+        // Drawn behind every control; only with the Vivo theme.
+        VivoBackground {
+            anchors.fill: parent
+            visible: root.vivo && root.vivoBackground !== "none"
+            style: root.vivoBackground
+            intensity: Plasmoid.configuration.backgroundIntensity
+            reactive: Plasmoid.configuration.backgroundReactive
             running: root.vivo && root.expanded
-            batteryPercent: root.batteryPercent
-            charging: root.charging
-            headsetConnected: root.headsetConnected
-            batteryColor: root.batteryColor
+            bass: vivoPanel.bass
             accentA: root.vivoAccentA
             accentB: root.vivoAccentB
-            equipmentImage: root.equipmentImage
-            pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
-            hoursLeftText: root.hoursLeftText
-        }
-
-        Image {
-            visible: !root.vivo
-            source: root.equipmentImage
-            fillMode: Image.PreserveAspectFit
-            smooth: true
-            mipmap: true
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 8
-            Layout.preferredHeight: Kirigami.Units.gridUnit * 8
-            Layout.maximumWidth: Kirigami.Units.gridUnit * 8
-            Layout.maximumHeight: Kirigami.Units.gridUnit * 8
-        }
-
-        PlasmaComponents.Label {
-            visible: !root.vivo
-            Layout.alignment: Qt.AlignHCenter
-            Layout.maximumHeight: implicitHeight
-            text: root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "—"
-            color: root.batteryColor
-            font.pixelSize: Kirigami.Units.gridUnit * 1.7
-            font.bold: true
-        }
-
-        PlasmaComponents.Label {
-            visible: !root.vivo && root.hoursLeftText.length > 0
-            Layout.alignment: Qt.AlignHCenter
-            Layout.maximumHeight: implicitHeight
-            text: root.hoursLeftText
-            opacity: 0.7
-        }
-
-        RowLayout {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.maximumHeight: implicitHeight
-            spacing: Kirigami.Units.largeSpacing
-
-            PlasmaComponents.Label {
-                text: root.headsetConnected === null
-                    ? "Headset: aguardando"
-                    : root.headsetConnected ? "● Ligado" : "○ Desligado"
-                color: root.headsetConnected === true
-                    ? Kirigami.Theme.positiveTextColor
-                    : Kirigami.Theme.disabledTextColor
-                font.bold: root.headsetConnected === true
-            }
-
-            PlasmaComponents.Label {
-                text: root.microphoneState === "active"
-                    ? "● Microfone ativo"
-                    : root.microphoneState === "muted" ? "● Microfone mudo" : "Microfone aguardando"
-                color: root.microphoneState === "muted"
-                    ? Kirigami.Theme.negativeTextColor
-                    : root.microphoneState === "active"
-                        ? Kirigami.Theme.positiveTextColor
-                        : Kirigami.Theme.disabledTextColor
-                font.bold: root.microphoneState !== "unknown"
-            }
-        }
-
-        PlasmaComponents.Label {
-            Layout.fillWidth: true
-            Layout.minimumHeight: Kirigami.Units.gridUnit
-            Layout.preferredHeight: Kirigami.Units.gridUnit
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            text: root.actionMessage
-            opacity: root.actionMessage.length > 0 ? 1 : 0
-            color: root.actionFailed
-                ? Kirigami.Theme.negativeTextColor
-                : Kirigami.Theme.positiveTextColor
-            wrapMode: Text.Wrap
+            wallpaper: root.wallpaperUrl
         }
 
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.maximumHeight: implicitHeight
+            id: expandedRepresentation
+            anchors.fill: parent
+            readonly property int equalizerColumns: width >= Kirigami.Units.gridUnit * 20 ? 10 : 5
+            readonly property real requiredGridHeight: (root.openSection === "lighting"
+                ? 52 : root.openSection === "equalizer" ? 66 : root.openSection.length > 0 ? 32 : 25)
+                + (root.vivo ? 4 : 0)
+
             spacing: Kirigami.Units.smallSpacing
+
+            PlasmaComponents.Label {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                text: "JamBaLinux SonicCore"
+                font.bold: true
+                font.pixelSize: Kirigami.Units.gridUnit * 1.05
+            }
+
+            PlasmaComponents.Label {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                text: "JBL Quantum 810 Wireless"
+                opacity: 0.7
+            }
+
+            VivoPanel {
+                id: vivoPanel
+                visible: root.vivo
+                Layout.fillWidth: true
+                Layout.preferredHeight: implicitHeight
+                running: root.vivo && root.expanded
+                batteryPercent: root.batteryPercent
+                charging: root.charging
+                headsetConnected: root.headsetConnected
+                batteryColor: root.batteryColor
+                accentA: root.vivoAccentA
+                accentB: root.vivoAccentB
+                equipmentImage: root.equipmentImage
+                pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
+                hoursLeftText: root.hoursLeftText
+            }
+
+            Image {
+                visible: !root.vivo
+                source: root.equipmentImage
+                // Same as the Vivo header: downscale the 1254 px photo once.
+                sourceSize.width: Kirigami.Units.gridUnit * 16
+                sourceSize.height: Kirigami.Units.gridUnit * 16
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                mipmap: true
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 8
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 8
+                Layout.maximumHeight: Kirigami.Units.gridUnit * 8
+            }
+
+            PlasmaComponents.Label {
+                visible: !root.vivo
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                text: root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "—"
+                color: root.batteryColor
+                font.pixelSize: Kirigami.Units.gridUnit * 1.7
+                font.bold: true
+            }
+
+            PlasmaComponents.Label {
+                visible: !root.vivo && root.hoursLeftText.length > 0
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                text: root.hoursLeftText
+                opacity: 0.7
+            }
 
             RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                spacing: Kirigami.Units.largeSpacing
+
+                PlasmaComponents.Label {
+                    text: root.headsetConnected === null
+                        ? "Headset: aguardando"
+                        : root.headsetConnected ? "● Ligado" : "○ Desligado"
+                    color: root.headsetConnected === true
+                        ? Kirigami.Theme.positiveTextColor
+                        : Kirigami.Theme.disabledTextColor
+                    font.bold: root.headsetConnected === true
+                }
+
+                PlasmaComponents.Label {
+                    text: root.microphoneState === "active"
+                        ? "● Microfone ativo"
+                        : root.microphoneState === "muted" ? "● Microfone mudo" : "Microfone aguardando"
+                    color: root.microphoneState === "muted"
+                        ? Kirigami.Theme.negativeTextColor
+                        : root.microphoneState === "active"
+                            ? Kirigami.Theme.positiveTextColor
+                            : Kirigami.Theme.disabledTextColor
+                    font.bold: root.microphoneState !== "unknown"
+                }
+            }
+
+            PlasmaComponents.Label {
                 Layout.fillWidth: true
-
-                PlasmaComponents.Label {
-                    text: "Chat"
-                    font.bold: root.gameChatValue >= 0 && root.gameChatValue < 8
-                }
-
-                Item { Layout.fillWidth: true }
-
-                PlasmaComponents.Label {
-                    text: root.gameChatValue < 0
-                        ? "Mova o dial para detectar"
-                        : root.gameChatValue === 8 ? "Centro" : `${root.gameChatValue}/16`
-                    opacity: 0.7
-                }
-
-                Item { Layout.fillWidth: true }
-
-                PlasmaComponents.Label {
-                    text: "Game"
-                    font.bold: root.gameChatValue > 8
-                }
+                Layout.minimumHeight: Kirigami.Units.gridUnit
+                Layout.preferredHeight: Kirigami.Units.gridUnit
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                text: root.actionMessage
+                opacity: root.actionMessage.length > 0 ? 1 : 0
+                color: root.actionFailed
+                    ? Kirigami.Theme.negativeTextColor
+                    : Kirigami.Theme.positiveTextColor
+                wrapMode: Text.Wrap
             }
-
-            Item {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 16
-
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 6
-                    radius: 3
-                    color: Kirigami.Theme.disabledTextColor
-                    opacity: 0.35
-                }
-
-                Rectangle {
-                    visible: root.gameChatValue >= 0
-                    x: (parent.width - width) * Math.max(0, Math.min(16, root.gameChatValue)) / 16
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 14
-                    height: 14
-                    radius: 7
-                    color: Kirigami.Theme.highlightColor
-                    border.width: 2
-                    border.color: Kirigami.Theme.backgroundColor
-                }
-            }
-        }
-
-        RowLayout {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.maximumHeight: implicitHeight
-            spacing: Kirigami.Units.smallSpacing
-                PlasmaComponents.Button {
-                    text: "Ambiente"
-                icon.name: "audio-headphones-symbolic"
-                enabled: root.deviceAvailable && !root.controlBusy
-                checkable: true
-                checked: root.openSection === "ambient"
-                onClicked: root.openSection = checked ? "ambient" : ""
-            }
-
-            PlasmaComponents.Button {
-                text: "Luzes"
-                icon.source: Qt.resolvedUrl("../images/light-bulb.svg")
-                enabled: root.deviceAvailable && !root.controlBusy
-                checkable: true
-                checked: root.openSection === "lighting"
-                onClicked: {
-                    root.openSection = checked ? "lighting" : ""
-                    if (checked) root.loadPicker()
-                }
-            }
-
-            PlasmaComponents.Button {
-                text: "Retorno"
-                icon.name: "microphone-sensitivity-high"
-                enabled: root.deviceAvailable && !root.controlBusy
-                checkable: true
-                checked: root.openSection === "sidetone"
-                onClicked: root.openSection = checked ? "sidetone" : ""
-            }
-
-            PlasmaComponents.Button {
-                text: "Equalizador"
-                icon.name: "view-filter"
-                enabled: !root.equalizerBusy
-                checkable: true
-                checked: root.openSection === "equalizer"
-                onClicked: {
-                    root.openSection = checked ? "equalizer" : ""
-                    // Never reopen the panel on a half-finished name entry or
-                    // on a deletion that was left awaiting confirmation.
-                    root.closeEqualizerProfileEditors()
-                    if (checked) root.refreshEqualizer()
-                }
-            }
-
-            PlasmaComponents.Button {
-                text: "Espacial"
-                icon.name: "audio-speakers-symbolic"
-                checkable: true
-                checked: root.openSection === "spatial"
-                onClicked: {
-                    root.openSection = checked ? "spatial" : ""
-                    if (checked) root.refreshSpatial()
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            implicitHeight: controlOptions.implicitHeight + Kirigami.Units.largeSpacing * 2
-            visible: root.openSection.length > 0
-            radius: Kirigami.Units.cornerRadius
-            color: Kirigami.Theme.backgroundColor
-            border.width: 1
-            border.color: Kirigami.Theme.disabledTextColor
 
             ColumnLayout {
-                id: controlOptions
-                anchors.fill: parent
-                anchors.margins: Kirigami.Units.largeSpacing
+                Layout.fillWidth: true
+                Layout.maximumHeight: implicitHeight
                 spacing: Kirigami.Units.smallSpacing
 
-                PlasmaComponents.Label {
-                    Layout.alignment: Qt.AlignHCenter
-                    text: root.openSection === "ambient"
-                        ? "Controle de som ambiente"
-                        : root.openSection === "lighting" ? "Iluminação"
-                        : root.openSection === "equalizer" ? "Equalizador de saída"
-                        : root.openSection === "spatial" ? "Áudio espacial / binaural (experimental)"
-                        : "Retorno do microfone"
-                    font.bold: true
-                }
-
-                PlasmaComponents.Label {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection !== "equalizer"
-                    text: root.openSection === "ambient"
-                        ? `Atual: ${root.ambientLabel(root.ambientMode)}`
-                        : root.openSection === "lighting"
-                            ? root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
-                            : root.openSection === "spatial"
-                                ? root.spatialStatusText()
-                            : `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
-                    opacity: 0.7
-                }
-
                 RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "ambient"
-                    enabled: root.deviceAvailable && !root.controlBusy
-                    PlasmaComponents.Button { text: "Desligado"; checked: root.ambientMode === "off"; onClicked: root.runControl("ambient", "off") }
-                    PlasmaComponents.Button { text: "ANC"; checked: root.ambientMode === "anc"; onClicked: root.runControl("ambient", "anc") }
-                    PlasmaComponents.Button { text: "TalkThru"; checked: root.ambientMode === "talkthru"; onClicked: root.runControl("ambient", "talkthru") }
-                }
-
-                ColumnLayout {
                     Layout.fillWidth: true
-                    visible: root.openSection === "equalizer"
-                    // Only profile actions below are blocked while one runs: the band sliders
-                    // keep moving and queue their latest value (pendingEqualizerBands).
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.ComboBox {
-                        id: equalizerProfileSelector
-                        enabled: !root.equalizerBusy && !root.equalizerUpdating
-                        Layout.alignment: Qt.AlignHCenter
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 14
-                        model: equalizerProfileModel
-                        textRole: "label"
-                        valueRole: "profileId"
-                        // Taken from the canonical selection rather than from
-                        // currentText, which follows an index the control may
-                        // have rewritten while the model was being rebuilt.
-                        displayText: root.equalizerSelectionLabel()
-
-                        // Reasserted after every catalog rebuild and after every
-                        // confirmed selection change, for the same reason.
-                        function synchronizeSelection() {
-                            currentIndex = root.equalizerProfileIndex(
-                                root.equalizerActiveProfileId)
-                        }
-
-                        Component.onCompleted: equalizerProfileSelector.synchronizeSelection()
-                        onCountChanged: equalizerProfileSelector.synchronizeSelection()
-                        onActivated: function(index) {
-                            const profile = equalizerProfileModel.get(index)
-                            if (profile === null || profile === undefined) return
-                            root.applyEqualizerProfile(profile.profileId, profile.factory)
-                            // The selector never leads the CLI: the confirmed
-                            // entry stays shown until a refresh reports the new
-                            // selection, including when the request is refused.
-                            equalizerProfileSelector.synchronizeSelection()
-                        }
-
-                        Connections {
-                            target: root
-
-                            function onEqualizerProfileRevisionChanged() {
-                                equalizerProfileSelector.synchronizeSelection()
-                            }
-
-                            function onEqualizerActiveProfileIdChanged() {
-                                equalizerProfileSelector.synchronizeSelection()
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        enabled: !root.equalizerBusy && !root.equalizerUpdating
-                        Layout.alignment: Qt.AlignHCenter
-
-                        PlasmaComponents.Button {
-                            text: "Criar perfil"
-                            icon.name: "list-add"
-                            checkable: true
-                            checked: root.equalizerCreateVisible
-                            onClicked: {
-                                const opening = !root.equalizerCreateVisible
-                                root.closeEqualizerProfileEditors()
-                                root.equalizerCreateVisible = opening
-                            }
-                        }
-
-                        PlasmaComponents.Button {
-                            // Factory presets are immutable: the library
-                            // actions exist only for user-owned profiles.
-                            visible: root.selectedEqualizerProfileIsCustom()
-                            text: "Atualizar"
-                            icon.name: "document-save"
-                            onClicked: root.updateEqualizerProfile()
-                        }
-
-                        PlasmaComponents.Button {
-                            visible: root.selectedEqualizerProfileIsCustom()
-                            text: "Renomear"
-                            icon.name: "edit-rename"
-                            checkable: true
-                            checked: root.equalizerRenameVisible
-                            onClicked: {
-                                const opening = !root.equalizerRenameVisible
-                                const profile = root.selectedEqualizerProfile()
-                                root.closeEqualizerProfileEditors()
-                                root.equalizerRenameVisible = opening
-                                if (opening && profile !== null)
-                                    root.equalizerProfileNameDraft = String(profile.label)
-                            }
-                        }
-
-                        PlasmaComponents.Button {
-                            visible: root.selectedEqualizerProfileIsCustom()
-                            text: root.equalizerDeleteConfirmation
-                                ? "Confirmar exclusão" : "Excluir"
-                            icon.name: "edit-delete"
-                            onClicked: {
-                                if (root.equalizerDeleteConfirmation) {
-                                    root.equalizerDeleteConfirmation = false
-                                    root.deleteEqualizerProfile()
-                                } else {
-                                    root.closeEqualizerProfileEditors()
-                                    root.equalizerDeleteConfirmation = true
-                                }
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        enabled: !root.equalizerBusy && !root.equalizerUpdating
-                        Layout.fillWidth: true
-                        visible: root.equalizerCreateVisible || root.equalizerRenameVisible
-                        onVisibleChanged: {
-                            if (!visible) return
-                            // Opening the editor always shows the draft that the
-                            // action prepared, never the text left behind by an
-                            // earlier edit.
-                            equalizerProfileNameField.adoptDraft()
-                            equalizerProfileNameField.forceActiveFocus()
-                        }
-
-                        PlasmaComponents.TextField {
-                            id: equalizerProfileNameField
-                            Layout.fillWidth: true
-                            placeholderText: root.equalizerCreateVisible
-                                ? "Nome do novo perfil" : "Nome do perfil"
-                            // The CLI rejects longer names; stopping the entry
-                            // here avoids a rejected round trip.
-                            maximumLength: 64
-
-                            // The draft on root is the single source of truth.
-                            // Interactive editing writes `text` directly, which
-                            // would drop a declarative binding on it and leave
-                            // the field showing a stale name the next time an
-                            // editor is opened, so both directions are wired
-                            // explicitly. The equality guard keeps the two
-                            // assignments from looping and leaves the cursor
-                            // alone while the user is typing.
-                            function adoptDraft() {
-                                if (text !== root.equalizerProfileNameDraft)
-                                    text = root.equalizerProfileNameDraft
-                            }
-
-                            Component.onCompleted: equalizerProfileNameField.adoptDraft()
-                            onTextChanged: root.equalizerProfileNameDraft = text
-                            onAccepted: root.submitEqualizerProfileName()
-
-                            Connections {
-                                target: root
-
-                                function onEqualizerProfileNameDraftChanged() {
-                                    equalizerProfileNameField.adoptDraft()
-                                }
-                            }
-                        }
-
-                        PlasmaComponents.Button {
-                            text: root.equalizerCreateVisible ? "Criar" : "Salvar"
-                            enabled: root.equalizerProfileNameDraft.trim().length > 0
-                            onClicked: root.submitEqualizerProfileName()
-                        }
-
-                        PlasmaComponents.Button {
-                            text: "Cancelar"
-                            icon.name: "dialog-cancel"
-                            onClicked: root.closeEqualizerProfileEditors()
-                        }
-                    }
 
                     PlasmaComponents.Label {
-                        Layout.fillWidth: true
-                        visible: root.equalizerDeleteConfirmation
-                            && root.selectedEqualizerProfileIsCustom()
-                        text: `Excluir o perfil “${root.equalizerSelectionLabel()}”? Clique em “Confirmar exclusão” para remover definitivamente.`
-                        wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
-                        color: Kirigami.Theme.negativeTextColor
+                        text: "Chat"
+                        font.bold: root.gameChatValue >= 0 && root.gameChatValue < 8
                     }
 
-                    GridLayout {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Kirigami.Units.gridUnit
-                            * (expandedRepresentation.equalizerColumns === 10 ? 14 : 29)
-                        columns: expandedRepresentation.equalizerColumns
-                        columnSpacing: Kirigami.Units.smallSpacing
-                        rowSpacing: Kirigami.Units.largeSpacing
-
-                        Repeater {
-                            model: equalizerBandModel
-
-                            delegate: ColumnLayout {
-                                id: equalizerBand
-                                required property int frequencyHz
-                                required property real gainDb
-                                Layout.fillWidth: true
-                                Layout.minimumWidth: Kirigami.Units.gridUnit * 1.25
-                                Layout.preferredHeight: Kirigami.Units.gridUnit * 14
-                                spacing: Kirigami.Units.smallSpacing
-
-                                function synchronizeHandle() {
-                                    if (!equalizerSlider.pressed)
-                                        equalizerSlider.value = Number(gainDb)
-                                }
-
-                                Component.onCompleted: synchronizeHandle()
-                                onGainDbChanged: synchronizeHandle()
-
-                                Connections {
-                                    target: root
-
-                                    function onEqualizerVisualRevisionChanged() {
-                                        equalizerBand.synchronizeHandle()
-                                    }
-                                }
-
-                                Timer {
-                                    id: equalizerCommit
-                                    // Like a radio's volume knob: while the handle is
-                                    // dragged the band is sent at most every 70 ms, not
-                                    // only on release. The queue keeps just the latest
-                                    // value per band, so commands never pile up.
-                                    interval: 70
-                                    repeat: false
-                                    onTriggered: root.setEqualizerBand(
-                                        equalizerBand.frequencyHz,
-                                        equalizerSlider.value)
-                                }
-
-                                PlasmaComponents.Label {
-                                    Layout.fillWidth: true
-                                    horizontalAlignment: Text.AlignHCenter
-                                    text: `${Number(equalizerSlider.value) >= 0 ? "+" : ""}${Number(equalizerSlider.value).toFixed(0)}`
-                                    font.family: "monospace"
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                }
-
-                                PlasmaComponents.Slider {
-                                    id: equalizerSlider
-                                    Layout.alignment: Qt.AlignHCenter
-                                    Layout.minimumHeight: Kirigami.Units.gridUnit * 8
-                                    Layout.preferredHeight: Kirigami.Units.gridUnit * 10
-                                    orientation: Qt.Vertical
-                                    from: -12
-                                    to: 12
-                                    stepSize: 1
-                                    value: 0
-                                    // Throttle, not debounce: a running timer is left alone so
-                                    // a continuous drag still fires every interval.
-                                    onMoved: {
-                                        if (!equalizerCommit.running) equalizerCommit.start()
-                                    }
-                                    onPressedChanged: {
-                                        // Release sends the final position right away.
-                                        if (!pressed) {
-                                            equalizerCommit.stop()
-                                            root.setEqualizerBand(equalizerBand.frequencyHz, value)
-                                        }
-                                    }
-                                }
-
-                                PlasmaComponents.Label {
-                                    Layout.fillWidth: true
-                                    horizontalAlignment: Text.AlignHCenter
-                                    text: root.equalizerCompactFrequencyLabel(
-                                        equalizerBand.frequencyHz)
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                }
-                            }
-                        }
-                    }
-
-                    PlasmaComponents.Button {
-                        enabled: !root.equalizerBusy && !root.equalizerUpdating
-                        Layout.alignment: Qt.AlignHCenter
-                        text: "Zerar bandas"
-                        icon.name: "edit-clear"
-                        onClicked: root.resetEqualizer()
-                    }
+                    Item { Layout.fillWidth: true }
 
                     PlasmaComponents.Label {
-                        Layout.fillWidth: true
-                        visible: root.equalizerProblemText().length > 0
-                        text: root.equalizerProblemText()
-                        wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
-                        color: Kirigami.Theme.negativeTextColor
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    Layout.fillWidth: true
-                    visible: root.openSection === "lighting" && root.openRgbControlsLighting
-                    text: "O OpenRGB está controlando as luzes agora. Mudanças feitas aqui seriam sobrescritas pelo próximo quadro dele."
-                    wrapMode: Text.Wrap
-                    horizontalAlignment: Text.AlignHCenter
-                    color: Kirigami.Theme.neutralTextColor
-                }
-
-                PlasmaComponents.Label {
-                    Layout.fillWidth: true
-                    visible: root.openSection === "lighting" && root.powerSaving.length > 0
-                    text: root.powerSaving === "low-battery"
-                        ? "Luzes apagadas para economizar bateria (bateria baixa). Elas voltam ao carregar; ligar agora desativa a economia até lá."
-                        : "Luzes apagadas para economizar bateria (sem som). Elas voltam quando o som voltar; ligar agora mantém acesas."
-                    wrapMode: Text.Wrap
-                    horizontalAlignment: Text.AlignHCenter
-                    opacity: 0.8
-                }
-
-                PlasmaComponents.Label {
-                    Layout.fillWidth: true
-                    visible: root.openSection === "lighting" && root.lightingHeld
-                    text: "Você assumiu as luzes; o OpenRGB está pausado."
-                    wrapMode: Text.Wrap
-                    horizontalAlignment: Text.AlignHCenter
-                    opacity: 0.8
-                }
-
-                PlasmaComponents.Button {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                        && (root.openRgbControlsLighting || root.lightingHeld)
-                    enabled: !root.controlBusy
-                    text: root.lightingHeld ? "Devolver ao OpenRGB" : "Assumir controle"
-                    icon.name: root.lightingHeld ? "edit-undo" : "object-locked"
-                    onClicked: root.runLightingHold(!root.lightingHeld)
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                    enabled: root.lightingWritable && !root.controlBusy
-                    PlasmaComponents.Button { text: "Ligar"; icon.source: Qt.resolvedUrl("../images/light-on.svg"); checked: root.lightingEnabled === true; onClicked: root.runControl("lighting", "on") }
-                    PlasmaComponents.Button { text: "Desligar"; icon.source: Qt.resolvedUrl("../images/light-off.svg"); checked: root.lightingEnabled === false; onClicked: root.runControl("lighting", "off") }
-                }
-
-                PlasmaComponents.Label {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                    text: "Cor sólida personalizada"
-                    opacity: 0.7
-                }
-
-                PlasmaComponents.Label {
-                    Layout.fillWidth: true
-                    visible: root.openSection === "lighting" && !root.lightingTargetProfileKnown()
-                    text: "Perfil da zona desconhecido. Aplique uma cor sólida em Ambos para recuperar."
-                    wrapMode: Text.Wrap
-                    horizontalAlignment: Text.AlignHCenter
-                    color: Kirigami.Theme.negativeTextColor
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                    enabled: root.lightingWritable && !root.controlBusy
-
-                    PlasmaComponents.Button {
-                        text: "Ambos"
-                        checkable: true
-                        checked: root.lightingTarget === "both"
-                        onClicked: {
-                            root.lightingTarget = "both"
-                            root.lightingSegment = -1
-                            root.loadPicker()
-                        }
-                    }
-                    PlasmaComponents.Button {
-                        text: "Logotipo"
-                        checkable: true
-                        checked: root.lightingTarget === "logo"
-                        onClicked: {
-                            root.lightingTarget = "logo"
-                            root.lightingSegment = -1
-                            root.loadPicker()
-                        }
-                    }
-                    PlasmaComponents.Button {
-                        text: "Anel / fundo"
-                        checkable: true
-                        checked: root.lightingTarget === "ring"
-                        onClicked: {
-                            root.lightingTarget = "ring"
-                            root.lightingSegment = -1
-                            root.loadPicker()
-                        }
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    text: "Efeito"
-                    opacity: 0.7
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    enabled: root.lightingWritable && !root.controlBusy && root.lightingTargetProfileKnown()
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Button { text: "Respiração"; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
-                    PlasmaComponents.Button { text: "Sólido"; checked: root.selectedLightingEffect() === "solid"; onClicked: root.runControl(root.lightingEffectFeature(), "solid") }
-                    PlasmaComponents.Button { text: "Onda"; checked: root.selectedLightingEffect() === "wave"; onClicked: root.runControl(root.lightingEffectFeature(), "wave") }
-                    PlasmaComponents.Button { text: "Falha"; checked: root.selectedLightingEffect() === "glitch"; onClicked: root.runControl(root.lightingEffectFeature(), "glitch") }
-                }
-
-                PlasmaComponents.Label {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    text: "Velocidade"
-                    opacity: 0.7
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    enabled: root.lightingWritable && !root.controlBusy
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Button { text: "0,5×"; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
-                    PlasmaComponents.Button { text: "1×"; checked: root.selectedLightingSpeed() === "1.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.0") }
-                    PlasmaComponents.Button { text: "1,5×"; checked: root.selectedLightingSpeed() === "1.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.5") }
-                    PlasmaComponents.Button { text: "2×"; checked: root.selectedLightingSpeed() === "2.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "2.0") }
-                }
-
-                PlasmaComponents.Label {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                    text: root.lightingSegment < 0
-                        ? "Cor: todos os segmentos"
-                        : `Cor: segmento ${root.lightingSegment + 1}`
-                    opacity: 0.7
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    enabled: root.lightingWritable && !root.controlBusy
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Button {
-                        text: "Todos"
-                        checkable: true
-                        checked: root.lightingSegment < 0
-                        onClicked: {
-                            root.lightingSegment = -1
-                            root.loadPicker()
-                        }
+                        text: root.gameChatValue < 0
+                            ? "Mova o dial para detectar"
+                            : root.gameChatValue === 8 ? "Centro" : `${root.gameChatValue}/16`
+                        opacity: 0.7
                     }
 
-                    Repeater {
-                        model: 5
+                    Item { Layout.fillWidth: true }
 
-                        delegate: Rectangle {
-                            required property int index
-                            readonly property var colors: root.lightingTarget === "ring"
-                                ? root.ringColors : root.logoColors
-                            Layout.preferredWidth: 34
-                            Layout.preferredHeight: 30
-                            radius: Kirigami.Units.cornerRadius
-                            color: Array.isArray(colors) ? colors[index] ?? "transparent" : "transparent"
-                            border.width: root.lightingSegment === index ? 3 : 1
-                            border.color: root.lightingSegment === index
-                                ? Kirigami.Theme.highlightColor : Kirigami.Theme.textColor
-
-                            PlasmaComponents.Label {
-                                anchors.centerIn: parent
-                                text: parent.index + 1
-                                color: "white"
-                                style: Text.Outline
-                                styleColor: "black"
-                                font.bold: true
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.lightingSegment = parent.index
-                                    root.loadPicker()
-                                }
-                            }
-                        }
+                    PlasmaComponents.Label {
+                        text: "Game"
+                        font.bold: root.gameChatValue > 8
                     }
                 }
 
                 Item {
-                    id: colorPicker
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: 220
-                    Layout.preferredHeight: 220
-                    visible: root.openSection === "lighting"
-                    // Stays usable while a write runs: the latest color is
-                    // queued and sent as soon as the headset is free.
-                    enabled: root.lightingWritable && root.canApplyLightingColor()
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 16
 
-                    readonly property real centerX: width / 2
-                    readonly property real centerY: height / 2
-                    readonly property real wheelRadius: 91
-                    readonly property real ringWidth: 25
-                    readonly property real squareSize: 106
-
-                    Canvas {
-                        id: hueCanvas
-                        anchors.fill: parent
-
-                        onPaint: {
-                            const ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.lineWidth = colorPicker.ringWidth
-                            for (let degree = 0; degree < 360; ++degree) {
-                                const start = (degree - 1) * Math.PI / 180
-                                const end = (degree + 1) * Math.PI / 180
-                                ctx.beginPath()
-                                ctx.strokeStyle = Qt.hsla(degree / 360, 1, 0.5, 1)
-                                ctx.arc(colorPicker.centerX, colorPicker.centerY,
-                                    colorPicker.wheelRadius, start, end)
-                                ctx.stroke()
-                            }
-                        }
-                    }
-
-                    Canvas {
-                        id: svCanvas
-                        width: colorPicker.squareSize
-                        height: colorPicker.squareSize
-                        anchors.centerIn: parent
-
-                        onPaint: {
-                            const ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.fillStyle = Qt.hsva(root.pickerHue, 1, 1, 1)
-                            ctx.fillRect(0, 0, width, height)
-
-                            const saturation = ctx.createLinearGradient(0, 0, width, 0)
-                            saturation.addColorStop(0, "white")
-                            saturation.addColorStop(1, "transparent")
-                            ctx.fillStyle = saturation
-                            ctx.fillRect(0, 0, width, height)
-
-                            const value = ctx.createLinearGradient(0, 0, 0, height)
-                            value.addColorStop(0, "transparent")
-                            value.addColorStop(1, "black")
-                            ctx.fillStyle = value
-                            ctx.fillRect(0, 0, width, height)
-                        }
-                    }
-
-                    Connections {
-                        target: root
-                        function onPickerHueChanged() { svCanvas.requestPaint() }
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.CrossCursor
-
-                        function selectAt(pointerX, pointerY) {
-                            const offsetX = pointerX - colorPicker.centerX
-                            const offsetY = pointerY - colorPicker.centerY
-                            const distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY)
-                            const innerRadius = colorPicker.wheelRadius - colorPicker.ringWidth / 2
-                            const outerRadius = colorPicker.wheelRadius + colorPicker.ringWidth / 2
-                            if (distance >= innerRadius && distance <= outerRadius) {
-                                root.pickerHue = (Math.atan2(offsetY, offsetX) / (2 * Math.PI) + 1) % 1
-                                // From black or gray every hue is still black or gray:
-                                // picking a hue on the ring means "this color", so make
-                                // it visible instead of silently writing black again.
-                                if (root.pickerValue < 0.05) root.pickerValue = 1
-                                if (root.pickerSaturation < 0.05) root.pickerSaturation = 1
-                                svCanvas.requestPaint()
-                                root.queueLightingColor()
-                                return
-                            }
-
-                            const left = colorPicker.centerX - colorPicker.squareSize / 2
-                            const top = colorPicker.centerY - colorPicker.squareSize / 2
-                            if (pointerX >= left && pointerX <= left + colorPicker.squareSize
-                                    && pointerY >= top && pointerY <= top + colorPicker.squareSize) {
-                                root.pickerSaturation = Math.max(0, Math.min(1,
-                                    (pointerX - left) / colorPicker.squareSize))
-                                root.pickerValue = Math.max(0, Math.min(1,
-                                    1 - (pointerY - top) / colorPicker.squareSize))
-                                root.queueLightingColor()
-                            }
-                        }
-
-                        onPressed: function(mouse) { selectAt(mouse.x, mouse.y) }
-                        onPositionChanged: function(mouse) {
-                            if (pressed) selectAt(mouse.x, mouse.y)
-                        }
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 6
+                        radius: 3
+                        color: Kirigami.Theme.disabledTextColor
+                        opacity: 0.35
                     }
 
                     Rectangle {
-                        width: 13
-                        height: 13
-                        radius: width / 2
-                        x: colorPicker.centerX
-                            + Math.cos(root.pickerHue * 2 * Math.PI) * colorPicker.wheelRadius
-                            - width / 2
-                        y: colorPicker.centerY
-                            + Math.sin(root.pickerHue * 2 * Math.PI) * colorPicker.wheelRadius
-                            - height / 2
-                        color: "transparent"
+                        visible: root.gameChatValue >= 0
+                        x: (parent.width - width) * Math.max(0, Math.min(16, root.gameChatValue)) / 16
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 14
+                        height: 14
+                        radius: 7
+                        color: Kirigami.Theme.highlightColor
                         border.width: 2
-                        border.color: "white"
-                    }
-
-                    Rectangle {
-                        width: 13
-                        height: 13
-                        radius: width / 2
-                        x: colorPicker.centerX - colorPicker.squareSize / 2
-                            + root.pickerSaturation * colorPicker.squareSize - width / 2
-                        y: colorPicker.centerY - colorPicker.squareSize / 2
-                            + (1 - root.pickerValue) * colorPicker.squareSize - height / 2
-                        color: "transparent"
-                        border.width: 2
-                        border.color: "white"
+                        border.color: Kirigami.Theme.backgroundColor
                     }
                 }
+            }
 
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "lighting"
-                    enabled: root.lightingWritable && root.canApplyLightingColor()
-                    spacing: Kirigami.Units.smallSpacing
-
-                    Rectangle {
-                        Layout.preferredWidth: 32
-                        Layout.preferredHeight: 32
-                        radius: Kirigami.Units.cornerRadius
-                        color: root.pickerColor
-                        border.width: 1
-                        border.color: Kirigami.Theme.textColor
-                    }
-
-                    PlasmaComponents.Label {
-                        text: root.lightingTargetProfileKnown()
-                            ? root.pickerHex().toUpperCase()
-                            : "Nova cor sincronizada"
-                        font.family: "monospace"
-                    }
-
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.openSection === "sidetone"
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                spacing: Kirigami.Units.smallSpacing
+                    PlasmaComponents.Button {
+                        text: "Ambiente"
+                    icon.name: "audio-headphones-symbolic"
                     enabled: root.deviceAvailable && !root.controlBusy
-                    PlasmaComponents.Button { text: "Off"; checked: root.sidetoneLevel === "off"; onClicked: root.runControl("sidetone", "off") }
-                    PlasmaComponents.Button { text: "Baixo"; checked: root.sidetoneLevel === "low"; onClicked: root.runControl("sidetone", "low") }
-                    PlasmaComponents.Button { text: "Médio"; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
-                    PlasmaComponents.Button { text: "Alto"; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
+                    checkable: true
+                    checked: root.openSection === "ambient"
+                    onClicked: root.openSection = checked ? "ambient" : ""
                 }
+
+                PlasmaComponents.Button {
+                    text: "Luzes"
+                    icon.source: Qt.resolvedUrl("../images/light-bulb.svg")
+                    enabled: root.deviceAvailable && !root.controlBusy
+                    checkable: true
+                    checked: root.openSection === "lighting"
+                    onClicked: {
+                        root.openSection = checked ? "lighting" : ""
+                        if (checked) root.loadPicker()
+                    }
+                }
+
+                PlasmaComponents.Button {
+                    text: "Retorno"
+                    icon.name: "microphone-sensitivity-high"
+                    enabled: root.deviceAvailable && !root.controlBusy
+                    checkable: true
+                    checked: root.openSection === "sidetone"
+                    onClicked: root.openSection = checked ? "sidetone" : ""
+                }
+
+                PlasmaComponents.Button {
+                    text: "Equalizador"
+                    icon.name: "view-filter"
+                    enabled: !root.equalizerBusy
+                    checkable: true
+                    checked: root.openSection === "equalizer"
+                    onClicked: {
+                        root.openSection = checked ? "equalizer" : ""
+                        // Never reopen the panel on a half-finished name entry or
+                        // on a deletion that was left awaiting confirmation.
+                        root.closeEqualizerProfileEditors()
+                        if (checked) root.refreshEqualizer()
+                    }
+                }
+
+                PlasmaComponents.Button {
+                    text: "Espacial"
+                    icon.name: "audio-speakers-symbolic"
+                    checkable: true
+                    checked: root.openSection === "spatial"
+                    onClicked: {
+                        root.openSection = checked ? "spatial" : ""
+                        if (checked) root.refreshSpatial()
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: controlOptions.implicitHeight + Kirigami.Units.largeSpacing * 2
+                visible: root.openSection.length > 0
+                radius: Kirigami.Units.cornerRadius
+                color: Kirigami.Theme.backgroundColor
+                border.width: 1
+                border.color: Kirigami.Theme.disabledTextColor
 
                 ColumnLayout {
-                    Layout.fillWidth: true
-                    visible: root.openSection === "spatial"
+                    id: controlOptions
+                    anchors.fill: parent
+                    anchors.margins: Kirigami.Units.largeSpacing
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.Label {
-                        Layout.fillWidth: true
-                        text: "Recurso experimental. Ative somente após instalar manualmente um dataset HRIR válido; o widget nunca baixa arquivos."
-                        wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
+                        Layout.alignment: Qt.AlignHCenter
+                        text: root.openSection === "ambient"
+                            ? "Controle de som ambiente"
+                            : root.openSection === "lighting" ? "Iluminação"
+                            : root.openSection === "equalizer" ? "Equalizador de saída"
+                            : root.openSection === "spatial" ? "Áudio espacial / binaural (experimental)"
+                            : "Retorno do microfone"
+                        font.bold: true
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection !== "equalizer"
+                        text: root.openSection === "ambient"
+                            ? `Atual: ${root.ambientLabel(root.ambientMode)}`
+                            : root.openSection === "lighting"
+                                ? root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
+                                : root.openSection === "spatial"
+                                    ? root.spatialStatusText()
+                                : `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
                         opacity: 0.7
                     }
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "ambient"
+                        enabled: root.deviceAvailable && !root.controlBusy
+                        PlasmaComponents.Button { text: "Desligado"; checked: root.ambientMode === "off"; onClicked: root.runControl("ambient", "off") }
+                        PlasmaComponents.Button { text: "ANC"; checked: root.ambientMode === "anc"; onClicked: root.runControl("ambient", "anc") }
+                        PlasmaComponents.Button { text: "TalkThru"; checked: root.ambientMode === "talkthru"; onClicked: root.runControl("ambient", "talkthru") }
+                    }
 
-                        PlasmaComponents.Switch {
-                            id: spatialToggle
-                            text: "Ativar áudio espacial"
-                            checked: root.spatialEnabled
-                            enabled: !root.spatialBusy && !root.spatialUpdating
-                                 && (root.spatialEnabled || root.spatialReady)
-                            onClicked: {
-                                const nextState = checked
-                                checked = Qt.binding(function() { return root.spatialEnabled })
-                                root.setSpatialEnabled(nextState)
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: root.openSection === "equalizer"
+                        // Only profile actions below are blocked while one runs: the band sliders
+                        // keep moving and queue their latest value (pendingEqualizerBands).
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents.ComboBox {
+                            id: equalizerProfileSelector
+                            enabled: !root.equalizerBusy && !root.equalizerUpdating
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 14
+                            model: equalizerProfileModel
+                            textRole: "label"
+                            valueRole: "profileId"
+                            // Taken from the canonical selection rather than from
+                            // currentText, which follows an index the control may
+                            // have rewritten while the model was being rebuilt.
+                            displayText: root.equalizerSelectionLabel()
+
+                            // Reasserted after every catalog rebuild and after every
+                            // confirmed selection change, for the same reason.
+                            function synchronizeSelection() {
+                                currentIndex = root.equalizerProfileIndex(
+                                    root.equalizerActiveProfileId)
+                            }
+
+                            Component.onCompleted: equalizerProfileSelector.synchronizeSelection()
+                            onCountChanged: equalizerProfileSelector.synchronizeSelection()
+                            onActivated: function(index) {
+                                const profile = equalizerProfileModel.get(index)
+                                if (profile === null || profile === undefined) return
+                                root.applyEqualizerProfile(profile.profileId, profile.factory)
+                                // The selector never leads the CLI: the confirmed
+                                // entry stays shown until a refresh reports the new
+                                // selection, including when the request is refused.
+                                equalizerProfileSelector.synchronizeSelection()
+                            }
+
+                            Connections {
+                                target: root
+
+                                function onEqualizerProfileRevisionChanged() {
+                                    equalizerProfileSelector.synchronizeSelection()
+                                }
+
+                                function onEqualizerActiveProfileIdChanged() {
+                                    equalizerProfileSelector.synchronizeSelection()
+                                }
                             }
                         }
 
-                        PlasmaComponents.BusyIndicator {
-                            running: root.spatialBusy || root.spatialUpdating
-                            visible: running
+                        RowLayout {
+                            enabled: !root.equalizerBusy && !root.equalizerUpdating
+                            Layout.alignment: Qt.AlignHCenter
+
+                            PlasmaComponents.Button {
+                                text: "Criar perfil"
+                                icon.name: "list-add"
+                                checkable: true
+                                checked: root.equalizerCreateVisible
+                                onClicked: {
+                                    const opening = !root.equalizerCreateVisible
+                                    root.closeEqualizerProfileEditors()
+                                    root.equalizerCreateVisible = opening
+                                }
+                            }
+
+                            PlasmaComponents.Button {
+                                // Factory presets are immutable: the library
+                                // actions exist only for user-owned profiles.
+                                visible: root.selectedEqualizerProfileIsCustom()
+                                text: "Atualizar"
+                                icon.name: "document-save"
+                                onClicked: root.updateEqualizerProfile()
+                            }
+
+                            PlasmaComponents.Button {
+                                visible: root.selectedEqualizerProfileIsCustom()
+                                text: "Renomear"
+                                icon.name: "edit-rename"
+                                checkable: true
+                                checked: root.equalizerRenameVisible
+                                onClicked: {
+                                    const opening = !root.equalizerRenameVisible
+                                    const profile = root.selectedEqualizerProfile()
+                                    root.closeEqualizerProfileEditors()
+                                    root.equalizerRenameVisible = opening
+                                    if (opening && profile !== null)
+                                        root.equalizerProfileNameDraft = String(profile.label)
+                                }
+                            }
+
+                            PlasmaComponents.Button {
+                                visible: root.selectedEqualizerProfileIsCustom()
+                                text: root.equalizerDeleteConfirmation
+                                    ? "Confirmar exclusão" : "Excluir"
+                                icon.name: "edit-delete"
+                                onClicked: {
+                                    if (root.equalizerDeleteConfirmation) {
+                                        root.equalizerDeleteConfirmation = false
+                                        root.deleteEqualizerProfile()
+                                    } else {
+                                        root.closeEqualizerProfileEditors()
+                                        root.equalizerDeleteConfirmation = true
+                                    }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            enabled: !root.equalizerBusy && !root.equalizerUpdating
+                            Layout.fillWidth: true
+                            visible: root.equalizerCreateVisible || root.equalizerRenameVisible
+                            onVisibleChanged: {
+                                if (!visible) return
+                                // Opening the editor always shows the draft that the
+                                // action prepared, never the text left behind by an
+                                // earlier edit.
+                                equalizerProfileNameField.adoptDraft()
+                                equalizerProfileNameField.forceActiveFocus()
+                            }
+
+                            PlasmaComponents.TextField {
+                                id: equalizerProfileNameField
+                                Layout.fillWidth: true
+                                placeholderText: root.equalizerCreateVisible
+                                    ? "Nome do novo perfil" : "Nome do perfil"
+                                // The CLI rejects longer names; stopping the entry
+                                // here avoids a rejected round trip.
+                                maximumLength: 64
+
+                                // The draft on root is the single source of truth.
+                                // Interactive editing writes `text` directly, which
+                                // would drop a declarative binding on it and leave
+                                // the field showing a stale name the next time an
+                                // editor is opened, so both directions are wired
+                                // explicitly. The equality guard keeps the two
+                                // assignments from looping and leaves the cursor
+                                // alone while the user is typing.
+                                function adoptDraft() {
+                                    if (text !== root.equalizerProfileNameDraft)
+                                        text = root.equalizerProfileNameDraft
+                                }
+
+                                Component.onCompleted: equalizerProfileNameField.adoptDraft()
+                                onTextChanged: root.equalizerProfileNameDraft = text
+                                onAccepted: root.submitEqualizerProfileName()
+
+                                Connections {
+                                    target: root
+
+                                    function onEqualizerProfileNameDraftChanged() {
+                                        equalizerProfileNameField.adoptDraft()
+                                    }
+                                }
+                            }
+
+                            PlasmaComponents.Button {
+                                text: root.equalizerCreateVisible ? "Criar" : "Salvar"
+                                enabled: root.equalizerProfileNameDraft.trim().length > 0
+                                onClicked: root.submitEqualizerProfileName()
+                            }
+
+                            PlasmaComponents.Button {
+                                text: "Cancelar"
+                                icon.name: "dialog-cancel"
+                                onClicked: root.closeEqualizerProfileEditors()
+                            }
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            visible: root.equalizerDeleteConfirmation
+                                && root.selectedEqualizerProfileIsCustom()
+                            text: `Excluir o perfil “${root.equalizerSelectionLabel()}”? Clique em “Confirmar exclusão” para remover definitivamente.`
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            color: Kirigami.Theme.negativeTextColor
+                        }
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Kirigami.Units.gridUnit
+                                * (expandedRepresentation.equalizerColumns === 10 ? 14 : 29)
+                            columns: expandedRepresentation.equalizerColumns
+                            columnSpacing: Kirigami.Units.smallSpacing
+                            rowSpacing: Kirigami.Units.largeSpacing
+
+                            Repeater {
+                                model: equalizerBandModel
+
+                                delegate: ColumnLayout {
+                                    id: equalizerBand
+                                    required property int frequencyHz
+                                    required property real gainDb
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: Kirigami.Units.gridUnit * 1.25
+                                    Layout.preferredHeight: Kirigami.Units.gridUnit * 14
+                                    spacing: Kirigami.Units.smallSpacing
+
+                                    function synchronizeHandle() {
+                                        if (!equalizerSlider.pressed)
+                                            equalizerSlider.value = Number(gainDb)
+                                    }
+
+                                    Component.onCompleted: synchronizeHandle()
+                                    onGainDbChanged: synchronizeHandle()
+
+                                    Connections {
+                                        target: root
+
+                                        function onEqualizerVisualRevisionChanged() {
+                                            equalizerBand.synchronizeHandle()
+                                        }
+                                    }
+
+                                    Timer {
+                                        id: equalizerCommit
+                                        // Like a radio's volume knob: while the handle is
+                                        // dragged the band is sent at most every 70 ms, not
+                                        // only on release. The queue keeps just the latest
+                                        // value per band, so commands never pile up.
+                                        interval: 70
+                                        repeat: false
+                                        onTriggered: root.setEqualizerBand(
+                                            equalizerBand.frequencyHz,
+                                            equalizerSlider.value)
+                                    }
+
+                                    PlasmaComponents.Label {
+                                        Layout.fillWidth: true
+                                        horizontalAlignment: Text.AlignHCenter
+                                        text: `${Number(equalizerSlider.value) >= 0 ? "+" : ""}${Number(equalizerSlider.value).toFixed(0)}`
+                                        font.family: "monospace"
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    }
+
+                                    PlasmaComponents.Slider {
+                                        id: equalizerSlider
+                                        Layout.alignment: Qt.AlignHCenter
+                                        Layout.minimumHeight: Kirigami.Units.gridUnit * 8
+                                        Layout.preferredHeight: Kirigami.Units.gridUnit * 10
+                                        orientation: Qt.Vertical
+                                        from: -12
+                                        to: 12
+                                        stepSize: 1
+                                        value: 0
+                                        // Throttle, not debounce: a running timer is left alone so
+                                        // a continuous drag still fires every interval.
+                                        onMoved: {
+                                            if (!equalizerCommit.running) equalizerCommit.start()
+                                        }
+                                        onPressedChanged: {
+                                            // Release sends the final position right away.
+                                            if (!pressed) {
+                                                equalizerCommit.stop()
+                                                root.setEqualizerBand(equalizerBand.frequencyHz, value)
+                                            }
+                                        }
+                                    }
+
+                                    PlasmaComponents.Label {
+                                        Layout.fillWidth: true
+                                        horizontalAlignment: Text.AlignHCenter
+                                        text: root.equalizerCompactFrequencyLabel(
+                                            equalizerBand.frequencyHz)
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    }
+                                }
+                            }
+                        }
+
+                        PlasmaComponents.Button {
+                            enabled: !root.equalizerBusy && !root.equalizerUpdating
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Zerar bandas"
+                            icon.name: "edit-clear"
+                            onClicked: root.resetEqualizer()
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            visible: root.equalizerProblemText().length > 0
+                            text: root.equalizerProblemText()
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            color: Kirigami.Theme.negativeTextColor
                         }
                     }
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        text: !root.spatialDatasetValid
-                            ? "Dataset: ausente ou inválido — adicione-o manualmente em spatial/hrtf/"
-                            : root.spatialActive
-                                ? root.spatialProcessingMode === "bypass"
-                                    ? "Estado: desativado (bypass) e saudável"
-                                    : root.spatialProcessingMode === "binaural"
-                                        ? "Estado: binaural ativo e saudável"
-                                        : "Estado: mix em transição ou ainda não confirmado"
-                                : root.spatialEnabled
-                                    ? "Estado: preparando; aguardando um caminho saudável"
-                                    : "Estado: desativado"
+                        visible: root.openSection === "lighting" && root.openRgbControlsLighting
+                        text: "O OpenRGB está controlando as luzes agora. Mudanças feitas aqui seriam sobrescritas pelo próximo quadro dele."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
-                        color: root.spatialActive
-                            ? Kirigami.Theme.positiveTextColor
-                            : root.spatialError.length > 0
-                                ? Kirigami.Theme.negativeTextColor
-                                : Kirigami.Theme.neutralTextColor
+                        color: Kirigami.Theme.neutralTextColor
                     }
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: !root.spatialActive && root.spatialError.length > 0
-                        text: root.spatialError
+                        visible: root.openSection === "lighting" && root.powerSaving.length > 0
+                        text: root.powerSaving === "low-battery"
+                            ? "Luzes apagadas para economizar bateria (bateria baixa). Elas voltam ao carregar; ligar agora desativa a economia até lá."
+                            : "Luzes apagadas para economizar bateria (sem som). Elas voltam quando o som voltar; ligar agora mantém acesas."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.8
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.openSection === "lighting" && root.lightingHeld
+                        text: "Você assumiu as luzes; o OpenRGB está pausado."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.8
+                    }
+
+                    PlasmaComponents.Button {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                            && (root.openRgbControlsLighting || root.lightingHeld)
+                        enabled: !root.controlBusy
+                        text: root.lightingHeld ? "Devolver ao OpenRGB" : "Assumir controle"
+                        icon.name: root.lightingHeld ? "edit-undo" : "object-locked"
+                        onClicked: root.runLightingHold(!root.lightingHeld)
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                        enabled: root.lightingWritable && !root.controlBusy
+                        PlasmaComponents.Button { text: "Ligar"; icon.source: Qt.resolvedUrl("../images/light-on.svg"); checked: root.lightingEnabled === true; onClicked: root.runControl("lighting", "on") }
+                        PlasmaComponents.Button { text: "Desligar"; icon.source: Qt.resolvedUrl("../images/light-off.svg"); checked: root.lightingEnabled === false; onClicked: root.runControl("lighting", "off") }
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                        text: "Cor sólida personalizada"
+                        opacity: 0.7
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.openSection === "lighting" && !root.lightingTargetProfileKnown()
+                        text: "Perfil da zona desconhecido. Aplique uma cor sólida em Ambos para recuperar."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
                         color: Kirigami.Theme.negativeTextColor
                     }
 
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                        enabled: root.lightingWritable && !root.controlBusy
+
+                        PlasmaComponents.Button {
+                            text: "Ambos"
+                            checkable: true
+                            checked: root.lightingTarget === "both"
+                            onClicked: {
+                                root.lightingTarget = "both"
+                                root.lightingSegment = -1
+                                root.loadPicker()
+                            }
+                        }
+                        PlasmaComponents.Button {
+                            text: "Logotipo"
+                            checkable: true
+                            checked: root.lightingTarget === "logo"
+                            onClicked: {
+                                root.lightingTarget = "logo"
+                                root.lightingSegment = -1
+                                root.loadPicker()
+                            }
+                        }
+                        PlasmaComponents.Button {
+                            text: "Anel / fundo"
+                            checkable: true
+                            checked: root.lightingTarget === "ring"
+                            onClicked: {
+                                root.lightingTarget = "ring"
+                                root.lightingSegment = -1
+                                root.loadPicker()
+                            }
+                        }
+                    }
+
                     PlasmaComponents.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        text: "Efeito"
+                        opacity: 0.7
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        enabled: root.lightingWritable && !root.controlBusy && root.lightingTargetProfileKnown()
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents.Button { text: "Respiração"; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
+                        PlasmaComponents.Button { text: "Sólido"; checked: root.selectedLightingEffect() === "solid"; onClicked: root.runControl(root.lightingEffectFeature(), "solid") }
+                        PlasmaComponents.Button { text: "Onda"; checked: root.selectedLightingEffect() === "wave"; onClicked: root.runControl(root.lightingEffectFeature(), "wave") }
+                        PlasmaComponents.Button { text: "Falha"; checked: root.selectedLightingEffect() === "glitch"; onClicked: root.runControl(root.lightingEffectFeature(), "glitch") }
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        text: "Velocidade"
+                        opacity: 0.7
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        enabled: root.lightingWritable && !root.controlBusy
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents.Button { text: "0,5×"; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
+                        PlasmaComponents.Button { text: "1×"; checked: root.selectedLightingSpeed() === "1.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.0") }
+                        PlasmaComponents.Button { text: "1,5×"; checked: root.selectedLightingSpeed() === "1.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.5") }
+                        PlasmaComponents.Button { text: "2×"; checked: root.selectedLightingSpeed() === "2.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "2.0") }
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                        text: root.lightingSegment < 0
+                            ? "Cor: todos os segmentos"
+                            : `Cor: segmento ${root.lightingSegment + 1}`
+                        opacity: 0.7
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        enabled: root.lightingWritable && !root.controlBusy
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents.Button {
+                            text: "Todos"
+                            checkable: true
+                            checked: root.lightingSegment < 0
+                            onClicked: {
+                                root.lightingSegment = -1
+                                root.loadPicker()
+                            }
+                        }
+
+                        Repeater {
+                            model: 5
+
+                            delegate: Rectangle {
+                                required property int index
+                                readonly property var colors: root.lightingTarget === "ring"
+                                    ? root.ringColors : root.logoColors
+                                Layout.preferredWidth: 34
+                                Layout.preferredHeight: 30
+                                radius: Kirigami.Units.cornerRadius
+                                color: Array.isArray(colors) ? colors[index] ?? "transparent" : "transparent"
+                                border.width: root.lightingSegment === index ? 3 : 1
+                                border.color: root.lightingSegment === index
+                                    ? Kirigami.Theme.highlightColor : Kirigami.Theme.textColor
+
+                                PlasmaComponents.Label {
+                                    anchors.centerIn: parent
+                                    text: parent.index + 1
+                                    color: "white"
+                                    style: Text.Outline
+                                    styleColor: "black"
+                                    font.bold: true
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.lightingSegment = parent.index
+                                        root.loadPicker()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Item {
+                        id: colorPicker
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 220
+                        Layout.preferredHeight: 220
+                        visible: root.openSection === "lighting"
+                        // Stays usable while a write runs: the latest color is
+                        // queued and sent as soon as the headset is free.
+                        enabled: root.lightingWritable && root.canApplyLightingColor()
+
+                        readonly property real centerX: width / 2
+                        readonly property real centerY: height / 2
+                        readonly property real wheelRadius: 91
+                        readonly property real ringWidth: 25
+                        readonly property real squareSize: 106
+
+                        Canvas {
+                            id: hueCanvas
+                            anchors.fill: parent
+
+                            onPaint: {
+                                const ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                ctx.lineWidth = colorPicker.ringWidth
+                                for (let degree = 0; degree < 360; ++degree) {
+                                    const start = (degree - 1) * Math.PI / 180
+                                    const end = (degree + 1) * Math.PI / 180
+                                    ctx.beginPath()
+                                    ctx.strokeStyle = Qt.hsla(degree / 360, 1, 0.5, 1)
+                                    ctx.arc(colorPicker.centerX, colorPicker.centerY,
+                                        colorPicker.wheelRadius, start, end)
+                                    ctx.stroke()
+                                }
+                            }
+                        }
+
+                        Canvas {
+                            id: svCanvas
+                            width: colorPicker.squareSize
+                            height: colorPicker.squareSize
+                            anchors.centerIn: parent
+
+                            onPaint: {
+                                const ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                ctx.fillStyle = Qt.hsva(root.pickerHue, 1, 1, 1)
+                                ctx.fillRect(0, 0, width, height)
+
+                                const saturation = ctx.createLinearGradient(0, 0, width, 0)
+                                saturation.addColorStop(0, "white")
+                                saturation.addColorStop(1, "transparent")
+                                ctx.fillStyle = saturation
+                                ctx.fillRect(0, 0, width, height)
+
+                                const value = ctx.createLinearGradient(0, 0, 0, height)
+                                value.addColorStop(0, "transparent")
+                                value.addColorStop(1, "black")
+                                ctx.fillStyle = value
+                                ctx.fillRect(0, 0, width, height)
+                            }
+                        }
+
+                        Connections {
+                            target: root
+                            function onPickerHueChanged() { svCanvas.requestPaint() }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.CrossCursor
+
+                            function selectAt(pointerX, pointerY) {
+                                const offsetX = pointerX - colorPicker.centerX
+                                const offsetY = pointerY - colorPicker.centerY
+                                const distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY)
+                                const innerRadius = colorPicker.wheelRadius - colorPicker.ringWidth / 2
+                                const outerRadius = colorPicker.wheelRadius + colorPicker.ringWidth / 2
+                                if (distance >= innerRadius && distance <= outerRadius) {
+                                    root.pickerHue = (Math.atan2(offsetY, offsetX) / (2 * Math.PI) + 1) % 1
+                                    // From black or gray every hue is still black or gray:
+                                    // picking a hue on the ring means "this color", so make
+                                    // it visible instead of silently writing black again.
+                                    if (root.pickerValue < 0.05) root.pickerValue = 1
+                                    if (root.pickerSaturation < 0.05) root.pickerSaturation = 1
+                                    svCanvas.requestPaint()
+                                    root.queueLightingColor()
+                                    return
+                                }
+
+                                const left = colorPicker.centerX - colorPicker.squareSize / 2
+                                const top = colorPicker.centerY - colorPicker.squareSize / 2
+                                if (pointerX >= left && pointerX <= left + colorPicker.squareSize
+                                        && pointerY >= top && pointerY <= top + colorPicker.squareSize) {
+                                    root.pickerSaturation = Math.max(0, Math.min(1,
+                                        (pointerX - left) / colorPicker.squareSize))
+                                    root.pickerValue = Math.max(0, Math.min(1,
+                                        1 - (pointerY - top) / colorPicker.squareSize))
+                                    root.queueLightingColor()
+                                }
+                            }
+
+                            onPressed: function(mouse) { selectAt(mouse.x, mouse.y) }
+                            onPositionChanged: function(mouse) {
+                                if (pressed) selectAt(mouse.x, mouse.y)
+                            }
+                        }
+
+                        Rectangle {
+                            width: 13
+                            height: 13
+                            radius: width / 2
+                            x: colorPicker.centerX
+                                + Math.cos(root.pickerHue * 2 * Math.PI) * colorPicker.wheelRadius
+                                - width / 2
+                            y: colorPicker.centerY
+                                + Math.sin(root.pickerHue * 2 * Math.PI) * colorPicker.wheelRadius
+                                - height / 2
+                            color: "transparent"
+                            border.width: 2
+                            border.color: "white"
+                        }
+
+                        Rectangle {
+                            width: 13
+                            height: 13
+                            radius: width / 2
+                            x: colorPicker.centerX - colorPicker.squareSize / 2
+                                + root.pickerSaturation * colorPicker.squareSize - width / 2
+                            y: colorPicker.centerY - colorPicker.squareSize / 2
+                                + (1 - root.pickerValue) * colorPicker.squareSize - height / 2
+                            color: "transparent"
+                            border.width: 2
+                            border.color: "white"
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                        enabled: root.lightingWritable && root.canApplyLightingColor()
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Rectangle {
+                            Layout.preferredWidth: 32
+                            Layout.preferredHeight: 32
+                            radius: Kirigami.Units.cornerRadius
+                            color: root.pickerColor
+                            border.width: 1
+                            border.color: Kirigami.Theme.textColor
+                        }
+
+                        PlasmaComponents.Label {
+                            text: root.lightingTargetProfileKnown()
+                                ? root.pickerHex().toUpperCase()
+                                : "Nova cor sincronizada"
+                            font.family: "monospace"
+                        }
+
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "sidetone"
+                        enabled: root.deviceAvailable && !root.controlBusy
+                        PlasmaComponents.Button { text: "Off"; checked: root.sidetoneLevel === "off"; onClicked: root.runControl("sidetone", "off") }
+                        PlasmaComponents.Button { text: "Baixo"; checked: root.sidetoneLevel === "low"; onClicked: root.runControl("sidetone", "low") }
+                        PlasmaComponents.Button { text: "Médio"; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
+                        PlasmaComponents.Button { text: "Alto"; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
+                    }
+
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        text: "No jogo, selecione a saída espacial JamBaLinux. A saída de áudio padrão do sistema nunca é alterada."
-                        wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
-                        opacity: 0.6
+                        visible: root.openSection === "spatial"
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            text: "Recurso experimental. Ative somente após instalar manualmente um dataset HRIR válido; o widget nunca baixa arquivos."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.7
+                        }
+
+                        RowLayout {
+                            Layout.alignment: Qt.AlignHCenter
+
+                            PlasmaComponents.Switch {
+                                id: spatialToggle
+                                text: "Ativar áudio espacial"
+                                checked: root.spatialEnabled
+                                enabled: !root.spatialBusy && !root.spatialUpdating
+                                     && (root.spatialEnabled || root.spatialReady)
+                                onClicked: {
+                                    const nextState = checked
+                                    checked = Qt.binding(function() { return root.spatialEnabled })
+                                    root.setSpatialEnabled(nextState)
+                                }
+                            }
+
+                            PlasmaComponents.BusyIndicator {
+                                running: root.spatialBusy || root.spatialUpdating
+                                visible: running
+                            }
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            text: !root.spatialDatasetValid
+                                ? "Dataset: ausente ou inválido — adicione-o manualmente em spatial/hrtf/"
+                                : root.spatialActive
+                                    ? root.spatialProcessingMode === "bypass"
+                                        ? "Estado: desativado (bypass) e saudável"
+                                        : root.spatialProcessingMode === "binaural"
+                                            ? "Estado: binaural ativo e saudável"
+                                            : "Estado: mix em transição ou ainda não confirmado"
+                                    : root.spatialEnabled
+                                        ? "Estado: preparando; aguardando um caminho saudável"
+                                        : "Estado: desativado"
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            color: root.spatialActive
+                                ? Kirigami.Theme.positiveTextColor
+                                : root.spatialError.length > 0
+                                    ? Kirigami.Theme.negativeTextColor
+                                    : Kirigami.Theme.neutralTextColor
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            visible: !root.spatialActive && root.spatialError.length > 0
+                            text: root.spatialError
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            color: Kirigami.Theme.negativeTextColor
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            text: "No jogo, selecione a saída espacial JamBaLinux. A saída de áudio padrão do sistema nunca é alterada."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.6
+                        }
                     }
                 }
             }
-        }
 
-        PlasmaComponents.Label {
-            Layout.alignment: Qt.AlignHCenter
-            visible: root.charging
-            text: root.batteryPercent >= 100 ? "⚡ Carregado" : "⚡ Carregando"
-            color: "#f5c542"
-            font.bold: true
-        }
+            PlasmaComponents.Label {
+                Layout.alignment: Qt.AlignHCenter
+                visible: root.charging
+                text: root.batteryPercent >= 100 ? "⚡ Carregado" : "⚡ Carregando"
+                color: "#f5c542"
+                font.bold: true
+            }
 
-        PlasmaComponents.Label {
-            Layout.fillWidth: true
-            visible: root.errorMessage.length > 0 || !root.daemonAvailable
-            horizontalAlignment: Text.AlignHCenter
-            text: root.errorMessage.length > 0
-                ? root.errorMessage
-                : "Monitor em tempo real inativo"
-            color: root.errorMessage.length > 0
-                ? Kirigami.Theme.negativeTextColor
-                : Kirigami.Theme.neutralTextColor
-            wrapMode: Text.Wrap
-            opacity: 0.85
+            PlasmaComponents.Label {
+                Layout.fillWidth: true
+                visible: root.errorMessage.length > 0 || !root.daemonAvailable
+                horizontalAlignment: Text.AlignHCenter
+                text: root.errorMessage.length > 0
+                    ? root.errorMessage
+                    : "Monitor em tempo real inativo"
+                color: root.errorMessage.length > 0
+                    ? Kirigami.Theme.negativeTextColor
+                    : Kirigami.Theme.neutralTextColor
+                wrapMode: Text.Wrap
+                opacity: 0.85
+            }
         }
     }
 
@@ -2175,6 +2200,27 @@ PlasmoidItem {
         onRegisteredChanged: {
             if (registered) root.refresh()
         }
+    }
+
+    Plasma5Support.DataSource {
+        id: wallpaperSource
+        engine: "executable"
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            if (Number(data["exit code"] ?? -1) !== 0) return
+            try {
+                const path = JSON.parse(String(data.stdout ?? "")).path
+                if (typeof path === "string" && path.length > 0)
+                    root.wallpaperUrl = "file://" + path
+            } catch (error) {
+            }
+        }
+    }
+
+    // The wallpaper can change at any time; look it up each time it is shown.
+    onExpandedChanged: {
+        if (expanded && vivo && vivoBackground === "glass")
+            wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
     }
 
     // Measured battery estimate, refreshed while the popup is open.

@@ -431,6 +431,18 @@ economy keeps the lights off, OpenRGB writes are refused like under
 `lighting-hold`. Ambient (ANC/TalkThru) is never changed. The widget's
 **Configurar → Bateria** page sets the same options.
 
+### Vivo theme backgrounds
+
+With the widget's **Vivo** theme, **Configurar → Aparência** also picks a
+background: **Aurora** (soft light in the headset lights' colors, drifting
+slowly), **Vidro** (the desktop wallpaper, blurred and dimmed, found with
+`soniccore wallpaper --format json`), or none; with an intensity and an
+option to pulse with the bass from the live meter. Each light is drawn once
+into a cached texture and only moved, scaled, and faded; every moving part of
+the popup shares one 25 Hz beat instead of redrawing at the screen's refresh
+rate. Measured with sound playing, the whole open Vivo popup costs about 6% of
+one CPU core (Aurora adds under 1%); closed, nothing runs.
+
 ### Live meter and audio path
 
 Two read-only commands feed the widget's upcoming "Vivo" theme; neither

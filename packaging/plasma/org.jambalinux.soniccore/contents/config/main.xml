@@ -10,5 +10,18 @@
     <entry name="theme" type="String">
       <default>leve</default>
     </entry>
+    <!-- Vivo background: "aurora", "glass" (blurred wallpaper) or "none". -->
+    <entry name="background" type="String">
+      <default>aurora</default>
+    </entry>
+    <!-- 0 subtle, 1 medium, 2 intense. -->
+    <entry name="backgroundIntensity" type="Int">
+      <default>1</default>
+      <min>0</min>
+      <max>2</max>
+    </entry>
+    <entry name="backgroundReactive" type="Bool">
+      <default>true</default>
+    </entry>
   </group>
 </kcfg>

@@ -32,9 +32,21 @@ Item {
     readonly property int bandCount: 32
 
     property var bands: []
+    // Mean of the lowest bands (31-125 Hz), for the background's pulse.
+    readonly property real bass: {
+        if (!soundActive || bands.length < 6) return 0
+        let sum = 0
+        for (let index = 0; index < 6; ++index) sum += bands[index]
+        return sum / 6
+    }
     property bool soundActive: false
     property var path: null
     property bool framePending: false
+    // One shared 25 Hz beat drives every moving part. Free-running QML
+    // animations would redraw at the screen's refresh rate (165 Hz here) and
+    // re-tessellate the dashed paths on every frame.
+    property real dashPhase: 0
+    property real chargePhase: 0
 
     implicitHeight: Kirigami.Units.gridUnit * 15
 
@@ -113,7 +125,13 @@ Item {
         repeat: true
         running: panel.running
         triggeredOnStart: true
-        onTriggered: panel.requestFrame()
+        onTriggered: {
+            panel.requestFrame()
+            if (panel.animate && panel.pathFlowing())
+                panel.dashPhase = (panel.dashPhase + 0.4) % 5
+            if (panel.animate && panel.charging)
+                panel.chargePhase = (panel.chargePhase + 0.11) % (2 * Math.PI)
+        }
     }
 
     Timer {
@@ -160,6 +178,10 @@ Item {
             Shape {
                 id: ring
                 anchors.fill: parent
+                // Analytic antialiasing: the glow puts the ring in a layer,
+                // and layers get no multisampling, so the default renderer
+                // left jagged edges.
+                preferredRendererType: Shape.CurveRenderer
                 readonly property real radius: width / 2 - 6
                 layer.enabled: true
                 layer.effect: MultiEffect {
@@ -202,17 +224,11 @@ Item {
                 }
             }
 
-            // Slow breathing while charging; steady otherwise.
+            // Slow breathing while charging (from the shared beat); steady otherwise.
             QtObject {
                 id: glowPulse
-                property real value: 0.9
-            }
-            SequentialAnimation {
-                running: panel.running && panel.animate && panel.charging
-                loops: Animation.Infinite
-                onStopped: glowPulse.value = 0.9
-                NumberAnimation { target: glowPulse; property: "value"; to: 0.3; duration: 1400; easing.type: Easing.InOutSine }
-                NumberAnimation { target: glowPulse; property: "value"; to: 1.0; duration: 1400; easing.type: Easing.InOutSine }
+                readonly property real value: panel.charging && panel.animate
+                    ? 0.65 + 0.35 * Math.sin(panel.chargePhase) : 0.9
             }
 
             Image {
@@ -220,6 +236,11 @@ Item {
                 width: parent.width * 0.62
                 height: width
                 source: panel.equipmentImage
+                // The photo is 1254 px; scale it once, with a high-quality
+                // filter, to twice the size it is shown at, instead of
+                // squeezing the full texture on every frame.
+                sourceSize.width: Math.ceil(width * 2)
+                sourceSize.height: Math.ceil(height * 2)
                 fillMode: Image.PreserveAspectFit
                 smooth: true
                 mipmap: true
@@ -275,6 +296,7 @@ Item {
                 model: 3
                 delegate: Shape {
                     required property int index
+                    preferredRendererType: Shape.CurveRenderer
                     readonly property string linkState: pathRow.states[index]
                     readonly property color tint: panel.segmentColor(linkState, index)
                     x: pathRow.nodeX(index)
@@ -302,15 +324,8 @@ Item {
                         startX: 0
                         startY: 4
                         PathLine { x: width; y: 4 }
-
                         // The dashes run toward the headset while sound flows.
-                        NumberAnimation on dashOffset {
-                            running: panel.running && panel.animate && linkState === "flowing"
-                            from: 5
-                            to: 0
-                            duration: 500
-                            loops: Animation.Infinite
-                        }
+                        dashOffset: linkState === "flowing" ? 5 - panel.dashPhase : 0
                     }
                 }
             }
@@ -405,10 +420,6 @@ Item {
                             height: Math.max(2, parent.height * level)
                             color: panel.mix(panel.accentA, panel.accentB, index / (panel.bandCount - 1))
                             opacity: panel.soundActive ? 0.95 : 0.3
-                            Behavior on height {
-                                enabled: panel.animate
-                                NumberAnimation { duration: 60 }
-                            }
                         }
                     }
                 }
