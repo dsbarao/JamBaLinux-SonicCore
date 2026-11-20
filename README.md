@@ -327,15 +327,29 @@ spatial/binaural audio processor. Its profile is stored under
 soniccore spatial               # show the stored gate and mode
 soniccore spatial preflight     # read-only capability check
 soniccore spatial status --format json
-soniccore spatial enable        # requires a passing preflight and proven EQ target
-soniccore spatial disable
+soniccore spatial mode binaural-stereo  # select the graph (mode `off` removes it)
+soniccore spatial enable        # requires a passing preflight
+soniccore spatial disable       # always allowed; keeps the graph in bypass
+soniccore spatial run           # supervisor loop; started by the user service
+soniccore spatial restore       # manual: move spatial streams to the equalizer
 ```
 
 The read-only preflight validates the `pipewire` binary from `PATH`, filter-chain module,
 and a user-provided 14-channel HRIR dataset (`manifest.json` plus `hrir.wav`)
 under `spatial/hrtf/` in the configuration directory. `enable` refuses with an
-actionable error when readiness or the existing equalizer target cannot be
-proven. While mode is `binaural-stereo` and readiness holds, the supervised 7.1
+actionable error when that preflight fails; it does not require the equalizer
+to be running. The equalizer is the graph's only output, so the supervisor
+creates the graph only once the equalizer sink exists and relinks it
+automatically if the equalizer restarts.
+
+The graph is owned by the `jambalinux-soniccore-spatial.service` user unit
+(`soniccore spatial run`), installed and started by `tools/install-user.sh`.
+It runs one PipeWire snapshot per pass (every second while idle). On stop,
+systemd signals only the supervisor (`KillMode=mixed`): it unlinks the graph,
+moves its streams to the equalizer, and then stops the graph process. Stop the
+spatial service before the equalizer service, as the installer does.
+
+While mode is `binaural-stereo` and readiness holds, the supervised 7.1
 graph persists and is linked only through `Spatial -> EQ -> Quantum Game`; it
 never becomes the default sink, and Chat and capture nodes remain excluded.
 The enable gate crossfades its wet binaural and dry downmix controls in place.

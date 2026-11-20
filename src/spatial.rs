@@ -626,6 +626,9 @@ fn validate_wav_format(info: &WavInfo) -> Result<(), String> {
         return Err("hrir.wav contains no audio frames".into());
     }
 
+    // PipeWire's builtin convolver loads the IR through libsndfile, which
+    // reads all of these (verified 2026-11-20 by converting the installed
+    // HRIR to 8-bit PCM and 64-bit float and reading both back).
     match info.format_tag {
         WAVE_FORMAT_PCM if matches!(info.bits_per_sample, 8 | 16 | 24 | 32) => Ok(()),
         WAVE_FORMAT_IEEE_FLOAT if matches!(info.bits_per_sample, 32 | 64) => Ok(()),

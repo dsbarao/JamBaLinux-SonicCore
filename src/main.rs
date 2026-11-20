@@ -2022,7 +2022,7 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
         }
         Some("prepare") => Err("equalizer prepare accepts no value".into()),
         Some("run") if args.next().is_none() => {
-            pipewire::run(&equalizer::load()?)?;
+            pipewire::run(equalizer::load)?;
             Ok(true)
         }
         Some("run") => Err("equalizer run accepts no value".into()),

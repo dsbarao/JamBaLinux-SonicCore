@@ -6,7 +6,11 @@ Wants=pipewire.service pipewire-pulse.service wireplumber.service jambalinux-son
 [Service]
 Type=simple
 ExecStart=%h/.cargo/bin/soniccore spatial run
-ExecStop=%h/.cargo/bin/soniccore spatial restore
+# SIGTERM goes only to the supervisor, which drains the streams to the
+# equalizer and then stops its graph; the graph process must not receive the
+# signal first. Anything left after the supervisor exits is killed.
+KillMode=mixed
+TimeoutStopSec=20
 Restart=on-failure
 RestartSec=2
 

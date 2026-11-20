@@ -31,6 +31,30 @@ const OUTPUT_NODE: &str = "jambalinux-soniccore-game-equalizer-output";
 const QUANTUM_ALSA_COMPONENTS: &str = "USB0ecb:2069";
 const ROUTE_INTERVAL: Duration = Duration::from_millis(500);
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// Consecutive failed routing passes (about ten seconds) during which
+/// PipeWire answers but has no equalizer sink before the filter process is
+/// considered stranded. This happens when it started while the session
+/// PipeWire was restarting: the process lives on without its nodes.
+const MISSING_FILTER_PASSES: u32 = 20;
+
+/// Tracks whether a live filter process still hosts its sink.
+#[derive(Debug, Default)]
+struct FilterWatch {
+    missing_passes: u32,
+}
+
+impl FilterWatch {
+    /// `sink_present` is `None` when PipeWire could not be queried; that is
+    /// not evidence either way. Returns true once the filter is stranded.
+    fn observe(&mut self, sink_present: Option<bool>) -> bool {
+        match sink_present {
+            Some(true) => self.missing_passes = 0,
+            Some(false) => self.missing_passes = self.missing_passes.saturating_add(1),
+            None => {}
+        }
+        self.missing_passes >= MISSING_FILTER_PASSES
+    }
+}
 // A gain change is split into steps of at most RAMP_MAX_STEP_DB, one per audio
 // cycle: the filter-chain biquads switch coefficients at once, so a big jump
 // clicks. 26/09: 4 steps 10 ms apart were shorter than the 21 ms quantum (1024
@@ -1767,19 +1791,28 @@ pub fn prepare(profile: &EqualizerProfile) -> Result<(), String> {
     write_state(&state)
 }
 
-pub fn run(profile: &EqualizerProfile) -> Result<(), String> {
-    loop {
-        match prepare(profile) {
-            Ok(()) => break,
+/// `load_profile` is called under the equalizer mutation lock, which stays
+/// held until the filter process is started. A band change saved while the
+/// service was waiting (for example for the Game sink) is therefore never
+/// replaced by a profile read before it, and a change cannot land between
+/// rendering the filter and starting it.
+pub fn run(load_profile: impl Fn() -> Result<EqualizerProfile, String>) -> Result<(), String> {
+    let mutation_lock = loop {
+        let mutation_lock = crate::equalizer::mutation_lock()?;
+        match load_profile().and_then(|profile| prepare(&profile)) {
+            Ok(()) => break mutation_lock,
             Err(error) => {
+                drop(mutation_lock);
                 eprintln!("{error}");
                 thread::sleep(RETRY_INTERVAL);
             }
         }
-    }
+    };
     let config = config_path()?;
     let mut child = spawn_pipewire(&config)?;
+    drop(mutation_lock);
     let mut last_route_error = String::new();
+    let mut filter_watch = FilterWatch::default();
     loop {
         if let Some(status) = child
             .try_wait()
@@ -1789,7 +1822,26 @@ pub fn run(profile: &EqualizerProfile) -> Result<(), String> {
                 "persistent PipeWire equalizer exited with {status}"
             ));
         }
-        match run_route_iteration() {
+        let routed = run_route_iteration();
+        // Routing succeeds only with the equalizer sink present, so the
+        // extra `pw-dump` is spent only while something is wrong.
+        let sink_present = if routed.is_ok() {
+            Some(true)
+        } else {
+            pw_dump()
+                .ok()
+                .map(|nodes| named_node(&nodes, VIRTUAL_SINK).is_some())
+        };
+        if filter_watch.observe(sink_present) {
+            let _ = child.kill();
+            let _ = child.wait();
+            // A failure exit lets systemd restart the service, which renders
+            // and starts a fresh filter against the current PipeWire.
+            return Err(
+                "the PipeWire equalizer process is running without its sink; restarting it".into(),
+            );
+        }
+        match routed {
             Ok(()) => last_route_error.clear(),
             Err(error) if error != last_route_error => {
                 eprintln!("automatic Game routing: {error}");
@@ -2965,5 +3017,24 @@ mod tests {
 
         // Clean up mock
         MOCK_STATE.with(|m| *m.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_filter_process_without_its_sink_is_detected_only_when_proven() {
+        let mut watch = FilterWatch::default();
+        for _ in 1..MISSING_FILTER_PASSES {
+            assert!(!watch.observe(Some(false)));
+        }
+        // PipeWire unreachable: no evidence, the count neither grows nor resets.
+        assert!(!watch.observe(None));
+        assert!(watch.observe(Some(false)));
+
+        let mut watch = FilterWatch::default();
+        for _ in 1..MISSING_FILTER_PASSES {
+            watch.observe(Some(false));
+        }
+        // The sink appeared: a slow start is not a stranded filter.
+        assert!(!watch.observe(Some(true)));
+        assert!(!watch.observe(Some(false)));
     }
 }

@@ -8,8 +8,10 @@
 //! ambiguous, it leaves the graph in place rather than guessing a route.
 
 use std::fs::{self, OpenOptions};
+use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -842,15 +844,58 @@ fn within_readiness_grace(child: ChildState, failed_passes: u32) -> bool {
     child == ChildState::Running && failed_passes <= READINESS_GRACE_PASSES
 }
 
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+const SIGINT: c_int = 2;
+const SIGTERM: c_int = 15;
+
+unsafe extern "C" {
+    fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+}
+
+extern "C" fn request_stop(_signal: c_int) {
+    // Only an atomic store: async-signal-safe.
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// systemd stops the service with SIGTERM to this process only
+/// (`KillMode=mixed`). The supervisor then drains the graph itself: an
+/// `ExecStop` helper running beside it would race with the per-pass link
+/// repair, and the equalizer router could promote the drained streams back
+/// before the graph died.
+fn install_stop_handler() {
+    unsafe {
+        signal(SIGTERM, request_stop);
+        signal(SIGINT, request_stop);
+    }
+}
+
+fn shutdown(child: Option<Child>) {
+    let Some(mut active) = child else {
+        return;
+    };
+    if let Err(error) = stop_graph(&mut active) {
+        // Stopping regardless: the session manager re-routes what is left.
+        eprintln!("spatial supervisor: {error}; stopping the graph anyway");
+        let _ = active.kill();
+        let _ = active.wait();
+    }
+}
+
 /// Persistent systemd-service entrypoint. The graph is a child process owned
 /// by this supervisor. Its lifecycle depends only on the explicit spatial
 /// profile and a fresh, fail-closed readiness/target check.
 pub fn run() -> Result<(), String> {
+    install_stop_handler();
     let mut child: Option<Child> = None;
     let mut respawn_backoff = RespawnBackoff::default();
     let mut failed_readiness_passes = 0_u32;
     let mut missing_graph_passes = 0_u32;
     loop {
+        if STOP_REQUESTED.load(Ordering::SeqCst) {
+            shutdown(child);
+            return Ok(());
+        }
         let profile = spatial::load();
         // One `pw-dump` per pass, shared by every check below. Each dump costs
         // ~20 ms of CPU and ~450 KB of JSON; the previous two or three per
