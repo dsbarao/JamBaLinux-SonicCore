@@ -138,6 +138,12 @@ PlasmoidItem {
     ]
     // A headset reported off keeps its last battery reading on screen (in
     // grey), but nothing can be written to it.
+    // "leve" keeps the original interface; "vivo" adds the live header.
+    readonly property bool vivo: Plasmoid.configuration.theme === "vivo"
+    // The lights' own colors tint the Vivo theme; black or unknown zones
+    // fall back to the system accent.
+    readonly property color vivoAccentA: vivoAccent(Array.isArray(logoColors) ? logoColors[0] : logoColor)
+    readonly property color vivoAccentB: vivoAccent(Array.isArray(ringColors) ? ringColors[0] : ringColor)
     readonly property bool deviceAvailable: batteryPercent >= 0 && headsetConnected !== false
     readonly property bool daemonAvailable: daemonWatcher.registered
     readonly property color batteryColor: headsetConnected === false
@@ -171,6 +177,12 @@ PlasmoidItem {
         updating = true
         errorMessage = ""
         cachedState.connectSource(cachedCommand)
+    }
+
+    function vivoAccent(value) {
+        if (lightingEnabled === false || typeof value !== "string") return Kirigami.Theme.highlightColor
+        const hex = String(normalizeColor(value)).toLowerCase()
+        return /^#[0-9a-f]{6}$/.test(hex) && hex !== "#000000" ? hex : Kirigami.Theme.highlightColor
     }
 
     function finishRefresh(data) {
@@ -893,8 +905,9 @@ PlasmoidItem {
     fullRepresentation: ColumnLayout {
         id: expandedRepresentation
         readonly property int equalizerColumns: width >= Kirigami.Units.gridUnit * 20 ? 10 : 5
-        readonly property real requiredGridHeight: root.openSection === "lighting"
-            ? 52 : root.openSection === "equalizer" ? 66 : root.openSection.length > 0 ? 32 : 25
+        readonly property real requiredGridHeight: (root.openSection === "lighting"
+            ? 52 : root.openSection === "equalizer" ? 66 : root.openSection.length > 0 ? 32 : 25)
+            + (root.vivo ? 4 : 0)
 
         Layout.minimumWidth: Kirigami.Units.gridUnit * 19
         Layout.minimumHeight: Kirigami.Units.gridUnit * requiredGridHeight
@@ -917,7 +930,23 @@ PlasmoidItem {
             opacity: 0.7
         }
 
+        VivoPanel {
+            visible: root.vivo
+            Layout.fillWidth: true
+            Layout.preferredHeight: implicitHeight
+            running: root.vivo && root.expanded
+            batteryPercent: root.batteryPercent
+            charging: root.charging
+            headsetConnected: root.headsetConnected
+            batteryColor: root.batteryColor
+            accentA: root.vivoAccentA
+            accentB: root.vivoAccentB
+            equipmentImage: root.equipmentImage
+            pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
+        }
+
         Image {
+            visible: !root.vivo
             source: root.equipmentImage
             fillMode: Image.PreserveAspectFit
             smooth: true
@@ -930,6 +959,7 @@ PlasmoidItem {
         }
 
         PlasmaComponents.Label {
+            visible: !root.vivo
             Layout.alignment: Qt.AlignHCenter
             Layout.maximumHeight: implicitHeight
             text: root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "—"
@@ -1705,6 +1735,11 @@ PlasmoidItem {
                             const outerRadius = colorPicker.wheelRadius + colorPicker.ringWidth / 2
                             if (distance >= innerRadius && distance <= outerRadius) {
                                 root.pickerHue = (Math.atan2(offsetY, offsetX) / (2 * Math.PI) + 1) % 1
+                                // From black or gray every hue is still black or gray:
+                                // picking a hue on the ring means "this color", so make
+                                // it visible instead of silently writing black again.
+                                if (root.pickerValue < 0.05) root.pickerValue = 1
+                                if (root.pickerSaturation < 0.05) root.pickerSaturation = 1
                                 svCanvas.requestPaint()
                                 root.queueLightingColor()
                                 return

@@ -88,3 +88,19 @@ test("o seletor continua ativo enquanto um comando roda", () => {
     assert.match(widgetSource,
         /id: colorPicker[\s\S]{0,400}enabled: root\.lightingWritable && root\.canApplyLightingColor\(\)/)
 })
+
+test("escolher um matiz partindo do preto gera uma cor visível", () => {
+    const match = widgetSource.match(
+        /root\.pickerHue = \(Math\.atan2\(offsetY, offsetX\)[^\n]*\n([\s\S]*?)root\.queueLightingColor\(\)/)
+    assert.notEqual(match, null)
+    const root = { pickerValue: 0, pickerSaturation: 0 }
+    const canvas = { requestPaint() {} }
+    new Function("root", "svCanvas", match[1])(root, canvas)
+    assert.equal(root.pickerValue, 1)
+    assert.equal(root.pickerSaturation, 1)
+
+    // A color the user already set keeps its own brightness and saturation.
+    const set = { pickerValue: 0.4, pickerSaturation: 0.6 }
+    new Function("root", "svCanvas", match[1])(set, canvas)
+    assert.deepEqual(set, { pickerValue: 0.4, pickerSaturation: 0.6 })
+})

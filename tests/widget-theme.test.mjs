@@ -1,0 +1,86 @@
+import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
+import test from "node:test"
+
+const base = new URL("../packaging/plasma/org.jambalinux.soniccore/contents/", import.meta.url)
+const mainSource = await readFile(new URL("ui/main.qml", base), "utf8")
+const vivoSource = await readFile(new URL("ui/VivoPanel.qml", base), "utf8")
+const configXml = await readFile(new URL("config/main.xml", base), "utf8")
+const configPage = await readFile(new URL("ui/configAppearance.qml", base), "utf8")
+
+function extract(source, name) {
+    const match = source.match(new RegExp(`    function ${name}\\(([^)]*)\\) \\{([\\s\\S]*?)^    \\}\\n`, "m"))
+    assert.notEqual(match, null, `${name} must exist`)
+    return new Function(...match[1].split(",").map(arg => arg.trim()).filter(Boolean),
+        `with (this) {${match[2]}}`)
+}
+
+test("o tema Leve é o padrão e a página de configuração oferece os dois", () => {
+    assert.match(configXml, /<entry name="theme" type="String">\s*<default>leve<\/default>/)
+    assert.match(configPage, /property string cfg_theme/)
+    assert.match(configPage, /text: "Leve"/)
+    assert.match(configPage, /text: "Vivo"/)
+    assert.match(mainSource, /readonly property bool vivo: Plasmoid\.configuration\.theme === "vivo"/)
+})
+
+test("o Vivo só substitui o topo e só roda com o painel aberto", () => {
+    assert.match(mainSource, /VivoPanel \{\n\s+visible: root\.vivo/)
+    assert.match(mainSource, /running: root\.vivo && root\.expanded/)
+    // The Leve header (image and big battery label) hides only in Vivo.
+    assert.match(mainSource, /Image \{\n\s+visible: !root\.vivo\n\s+source: root\.equipmentImage/)
+    assert.match(mainSource, /PlasmaComponents\.Label \{\n\s+visible: !root\.vivo/)
+    // Polling stops with the popup closed or the Leve theme.
+    assert.match(vivoSource, /interval: 40\n\s+repeat: true\n\s+running: panel\.running/)
+    assert.match(vivoSource, /running: panel\.running && panel\.pathCommand\.length > 0/)
+    assert.match(vivoSource, /readonly property bool animate: Kirigami\.Units\.longDuration > 1/)
+})
+
+function panelDouble(path) {
+    const panel = { path }
+    panel.pathFlowing = extract(vivoSource, "pathFlowing").bind(panel)
+    panel.linkState = extract(vivoSource, "linkState").bind(panel)
+    panel.segmentStates = extract(vivoSource, "segmentStates").bind(panel)
+    return panel
+}
+
+function path({ spatial = true, playing = true, links = {} } = {}) {
+    return {
+        stages: {
+            streams: { count: 1, running: playing },
+            spatial: { present: spatial, running: spatial },
+            equalizer: { present: true, running: true },
+            headset: { present: true, running: true },
+        },
+        links: Object.assign({
+            streams_spatial: spatial, streams_equalizer: !spatial, streams_headset: false,
+            spatial_equalizer: spatial, equalizer_headset: true,
+        }, links),
+    }
+}
+
+test("som passando pelo espacial acende os três trechos", () => {
+    assert.deepEqual(panelDouble(path()).segmentStates(), ["flowing", "flowing", "flowing"])
+})
+
+test("sem espacial, os apps seguem direto para o EQ", () => {
+    assert.deepEqual(panelDouble(path({ spatial: false })).segmentStates(), ["flowing", "flowing", "flowing"])
+})
+
+test("pausado fica parado e uma ligação quebrada fica vermelha", () => {
+    assert.deepEqual(panelDouble(path({ playing: false })).segmentStates(), ["idle", "idle", "idle"])
+    assert.deepEqual(panelDouble(path({ links: { spatial_equalizer: false } })).segmentStates(),
+        ["flowing", "broken", "flowing"])
+    assert.deepEqual(panelDouble(null).segmentStates(), ["off", "off", "off"])
+})
+
+test("cores pretas ou luzes apagadas usam a cor de destaque do sistema", () => {
+    const vivoAccent = extract(mainSource, "vivoAccent")
+    const normalizeColor = value => value
+    const Kirigami = { Theme: { highlightColor: "accent" } }
+    const call = (value, lightingEnabled = true) =>
+        new Function("normalizeColor", "Kirigami", "lightingEnabled", "value",
+            `return (${vivoAccent.toString()}).call({}, value)`)(normalizeColor, Kirigami, lightingEnabled, value)
+    assert.equal(call("#59C319"), "#59c319")
+    assert.equal(call("#000000"), "accent")
+    assert.equal(call(null), "accent")
+})
