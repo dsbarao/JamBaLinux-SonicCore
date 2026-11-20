@@ -51,6 +51,12 @@ pub struct RuntimeState {
     pub game_chat_value: Option<u8>,
     pub bluetooth: Option<String>,
     pub sidetone_level: Option<String>,
+    /// Who wrote the lighting last: `soniccore` (CLI, widget) or `openrgb`.
+    pub lighting_source: Option<String>,
+    /// Wall-clock milliseconds of that write.
+    pub lighting_updated_at_ms: Option<u128>,
+    /// SonicCore took the lighting: writes from OpenRGB are refused.
+    pub lighting_held: Option<bool>,
 }
 
 /// The cache action to take after sending a complete two-zone lighting
@@ -434,6 +440,35 @@ pub fn update(mutator: impl FnOnce(&mut RuntimeState)) -> Result<RuntimeState, S
     })
 }
 
+/// Environment variable the OpenRGB plugin sets when it runs the CLI.
+pub const LIGHTING_SOURCE_ENV: &str = "SONICCORE_LIGHTING_SOURCE";
+
+/// The client writing the lighting: `openrgb` when the OpenRGB plugin runs
+/// the CLI, otherwise `soniccore` (terminal, widget). Unknown values count as
+/// `soniccore`, so nothing can impersonate another client by accident.
+pub fn lighting_source() -> &'static str {
+    match env::var(LIGHTING_SOURCE_ENV).as_deref() {
+        Ok("openrgb") => "openrgb",
+        _ => "soniccore",
+    }
+}
+
+fn mark_lighting_write(state: &mut RuntimeState) {
+    state.lighting_source = Some(lighting_source().to_owned());
+    state.lighting_updated_at_ms = Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis()),
+    );
+}
+
+/// Takes (`true`) or releases the lighting for SonicCore. While held, the
+/// OpenRGB plugin's writes are refused so its effects cannot overwrite what
+/// the user sets in the widget.
+pub fn set_lighting_held(held: bool) -> Result<(), String> {
+    update(|state| state.lighting_held = Some(held)).map(|_| ())
+}
+
 /// Records a value the headset has just accepted. The device write already
 /// happened, so a corrupt cache is quarantined (kept beside the state file)
 /// instead of turning a successful command into a reported failure.
@@ -477,19 +512,25 @@ pub fn update_control(feature: &str, value: &str) -> Result<(), String> {
     }
     update_after_device_write(|state| match feature {
         "ambient" => state.ambient_mode = Some(value.into()),
-        "lighting" => state.lighting_enabled = Some(value == "on"),
+        "lighting" => {
+            state.lighting_enabled = Some(value == "on");
+            mark_lighting_write(state);
+        }
         "color" => {
+            mark_lighting_write(state);
             state.lighting_enabled = Some(true);
             state.lighting_color = Some(value.into());
             state.logo_color = Some(value.into());
             state.ring_color = Some(value.into());
         }
         "logo-color" => {
+            mark_lighting_write(state);
             state.lighting_enabled = Some(true);
             state.lighting_color = None;
             state.logo_color = Some(value.into());
         }
         "ring-color" => {
+            mark_lighting_write(state);
             state.lighting_enabled = Some(true);
             state.lighting_color = None;
             state.ring_color = Some(value.into());
@@ -508,6 +549,7 @@ pub fn update_lighting_profile(
     ring_speed: &str,
 ) -> Result<(), String> {
     update_after_device_write(|state| {
+        mark_lighting_write(state);
         state.lighting_enabled = Some(true);
         state.logo_colors = Some(logo_colors.to_vec());
         state.ring_colors = Some(ring_colors.to_vec());
@@ -543,6 +585,7 @@ pub fn update_partial_lighting_profile(
     };
 
     update_after_device_write(|state| {
+        mark_lighting_write(state);
         apply_zone_cache_update(state, true, logo, logo_colors, logo_effect, logo_speed);
         apply_zone_cache_update(state, false, ring, ring_colors, ring_effect, ring_speed);
         // A partial profile cannot safely claim that both zones share one
@@ -838,6 +881,42 @@ mod tests {
                 unsafe { flock(lock_file.as_raw_fd(), LOCK_EX | LOCK_NB) },
                 0
             );
+        });
+    }
+
+    #[test]
+    fn lighting_writes_record_their_source_and_the_hold_persists() {
+        with_test_runtime(|_| {
+            unsafe { std::env::remove_var(LIGHTING_SOURCE_ENV) };
+            update_control("color", "#ff0000").unwrap();
+            let state = load().unwrap();
+            assert_eq!(state.lighting_source.as_deref(), Some("soniccore"));
+            assert!(state.lighting_updated_at_ms.is_some());
+
+            unsafe { std::env::set_var(LIGHTING_SOURCE_ENV, "openrgb") };
+            update_lighting_profile(
+                &vec!["#00ff00".to_owned(); 5],
+                &vec!["#0000ff".to_owned(); 5],
+                "solid",
+                "solid",
+                "0.5",
+                "0.5",
+            )
+            .unwrap();
+            assert_eq!(load().unwrap().lighting_source.as_deref(), Some("openrgb"));
+
+            // Anything else counts as SonicCore, and non-lighting writes
+            // leave the lighting source alone.
+            unsafe { std::env::set_var(LIGHTING_SOURCE_ENV, "someone") };
+            assert_eq!(lighting_source(), "soniccore");
+            update_control("sidetone", "low").unwrap();
+            assert_eq!(load().unwrap().lighting_source.as_deref(), Some("openrgb"));
+            unsafe { std::env::remove_var(LIGHTING_SOURCE_ENV) };
+
+            set_lighting_held(true).unwrap();
+            assert_eq!(load().unwrap().lighting_held, Some(true));
+            set_lighting_held(false).unwrap();
+            assert_eq!(load().unwrap().lighting_held, Some(false));
         });
     }
 

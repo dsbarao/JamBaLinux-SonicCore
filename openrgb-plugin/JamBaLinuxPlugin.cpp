@@ -172,6 +172,10 @@ void JamBaLinuxPlugin::Load(OpenRGBPluginAPIInterface* plugin_api_ptr)
 
     api->RegisterVirtualRGBControllerInThread(controller);
 
+    watcher = std::make_unique<CacheWatcher>(
+        soniccore,
+        [this](const CachedLighting& cached) { MirrorExternalChange(cached); });
+
     status_text = "JBL Quantum 810 Wireless registrado via " + soniccore + ".";
     if(!cached)
     {
@@ -201,6 +205,41 @@ void JamBaLinuxPlugin::DeviceChanged()
     writer->Request(state);
 }
 
+void JamBaLinuxPlugin::MirrorExternalChange(const CachedLighting& cached)
+{
+    /*-----------------------------------------------------*\
+    | Only changes made outside OpenRGB, and only while no   |
+    | OpenRGB write is waiting or running: an OpenRGB change |
+    | in flight is newer than the cache and must win.        |
+    \*-----------------------------------------------------*/
+    if(!controller || !writer || cached.source == LIGHTING_SOURCE_VALUE || !writer->Idle())
+    {
+        return;
+    }
+    std::optional<LightingState> applied = writer->Applied();
+    if(applied && *applied == cached.state)
+    {
+        return;
+    }
+
+    /* Recorded first, so the mode update below plans no write. */
+    writer->Adopt(cached.state);
+
+    for(unsigned int index = 0; index < LED_COUNT; index++)
+    {
+        controller->SetColor(index, cached.state.colors[index]);
+    }
+    if(cached.state.mode != MODE_DIRECT && cached.state.mode != MODE_OFF)
+    {
+        controller->SetModeSpeed(cached.state.mode, cached.state.speed);
+    }
+    if(controller->GetActiveMode() != cached.state.mode)
+    {
+        controller->SetActiveMode(cached.state.mode);
+    }
+    controller->SignalUpdate(RGBCONTROLLER_UPDATE_REASON_UPDATELEDS);
+}
+
 QWidget* JamBaLinuxPlugin::GetWidget()
 {
     QLabel* label = new QLabel(QString::fromStdString(
@@ -221,6 +260,8 @@ QMenu* JamBaLinuxPlugin::GetTrayMenu()
 
 void JamBaLinuxPlugin::Unload()
 {
+    /* Stop mirroring before the controller and writer go away. */
+    watcher.reset();
     if(controller && api)
     {
         api->UnregisterVirtualRGBController(controller);

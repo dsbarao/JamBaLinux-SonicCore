@@ -53,6 +53,18 @@ PlasmoidItem {
     readonly property color pickerColor: Qt.hsva(pickerHue, pickerSaturation, pickerValue, 1)
     property int gameChatValue: -1
     property bool controlBusy: false
+    // Who wrote the lighting last ("soniccore" or "openrgb"), when, and
+    // whether SonicCore holds it (OpenRGB writes are then refused).
+    property string lightingSource: ""
+    property real lightingUpdatedAtMs: 0
+    property bool lightingHeld: false
+    property real nowMs: Date.now()
+    // OpenRGB wrote within the last few seconds and nobody took the lights
+    // back: changes made here would be overwritten by its next frame.
+    readonly property bool openRgbControlsLighting: !lightingHeld
+        && lightingSource === "openrgb"
+        && nowMs - lightingUpdatedAtMs < 5000
+    readonly property bool lightingWritable: deviceAvailable && !openRgbControlsLighting
     // Live color while dragging the picker: only the latest value waits, and
     // it is sent when the running command finishes and the throttle allows.
     property string pendingLightingFeature: ""
@@ -180,8 +192,17 @@ PlasmoidItem {
         executable.connectSource(controlCommand)
     }
 
+    function runLightingHold(held) {
+        if (controlBusy) return
+        controlBusy = true
+        clearAction.stop()
+        actionFailed = false
+        actionMessage = held ? "Assumindo as luzes…" : "Devolvendo as luzes ao OpenRGB…"
+        executable.connectSource(soniccoreCommand(["lighting-hold", held ? "on" : "off"]))
+    }
+
     function queueLightingColor() {
-        if (!deviceAvailable || !canApplyLightingColor()) return
+        if (!lightingWritable || !canApplyLightingColor()) return
         pendingLightingFeature = lightingFeature()
         pendingLightingColor = pickerHex()
         if (!lightingColorThrottle.running) flushLightingColor()
@@ -736,6 +757,9 @@ PlasmoidItem {
         logoSpeed = null
         ringSpeed = null
         gameChatValue = -1
+        lightingSource = ""
+        lightingUpdatedAtMs = 0
+        lightingHeld = false
     }
 
     function applyResult(data) {
@@ -756,6 +780,10 @@ PlasmoidItem {
             rawFeature = String(result.raw_feature ?? "")
             ambientMode = String(result.ambient_mode ?? "unknown")
             headsetConnected = result.headset_connected ?? null
+            lightingSource = String(result.lighting_source ?? "")
+            lightingUpdatedAtMs = Number(result.lighting_updated_at_ms ?? 0)
+            lightingHeld = result.lighting_held === true
+            nowMs = Date.now()
             microphoneState = String(result.microphone ?? "unknown")
             sidetoneLevel = String(result.sidetone_level ?? "unknown")
             lightingEnabled = result.lighting_enabled ?? null
@@ -1410,10 +1438,38 @@ PlasmoidItem {
                     }
                 }
 
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    visible: root.openSection === "lighting" && root.openRgbControlsLighting
+                    text: "O OpenRGB está controlando as luzes agora. Mudanças feitas aqui seriam sobrescritas pelo próximo quadro dele."
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Kirigami.Theme.neutralTextColor
+                }
+
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    visible: root.openSection === "lighting" && root.lightingHeld
+                    text: "Você assumiu as luzes; o OpenRGB está pausado."
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    opacity: 0.8
+                }
+
+                PlasmaComponents.Button {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.openSection === "lighting"
+                        && (root.openRgbControlsLighting || root.lightingHeld)
+                    enabled: !root.controlBusy
+                    text: root.lightingHeld ? "Devolver ao OpenRGB" : "Assumir controle"
+                    icon.name: root.lightingHeld ? "edit-undo" : "object-locked"
+                    onClicked: root.runLightingHold(!root.lightingHeld)
+                }
+
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    enabled: root.lightingWritable && !root.controlBusy
                     PlasmaComponents.Button { text: "Ligar"; icon.source: Qt.resolvedUrl("../images/light-on.svg"); checked: root.lightingEnabled === true; onClicked: root.runControl("lighting", "on") }
                     PlasmaComponents.Button { text: "Desligar"; icon.source: Qt.resolvedUrl("../images/light-off.svg"); checked: root.lightingEnabled === false; onClicked: root.runControl("lighting", "off") }
                 }
@@ -1437,7 +1493,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    enabled: root.lightingWritable && !root.controlBusy
 
                     PlasmaComponents.Button {
                         text: "Ambos"
@@ -1481,7 +1537,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    enabled: root.deviceAvailable && !root.controlBusy && root.lightingTargetProfileKnown()
+                    enabled: root.lightingWritable && !root.controlBusy && root.lightingTargetProfileKnown()
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.Button { text: "Respiração"; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
@@ -1500,7 +1556,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    enabled: root.lightingWritable && !root.controlBusy
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.Button { text: "0,5×"; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
@@ -1521,7 +1577,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
-                    enabled: root.deviceAvailable && !root.controlBusy
+                    enabled: root.lightingWritable && !root.controlBusy
                     spacing: Kirigami.Units.smallSpacing
 
                     PlasmaComponents.Button {
@@ -1578,7 +1634,7 @@ PlasmoidItem {
                     visible: root.openSection === "lighting"
                     // Stays usable while a write runs: the latest color is
                     // queued and sent as soon as the headset is free.
-                    enabled: root.deviceAvailable && root.canApplyLightingColor()
+                    enabled: root.lightingWritable && root.canApplyLightingColor()
 
                     readonly property real centerX: width / 2
                     readonly property real centerY: height / 2
@@ -1704,7 +1760,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && root.canApplyLightingColor()
+                    enabled: root.lightingWritable && root.canApplyLightingColor()
                     spacing: Kirigami.Units.smallSpacing
 
                     Rectangle {
@@ -2054,6 +2110,20 @@ PlasmoidItem {
 
         onRegisteredChanged: {
             if (registered) root.refresh()
+        }
+    }
+
+    // While the lighting section is open, follow who controls the lights.
+    // Writes made by the CLI do not emit the daemon's D-Bus signal, so this
+    // cheap cache read is what notices OpenRGB starting or stopping.
+    Timer {
+        interval: 2000
+        repeat: true
+        running: root.expanded && root.openSection === "lighting"
+        triggeredOnStart: true
+        onTriggered: {
+            root.nowMs = Date.now()
+            root.refresh()
         }
     }
 

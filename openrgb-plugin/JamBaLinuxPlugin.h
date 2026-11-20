@@ -52,9 +52,14 @@ public:
 private:
     void                    Log(unsigned int level, const std::string& message);
 
+    /* Shows in OpenRGB a lighting state another client (the SonicCore
+       widget or CLI) put on the headset, without writing it again. */
+    void                    MirrorExternalChange(const jambalinux::CachedLighting& cached);
+
     OpenRGBPluginAPIInterface*                  api         = nullptr;
     RGBControllerInterface*                     controller  = nullptr;
     std::unique_ptr<jambalinux::LightingWriter> writer;
+    std::unique_ptr<jambalinux::CacheWatcher>   watcher;
     std::string                                 soniccore;
     std::string                                 status_text;
 };

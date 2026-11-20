@@ -101,7 +101,8 @@ static void ReadAvailable(int fd, std::string& into)
 }
 
 CommandResult RunCommand(const std::string& program, const Command& arguments,
-                         std::chrono::milliseconds timeout)
+                         std::chrono::milliseconds timeout,
+                         const std::vector<std::string>& extra_environment)
 {
     CommandResult result;
     if(program.empty())
@@ -140,8 +141,34 @@ CommandResult RunCommand(const std::string& program, const Command& arguments,
     }
     argv.push_back(nullptr);
 
+    /* The parent environment, with extra entries replacing same-named ones. */
+    std::vector<char*> envp;
+    for(char** entry = environ; entry && *entry; entry++)
+    {
+        std::string current(*entry);
+        bool replaced = false;
+        for(const std::string& extra : extra_environment)
+        {
+            std::string name = extra.substr(0, extra.find('=') + 1);
+            if(current.rfind(name, 0) == 0)
+            {
+                replaced = true;
+                break;
+            }
+        }
+        if(!replaced)
+        {
+            envp.push_back(*entry);
+        }
+    }
+    for(const std::string& extra : extra_environment)
+    {
+        envp.push_back(const_cast<char*>(extra.c_str()));
+    }
+    envp.push_back(nullptr);
+
     pid_t pid = 0;
-    int spawn_error = posix_spawn(&pid, program.c_str(), &actions, nullptr, argv.data(), environ);
+    int spawn_error = posix_spawn(&pid, program.c_str(), &actions, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&actions);
     close(out_pipe[1]);
     close(err_pipe[1]);
@@ -220,7 +247,7 @@ static unsigned int SpeedFromName(const std::string& speed)
     return 0;
 }
 
-std::optional<LightingState> ReadCachedLighting(const std::string& program)
+std::optional<CachedLighting> ReadCachedStatus(const std::string& program)
 {
     CommandResult result = RunCommand(program, { "cached-status", "--format", "json" },
                                       std::chrono::milliseconds(3000));
@@ -272,7 +299,22 @@ std::optional<LightingState> ReadCachedLighting(const std::string& program)
     {
         state.mode = MODE_OFF;
     }
-    return state;
+
+    CachedLighting cached;
+    cached.state  = state;
+    cached.source = status.value("lighting_source").toString().toStdString();
+    cached.held   = status.value("lighting_held").toBool(false);
+    return cached;
+}
+
+std::optional<LightingState> ReadCachedLighting(const std::string& program)
+{
+    std::optional<CachedLighting> cached = ReadCachedStatus(program);
+    if(!cached)
+    {
+        return std::nullopt;
+    }
+    return cached->state;
 }
 
 LightingWriter::LightingWriter(std::string program, std::optional<LightingState> applied, Logger log)
@@ -303,11 +345,34 @@ void LightingWriter::Request(const LightingState& state)
     wake.notify_all();
 }
 
+bool LightingWriter::Idle()
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    return !busy && !pending.has_value();
+}
+
+std::optional<LightingState> LightingWriter::Applied()
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    return applied;
+}
+
+void LightingWriter::Adopt(const LightingState& state)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    applied = state;
+}
+
 void LightingWriter::Run()
 {
+    const std::vector<std::string> environment = {
+        std::string(LIGHTING_SOURCE_ENV) + "=" + LIGHTING_SOURCE_VALUE
+    };
+
     for(;;)
     {
         LightingState desired;
+        std::optional<LightingState> known;
         {
             std::unique_lock<std::mutex> lock(mutex);
             wake.wait(lock, [this] { return stopping || pending.has_value(); });
@@ -317,32 +382,94 @@ void LightingWriter::Run()
             }
             desired = *pending;
             pending.reset();
+            known = applied;
+            busy = true;
         }
 
-        bool ok = true;
-        for(const Command& command : PlanCommands(applied, desired))
+        bool ok   = true;
+        bool held = false;
+        for(const Command& command : PlanCommands(known, desired))
         {
-            CommandResult result = RunCommand(program, command, COMMAND_TIMEOUT);
+            CommandResult result = RunCommand(program, command, COMMAND_TIMEOUT, environment);
             if(result.exit_code != 0)
             {
-                std::string joined;
-                for(const std::string& part : command)
+                ok   = false;
+                held = result.err.find(LIGHTING_HELD_MARKER) != std::string::npos;
+                if(!held)
                 {
-                    joined += " " + part;
+                    std::string joined;
+                    for(const std::string& part : command)
+                    {
+                        joined += " " + part;
+                    }
+                    log("soniccore" + joined + " failed: " + result.err);
                 }
-                log("soniccore" + joined + " failed: " + result.err);
-                ok = false;
                 break;
             }
         }
-        /* After a failure the device state is unknown: resend everything next time. */
-        applied = ok ? std::optional<LightingState>(desired) : std::nullopt;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            /* After a failure the device state is unknown: resend everything next time. */
+            applied = ok ? std::optional<LightingState>(desired) : std::nullopt;
+            busy    = false;
+            /* Report the hold once, not on every refused effect frame. */
+            if(held && !held_reported)
+            {
+                held_reported = true;
+                log("SonicCore holds the headset lighting; OpenRGB changes are paused "
+                    "until it is released in the SonicCore widget");
+            }
+            else if(ok)
+            {
+                held_reported = false;
+            }
+        }
 
         std::unique_lock<std::mutex> lock(mutex);
         wake.wait_for(lock, MIN_INTERVAL, [this] { return stopping; });
         if(stopping)
         {
             return;
+        }
+    }
+}
+
+CacheWatcher::CacheWatcher(std::string program, Callback callback)
+    : program(std::move(program)), callback(std::move(callback))
+{
+    worker = std::thread(&CacheWatcher::Run, this);
+}
+
+CacheWatcher::~CacheWatcher()
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        stopping = true;
+    }
+    wake.notify_all();
+    if(worker.joinable())
+    {
+        worker.join();
+    }
+}
+
+void CacheWatcher::Run()
+{
+    for(;;)
+    {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            wake.wait_for(lock, INTERVAL, [this] { return stopping; });
+            if(stopping)
+            {
+                return;
+            }
+        }
+        std::optional<CachedLighting> cached = ReadCachedStatus(program);
+        if(cached)
+        {
+            callback(*cached);
         }
     }
 }

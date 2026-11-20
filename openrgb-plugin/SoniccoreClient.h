@@ -35,11 +35,28 @@ struct CommandResult
 /* Absolute soniccore path: $CARGO_HOME/bin, then ~/.cargo/bin, then PATH. */
 std::string ResolveSoniccore();
 
-CommandResult RunCommand(const std::string& program, const Command& arguments,
-                         std::chrono::milliseconds timeout);
+/* Environment set on every write so the CLI records OpenRGB as the writer
+   and refuses the write while SonicCore holds the lighting. */
+inline const char* const LIGHTING_SOURCE_ENV   = "SONICCORE_LIGHTING_SOURCE";
+inline const char* const LIGHTING_SOURCE_VALUE = "openrgb";
 
-/* Reads the lighting state the daemon cached, if it is complete. */
-std::optional<LightingState> ReadCachedLighting(const std::string& program);
+/* Fragment of the CLI error returned while SonicCore holds the lighting. */
+inline const char* const LIGHTING_HELD_MARKER  = "held by SonicCore";
+
+CommandResult RunCommand(const std::string& program, const Command& arguments,
+                         std::chrono::milliseconds timeout,
+                         const std::vector<std::string>& extra_environment = {});
+
+struct CachedLighting
+{
+    LightingState   state;
+    std::string     source;     /* "soniccore", "openrgb" or empty */
+    bool            held = false;
+};
+
+/* Reads the lighting the status cache holds, if it is complete. */
+std::optional<CachedLighting> ReadCachedStatus(const std::string& program);
+std::optional<LightingState>  ReadCachedLighting(const std::string& program);
 
 class LightingWriter
 {
@@ -51,6 +68,16 @@ public:
 
     /* Replaces any state still waiting; never blocks on the device. */
     void Request(const LightingState& state);
+
+    /* True when nothing is waiting or being written. */
+    bool Idle();
+
+    /* The state last confirmed on the device, if known. */
+    std::optional<LightingState> Applied();
+
+    /* Records a state another client already put on the device, so
+       mirroring it in OpenRGB does not write it again. */
+    void Adopt(const LightingState& state);
 
 private:
     void Run();
@@ -72,6 +99,30 @@ private:
     std::mutex                      mutex;
     std::condition_variable         wake;
     std::optional<LightingState>    pending;
+    bool                            busy     = false;
+    bool                            held_reported = false;
+    bool                            stopping = false;
+    std::thread                     worker;
+};
+
+/* Polls the status cache on its own thread and reports each reading. */
+class CacheWatcher
+{
+public:
+    typedef std::function<void(const CachedLighting&)> Callback;
+
+    CacheWatcher(std::string program, Callback callback);
+    ~CacheWatcher();
+
+private:
+    void Run();
+
+    static constexpr std::chrono::milliseconds INTERVAL{2000};
+
+    std::string                     program;
+    Callback                        callback;
+    std::mutex                      mutex;
+    std::condition_variable         wake;
     bool                            stopping = false;
     std::thread                     worker;
 };

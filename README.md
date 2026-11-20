@@ -429,6 +429,17 @@ directory and removes it afterwards. It installs into
 `~/.config/OpenRGB/plugins/`; restart OpenRGB to load it.
 `tools/uninstall-user.sh --confirm` removes it too.
 
+**OpenRGB and the widget take turns.** Every write records who made it
+(`lighting_source` in the status cache: `openrgb` or `soniccore`). While
+OpenRGB has written in the last five seconds, the widget's lighting section
+says so and locks its color controls instead of letting a change vanish
+under OpenRGB's next frame. **Assumir controle** runs
+`soniccore lighting-hold on`: from then on the CLI refuses lighting writes
+from OpenRGB (the plugin pauses and logs it once) and the widget works
+normally; **Devolver ao OpenRGB** runs `soniccore lighting-hold off`.
+Changes made outside OpenRGB are mirrored back into it within about two
+seconds, so its device page shows the colors the headset actually has.
+
 All ten colors are written with one `soniccore set leds` command (logo 1-5,
 then ring 1-5), the same lighting-profile reports as any other color change.
 Each write sends a full profile to the headset, so the plugin sends at most

@@ -210,6 +210,68 @@ static void TestWriterCoalesces()
     CHECK(!failed.empty() && failed[0].find("nope") != std::string::npos);
 }
 
+static void TestOwnership()
+{
+    // Every write identifies OpenRGB, replacing any inherited value.
+    std::string env_file = scratch + "/env.txt";
+    std::string cli = WriteScript("env-cli",
+        "printf '%s\\n' \"$SONICCORE_LIGHTING_SOURCE\" >> '" + env_file + "'\n");
+    setenv("SONICCORE_LIGHTING_SOURCE", "soniccore", 1);
+    {
+        LightingWriter writer(cli, Solid(0), [](const std::string&) {});
+        writer.Request(Solid(7));
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        CHECK(writer.Idle());
+        CHECK(writer.Applied() == std::optional<LightingState>(Solid(7)));
+    }
+    unsetenv("SONICCORE_LIGHTING_SOURCE");
+    CHECK(ReadLines(env_file) == (std::vector<std::string>{ "openrgb" }));
+
+    // While SonicCore holds the lighting, refused frames are reported once.
+    std::string held = WriteScript("held-cli",
+        "echo 'inspection failed: lighting is held by SonicCore; release it' >&2; exit 2\n");
+    std::vector<std::string> messages;
+    {
+        LightingWriter writer(held, Solid(0), [&](const std::string& m) { messages.push_back(m); });
+        for(uint32_t frame = 1; frame <= 4; frame++)
+        {
+            writer.Request(Solid(frame));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        CHECK(!writer.Applied().has_value());
+    }
+    CHECK(messages.size() == 1);
+    CHECK(!messages.empty() && messages[0].find("holds the headset lighting") != std::string::npos);
+
+    // A state another client wrote is adopted: requesting it sends nothing.
+    std::string log_file = scratch + "/adopt.log";
+    std::string logging = WriteScript("adopt-cli", "echo \"$*\" >> '" + log_file + "'\n");
+    {
+        LightingWriter writer(logging, Solid(0), [](const std::string&) {});
+        writer.Adopt(Solid(9));
+        writer.Request(Solid(9));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    CHECK(ReadLines(log_file).empty());
+
+    // The cache reader reports who wrote last and whether SonicCore holds it.
+    std::string status = WriteScript("status-owner",
+        "echo '{\"lighting_enabled\": true, \"logo_effect\": \"solid\", \"logo_speed\": \"0.5\","
+        " \"lighting_source\": \"soniccore\", \"lighting_held\": true,"
+        " \"logo_colors\": [\"#000000\",\"#000000\",\"#000000\",\"#000000\",\"#000000\"],"
+        " \"ring_colors\": [\"#000000\",\"#000000\",\"#000000\",\"#000000\",\"#000000\"]}'\n");
+    std::optional<CachedLighting> cached = ReadCachedStatus(status);
+    CHECK(cached && cached->source == "soniccore" && cached->held);
+
+    // The watcher keeps reporting readings until it is destroyed.
+    int readings = 0;
+    {
+        CacheWatcher watcher(status, [&](const CachedLighting&) { readings++; });
+        std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    }
+    CHECK(readings == 1);
+}
+
 int main(int argc, char** argv)
 {
     if(argc != 2)
@@ -224,6 +286,7 @@ int main(int argc, char** argv)
     TestRunCommand();
     TestCachedLighting();
     TestWriterCoalesces();
+    TestOwnership();
 
     if(failures > 0)
     {

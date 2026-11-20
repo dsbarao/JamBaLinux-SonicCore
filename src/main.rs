@@ -213,6 +213,9 @@ struct StatusOutput {
     game_chat_value: Option<u8>,
     bluetooth: Option<String>,
     sidetone_level: Option<String>,
+    lighting_source: Option<String>,
+    lighting_updated_at_ms: Option<u128>,
+    lighting_held: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1237,6 +1240,39 @@ fn partial_lighting_error(device_error: &str, cache_error: Option<&str>) -> Stri
     }
 }
 
+/// Returned to the OpenRGB plugin while SonicCore holds the lighting; the
+/// plugin recognizes it and stops reporting each refused frame.
+const LIGHTING_HELD_ERROR: &str =
+    "lighting is held by SonicCore; release it with `soniccore lighting-hold off`";
+
+/// OpenRGB may write unless SonicCore holds the lighting; SonicCore's own
+/// clients (terminal, widget) are never refused.
+fn lighting_write_allowed(source: &str, held: Option<bool>) -> Result<(), String> {
+    if source == "openrgb" && held == Some(true) {
+        Err(LIGHTING_HELD_ERROR.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn lighting_hold(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    let held = match (args.next().as_deref(), args.next()) {
+        (Some("on"), None) => true,
+        (Some("off"), None) => false,
+        _ => return Err("usage: soniccore lighting-hold <on|off>".into()),
+    };
+    state::set_lighting_held(held)?;
+    println!(
+        "lighting {}",
+        if held {
+            "held by SonicCore; OpenRGB writes are refused"
+        } else {
+            "released; OpenRGB may write again"
+        }
+    );
+    Ok(true)
+}
+
 fn set_control(command: SetCommand) -> Result<bool, String> {
     let Some(node) = quantum_hidraw_node()? else {
         return Ok(false);
@@ -1255,14 +1291,19 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
             | "ring-speed"
     ) || segment_feature(command.feature).is_some();
     let mut resolved_profile = None;
+    let is_lighting_control = is_profile_control || command.feature == "lighting";
     // Two profile commands at once (dragging the color wheel) must not
     // interleave their reports or overwrite each other's cache; hold the lock
     // from the cache read until the cache update.
-    let _lighting_lock = if is_profile_control {
+    let _lighting_lock = if is_lighting_control {
         Some(state::lighting_lock()?)
     } else {
         None
     };
+    if is_lighting_control {
+        let held = state::load().ok().and_then(|cached| cached.lighting_held);
+        lighting_write_allowed(state::lighting_source(), held)?;
+    }
     let reports = if is_profile_control {
         let cached = match state::load() {
             Ok(state) => state,
@@ -1447,6 +1488,9 @@ fn status_output_from_cached_state(cached: state::RuntimeState) -> StatusOutput 
         game_chat_value: cached.game_chat_value,
         bluetooth: cached.bluetooth,
         sidetone_level: cached.sidetone_level,
+        lighting_source: cached.lighting_source,
+        lighting_updated_at_ms: cached.lighting_updated_at_ms,
+        lighting_held: cached.lighting_held,
     }
 }
 
@@ -1538,6 +1582,9 @@ fn status(options: StatusOptions) -> Result<bool, String> {
                 game_chat_value: None,
                 bluetooth: None,
                 sidetone_level: None,
+                lighting_source: None,
+                lighting_updated_at_ms: None,
+                lighting_held: None,
             })?;
         } else {
             println!(
@@ -1583,6 +1630,9 @@ fn status(options: StatusOptions) -> Result<bool, String> {
             game_chat_value: cached.game_chat_value,
             bluetooth: cached.bluetooth,
             sidetone_level: cached.sidetone_level,
+            lighting_source: cached.lighting_source,
+            lighting_updated_at_ms: cached.lighting_updated_at_ms,
+            lighting_held: cached.lighting_held,
         })?;
     } else {
         println!("battery: {battery}%");
@@ -1650,7 +1700,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -2322,6 +2372,7 @@ fn main() {
         "cached-status" => cached_status(args),
         "probe-status" => no_arguments("probe-status", args).and_then(|()| probe_status()),
         "set" => parse_set_command(args).and_then(set_control),
+        "lighting-hold" => lighting_hold(args),
         "equalizer" | "eq" => equalizer(args),
         "spatial" => spatial(args),
         "notify" => parse_dry_run("notify", args).and_then(notify),
@@ -2364,6 +2415,19 @@ mod tests {
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    #[test]
+    fn openrgb_writes_are_refused_only_while_soniccore_holds_the_lighting() {
+        assert!(lighting_write_allowed("openrgb", None).is_ok());
+        assert!(lighting_write_allowed("openrgb", Some(false)).is_ok());
+        assert_eq!(
+            lighting_write_allowed("openrgb", Some(true)),
+            Err(LIGHTING_HELD_ERROR.into())
+        );
+        assert!(lighting_write_allowed("soniccore", Some(true)).is_ok());
+        assert!(lighting_hold(arguments(&["maybe"])).is_err());
+        assert!(lighting_hold(arguments(&["on", "now"])).is_err());
     }
 
     #[test]
@@ -2711,6 +2775,9 @@ mod tests {
             game_chat_value: Some(8),
             bluetooth: Some("connected".into()),
             sidetone_level: Some("low".into()),
+            lighting_source: None,
+            lighting_updated_at_ms: None,
+            lighting_held: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["schema"], 1);
