@@ -73,13 +73,19 @@ check_overlay() {
     done < <(overlay_files)
 }
 
-install_overlay() {
-    local source target manifest_tmp
+# Fails, changing nothing, if any target was edited outside JamBaLinux.
+verify_overlay() {
+    local source target
     while IFS='|' read -r source target; do
         [[ -f "$SOURCE_DIR/$source" ]] || fail "arquivo do overlay não encontrado: packaging/$source"
         is_owned "$source" "$target" \
             || fail "$target foi modificado fora do JamBaLinux; revise ou remova o arquivo e rode de novo"
     done < <(overlay_files)
+}
+
+install_overlay() {
+    local source target manifest_tmp
+    verify_overlay
     mkdir -p -- "$(dirname -- "$MANIFEST")"
     manifest_tmp="$(mktemp -- "$MANIFEST.XXXXXX")"
     while IFS='|' read -r source target; do
@@ -115,8 +121,9 @@ uninstall_overlay() {
 }
 
 case "${1:-}" in
-    --check) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --install | --uninstall'; check_overlay ;;
-    --install) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --install | --uninstall'; install_overlay ;;
-    --uninstall) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --install | --uninstall'; uninstall_overlay ;;
-    *) printf '%s\n' 'uso: tools/acp-overlay.sh --check | --install | --uninstall' >&2; exit 2 ;;
+    --check) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --verify | --install | --uninstall'; check_overlay ;;
+    --verify) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --verify | --install | --uninstall'; verify_overlay ;;
+    --install) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --verify | --install | --uninstall'; install_overlay ;;
+    --uninstall) [[ $# -eq 1 ]] || fail 'uso: tools/acp-overlay.sh --check | --verify | --install | --uninstall'; uninstall_overlay ;;
+    *) printf '%s\n' 'uso: tools/acp-overlay.sh --check | --verify | --install | --uninstall' >&2; exit 2 ;;
 esac

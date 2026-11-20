@@ -81,6 +81,10 @@ class AllowedToolsTests(unittest.TestCase):
             "Read,Glob,Grep,Bash(git status --short),Bash(git diff -- *)",
         )
         self.assertNotIn("Bash(rg", allowed_tools)
+        # The prompt follows an end-of-options separator so the variadic
+        # --allowedTools cannot swallow it.
+        self.assertEqual(command[-2], "--")
+        self.assertIn("verifique as ferramentas permitidas", command[-1])
 
 
 if __name__ == "__main__":

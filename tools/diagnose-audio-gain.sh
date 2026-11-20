@@ -70,6 +70,8 @@ emit_hrir_metadata() {
 	# The status JSON is separately recorded below. This narrow extraction only
 	# locates its advertised local HRIR path; it never follows a guessed path.
 	path=$(printf '%s\n' "$spatial_json" | sed -n 's/.*"hrir_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+	# Every line of the block belongs in the log, not on the terminal.
+	{
 	if [[ -z $path ]]; then
 		printf '%s\n' 'unavailable: spatial status did not expose hrir_path'
 	elif [[ ! -f $path ]]; then
@@ -83,6 +85,7 @@ emit_hrir_metadata() {
 			printf '%s\n' 'unavailable: sha256sum not found'
 		fi
 	fi
+	} >>"$LOG_FILE"
 	printf '[/ hrir-file-metadata]\n' >>"$LOG_FILE"
 }
 

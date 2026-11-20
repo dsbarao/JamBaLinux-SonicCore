@@ -217,15 +217,19 @@ dongle or run:
 systemctl --user restart wireplumber
 ```
 
-Check, install, or remove only the overlay with:
+Check, verify, install, or remove only the overlay with:
 
 ```bash
 tools/acp-overlay.sh --check
+tools/acp-overlay.sh --verify
 tools/acp-overlay.sh --install
 tools/acp-overlay.sh --uninstall
 ```
 
-`tools/uninstall-user.sh --confirm` removes the overlay too. Files edited
+`--verify` changes nothing and fails if a target file was edited outside
+JamBaLinux; `tools/install-user.sh` runs it before installing anything, so an
+edited overlay stops the installation before the CLI, widget, or services are
+touched. `tools/uninstall-user.sh --confirm` removes the overlay too. Files edited
 outside JamBaLinux are kept and reported instead of deleted. After removal and
 a WirePlumber restart, the upstream profile-set applies again. A draft report
 for upstream is in
@@ -354,7 +358,10 @@ are not also checked. Configure it in the user systemd manager environment
 (for example through `environment.d`), not only in an interactive shell, so
 the preflight and spawned PipeWire graph see the same value. No files are
 downloaded or installed automatically. The installation and removal helpers
-locate the CLI under `${CARGO_HOME:-$HOME/.cargo}/bin`.
+locate the CLI under `${CARGO_HOME:-$HOME/.cargo}/bin`. With a custom
+`CARGO_HOME`, `tools/install-user.sh` installs copies of the systemd units,
+launcher, and widget that point at that directory; paths containing spaces,
+quotes, `\`, `$`, `` ` ``, `|`, or `%` are refused.
 
 The persistence/bypass transition still needs an in-person auditory acceptance:
 keep a browser video playing and toggle spatial ten times, confirming that it

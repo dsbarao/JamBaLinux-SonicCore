@@ -69,7 +69,7 @@ test_cargo_home_is_used_for_uninstaller_binary() {
 
     check_output="$(run_uninstaller_with_cargo_home "$cargo_home" --check)"
     [[ "$check_output" == *"$cargo_home/bin/soniccore"* ]]
-    grep -Fq 'readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"' "$INSTALLER"
+    grep -Fq 'readonly CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"' "$INSTALLER"
     grep -Fq 'readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"' "$UNINSTALLER"
 }
 
@@ -138,8 +138,117 @@ test_partial_overlay_removal_is_reported_and_fails() {
     rm -f -- "$edited"
 }
 
+make_install_stubs() {
+    local stub_bin="$1"
+    mkdir -p -- "$stub_bin"
+    # cargo install: create the binaries where CARGO_HOME says.
+    cat > "$stub_bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+printf 'cargo %s\n' "$*" >> "$INSTALL_LOG"
+mkdir -p -- "$CARGO_HOME/bin"
+printf '#!/bin/sh\n' > "$CARGO_HOME/bin/soniccore"
+chmod +x -- "$CARGO_HOME/bin/soniccore"
+STUB
+    # kpackagetool6 --type Plasma/Applet --install|--upgrade DIR
+    cat > "$stub_bin/kpackagetool6" <<'STUB'
+#!/usr/bin/env bash
+target="$HOME/.local/share/plasma/plasmoids"
+mkdir -p -- "$target"
+rm -rf -- "$target/org.jambalinux.soniccore"
+cp -a -- "${@: -1}" "$target/org.jambalinux.soniccore"
+STUB
+    local command
+    for command in pactl pipewire pw-link pw-cli pw-dump; do
+        printf '#!/bin/sh\nexit 0\n' > "$stub_bin/$command"
+    done
+    cp -- "$TEMP_BIN/systemctl" "$stub_bin/systemctl"
+    chmod +x -- "$stub_bin"/*
+}
+
+test_custom_cargo_home_is_written_into_installed_files() {
+    local home="$TEMP_HOME/custom-install-home"
+    local stub_bin="$home/stub-bin"
+    local cargo_home="$home/opt/cargo"
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+
+    HOME="$home" CARGO_HOME="$cargo_home" INSTALL_LOG="$home/install.log" \
+        PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" >/dev/null
+
+    local unit
+    for unit in jambalinux-soniccore jambalinux-soniccore-equalizer jambalinux-soniccore-spatial; do
+        grep -Fq "ExecStart=$cargo_home/bin/soniccore" "$home/.config/systemd/user/$unit.service"
+        ! grep -Fq '.cargo/bin' "$home/.config/systemd/user/$unit.service"
+    done
+    grep -Fq "exec $cargo_home/bin/soniccore show" \
+        "$home/.local/share/applications/jambalinux-soniccore.desktop"
+    grep -Fq "\"$cargo_home/bin/soniccore\"" \
+        "$home/.local/share/plasma/plasmoids/org.jambalinux.soniccore/contents/ui/main.qml"
+    # The repository copies stay untouched.
+    grep -Fq 'ExecStart=%h/.cargo/bin/soniccore' "$PROJECT_DIR/packaging/systemd/jambalinux-soniccore.service"
+}
+
+test_default_cargo_home_installs_packaging_verbatim() {
+    local home="$TEMP_HOME/default-install-home"
+    local stub_bin="$home/stub-bin"
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+
+    HOME="$home" CARGO_HOME="$home/.cargo" INSTALL_LOG="$home/install.log" \
+        PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" >/dev/null
+
+    cmp -s -- "$PROJECT_DIR/packaging/systemd/jambalinux-soniccore.service" \
+        "$home/.config/systemd/user/jambalinux-soniccore.service"
+    cmp -s -- "$PROJECT_DIR/packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml" \
+        "$home/.local/share/plasma/plasmoids/org.jambalinux.soniccore/contents/ui/main.qml"
+}
+
+test_edited_overlay_stops_install_before_any_change() {
+    local home="$TEMP_HOME/overlay-install-home"
+    local stub_bin="$home/stub-bin"
+    local edited="$home/.config/alsa-card-profile/mixer/paths/jambalinux-quantum810-game.conf"
+    local output status
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+    HOME="$home" "$PROJECT_DIR/tools/acp-overlay.sh" --install >/dev/null
+    printf '# editado\n' >> "$edited"
+
+    set +e
+    output="$(HOME="$home" CARGO_HOME="$home/.cargo" INSTALL_LOG="$home/install.log" \
+        PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" 2>&1)"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]]
+    [[ "$output" == *"modificado fora do JamBaLinux"* ]]
+    [[ ! -e "$home/install.log" ]]
+    [[ ! -e "$home/.config/systemd/user/jambalinux-soniccore.service" ]]
+}
+
+test_unsafe_cargo_home_is_refused() {
+    local home="$TEMP_HOME/unsafe-install-home"
+    local stub_bin="$home/stub-bin"
+    local output status
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+
+    set +e
+    output="$(HOME="$home" CARGO_HOME="$home/my cargo" INSTALL_LOG="$home/install.log" \
+        PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" 2>&1)"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]]
+    [[ "$output" == *"não é suportado"* ]]
+    [[ ! -e "$home/install.log" ]]
+}
+
 test_check_changes_nothing
 test_install_check_reports_each_required_audio_client
+test_custom_cargo_home_is_written_into_installed_files
+test_default_cargo_home_installs_packaging_verbatim
+test_edited_overlay_stops_install_before_any_change
+test_unsafe_cargo_home_is_refused
 test_cargo_home_is_used_for_uninstaller_binary
 test_install_uninstall_unit_parity
 test_confirm_stops_spatial_first_and_removes_units

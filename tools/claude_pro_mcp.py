@@ -108,6 +108,9 @@ Responda em JSON com: status (pass|fail|blocked), resumo, evidencias (lista), ri
         "--no-session-persistence",
         "--allowedTools",
         "Read,Glob,Grep,Bash(git status --short),Bash(git diff -- *)",
+        # --allowedTools is variadic: without this separator the CLI reads
+        # the prompt as one more tool name and --print gets no prompt.
+        "--",
         prompt,
     ]
     try:
@@ -115,6 +118,8 @@ Responda em JSON com: status (pass|fail|blocked), resumo, evidencias (lista), ri
             command,
             cwd=PROJECT,
             text=True,
+            # Without stdin the CLI waits 3 s for piped input on every call.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=TIMEOUT_SECONDS,
             check=False,

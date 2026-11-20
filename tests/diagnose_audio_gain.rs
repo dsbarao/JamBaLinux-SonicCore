@@ -112,9 +112,15 @@ fn simulated_clients_prove_queries_and_log_all_evidence() {
         "soniccore equalizer status --format json",
         "soniccore spatial status --format json",
         "hrir-file-metadata",
+        // The HRIR block's body goes to the log, not to the terminal.
+        "unavailable: spatial status did not expose hrir_path",
     ] {
         assert!(record.contains(required), "missing {required}");
     }
+    assert!(
+        !String::from_utf8_lossy(&result.stdout).contains("hrir_path"),
+        "HRIR metadata leaked to stdout instead of the log"
+    );
     let calls = fs::read_to_string(tmp.join("calls.log")).unwrap();
     for call in calls.lines() {
         assert!(

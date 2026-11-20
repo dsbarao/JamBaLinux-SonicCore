@@ -2260,28 +2260,49 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
     }
 }
 
+/// Parses the optional `--dry-run` flag of commands that take nothing else.
+/// Anything unknown is an error: a typo such as `--dryrun` must not silently
+/// run the real, device-touching command.
+fn parse_dry_run(command: &str, mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match (args.next(), args.next()) {
+        (None, _) => Ok(false),
+        (Some(flag), None) if flag == "--dry-run" => Ok(true),
+        (Some(flag), None) => Err(format!("unknown {command} option: {flag}")),
+        (Some(_), Some(extra)) => Err(format!("unexpected {command} argument: {extra}")),
+    }
+}
+
+fn no_arguments(command: &str, mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    match args.next() {
+        None => Ok(()),
+        Some(extra) => Err(format!("{command} accepts no arguments: {extra}")),
+    }
+}
+
 fn main() {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "scan".into());
     let result = match command.as_str() {
-        "scan" => scan().map_err(|error| error.to_string()),
-        "inspect" => inspect(),
-        "hid-descriptor" => hid_descriptor(),
-        "monitor" => monitor(args.next().as_deref() == Some("--dry-run")),
-        "daemon" => daemon(),
+        "scan" => {
+            no_arguments("scan", args).and_then(|()| scan().map_err(|error| error.to_string()))
+        }
+        "inspect" => no_arguments("inspect", args).and_then(|()| inspect()),
+        "hid-descriptor" => no_arguments("hid-descriptor", args).and_then(|()| hid_descriptor()),
+        "monitor" => parse_dry_run("monitor", args).and_then(monitor),
+        "daemon" => no_arguments("daemon", args).and_then(|()| daemon()),
         "status" => parse_status_options(args).and_then(status),
         "cached-status" => cached_status(args),
-        "probe-status" => probe_status(),
+        "probe-status" => no_arguments("probe-status", args).and_then(|()| probe_status()),
         "set" => parse_set_command(args).and_then(set_control),
         "equalizer" | "eq" => equalizer(args),
         "spatial" => spatial(args),
-        "notify" => notify(args.next().as_deref() == Some("--dry-run")),
-        "show" => show(args.next().as_deref() == Some("--dry-run")),
+        "notify" => parse_dry_run("notify", args).and_then(notify),
+        "show" => parse_dry_run("show", args).and_then(show),
         "export"
             if args.next().as_deref() == Some("--format")
                 && args.next().as_deref() == Some("json") =>
         {
-            export_json()
+            no_arguments("export --format json", args).and_then(|()| export_json())
         }
         "help" | "--help" | "-h" => {
             usage();
@@ -2308,6 +2329,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arguments(values: &[&str]) -> impl Iterator<Item = String> {
+        values
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn dry_run_flag_rejects_typos_and_extra_arguments() {
+        assert_eq!(parse_dry_run("notify", arguments(&[])), Ok(false));
+        assert_eq!(parse_dry_run("notify", arguments(&["--dry-run"])), Ok(true));
+        assert!(
+            parse_dry_run("notify", arguments(&["--dryrun"]))
+                .unwrap_err()
+                .contains("--dryrun")
+        );
+        assert!(parse_dry_run("show", arguments(&["--dry-run", "x"])).is_err());
+        assert_eq!(no_arguments("scan", arguments(&[])), Ok(()));
+        assert!(no_arguments("scan", arguments(&["--all"])).is_err());
+    }
     use std::sync::Arc;
 
     #[test]
