@@ -111,9 +111,11 @@ unsafe default or links, unobservable DSP controls, and a mismatch between the
 live controls and saved profile. They do not present the equalizer as active
 when these checks fail.
 
-The filter shape is an initial Linux approximation: 31 Hz uses a low shelf,
-62 Hz through 8 kHz use peaking biquads, 16 kHz uses a high shelf, and every
-band uses Q=1.0. USB captures confirm only the centers and gain range, not
+The filter shape is an initial Linux approximation: all ten bands use peaking
+biquads with Q=1.0, centred on the band frequency. Until 2026-11-20 the 31 Hz
+and 16 kHz bands were a low and a high shelf with their midpoint on the band
+frequency; at +12 dB those gave only +6 dB at the band itself and almost
+nothing above 45 Hz or below 14 kHz, so the two outer sliders were inaudible. USB captures confirm only the centers and gain range, not
 QuantumENGINE's Q or filter topology, so this is not claimed to be acoustically
 identical to the Windows implementation. Large positive gains can clip; there
 is currently no automatic preamp.
