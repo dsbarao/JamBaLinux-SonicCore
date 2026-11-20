@@ -239,6 +239,93 @@ fn connect_spatial_output() -> Result<(), String> {
     Ok(())
 }
 
+/// The two stereo links that carry the spatial output into the equalizer.
+const SPATIAL_OUTPUT_LINKS: [(&str, &str); 2] = [
+    (SPATIAL_OUTPUT_FL, EQUALIZER_INPUT_FL),
+    (SPATIAL_OUTPUT_FR, EQUALIZER_INPUT_FR),
+];
+
+/// PipeWire ids of the ports addressed as `node.name:port.name`.
+fn port_ids(objects: &[Value], qualified: &str) -> Vec<u64> {
+    let Some((node, port)) = qualified.split_once(':') else {
+        return Vec::new();
+    };
+    let node_ids = objects
+        .iter()
+        .filter(|object| node_name(object) == Some(node))
+        .filter_map(|object| object.get("id").and_then(Value::as_u64))
+        .collect::<Vec<_>>();
+    objects
+        .iter()
+        .filter(|object| {
+            object.get("type").and_then(Value::as_str) == Some("PipeWire:Interface:Port")
+        })
+        .filter(|object| {
+            let props = object.get("info").and_then(|info| info.get("props"));
+            props
+                .and_then(|props| props.get("port.name"))
+                .and_then(Value::as_str)
+                == Some(port)
+                && props
+                    .and_then(|props| props.get("node.id"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|id| node_ids.contains(&id))
+        })
+        .filter_map(|object| object.get("id").and_then(Value::as_u64))
+        .collect()
+}
+
+fn link_exists(objects: &[Value], output_port: &str, input_port: &str) -> bool {
+    let outputs = port_ids(objects, output_port);
+    let inputs = port_ids(objects, input_port);
+    objects.iter().any(|object| {
+        object.get("type").and_then(Value::as_str) == Some("PipeWire:Interface:Link")
+            && object.get("info").is_some_and(|info| {
+                info.get("output-port-id")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|id| outputs.contains(&id))
+                    && info
+                        .get("input-port-id")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|id| inputs.contains(&id))
+            })
+    })
+}
+
+/// Links whose ports both exist but are not connected to each other.
+fn missing_output_links(objects: &[Value]) -> Vec<(&'static str, &'static str)> {
+    SPATIAL_OUTPUT_LINKS
+        .into_iter()
+        .filter(|(output, input)| {
+            !port_ids(objects, output).is_empty()
+                && !port_ids(objects, input).is_empty()
+                && !link_exists(objects, output, input)
+        })
+        .collect()
+}
+
+/// Re-creates the spatial→equalizer links after the equalizer node was
+/// recreated (service restart, PipeWire recovery). The graph disables
+/// autoconnect, so without this repair its streams would stay silent.
+fn repair_spatial_output() -> Result<bool, String> {
+    let objects = pw_dump()?;
+    let missing = missing_output_links(&objects);
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    audio_sink_named(&objects, TARGET_EQUALIZER_SINK)?;
+    for (output, input) in missing {
+        pw_link_success(output, input)?;
+    }
+    Ok(true)
+}
+
+fn disconnect_spatial_output() {
+    for (output, input) in SPATIAL_OUTPUT_LINKS {
+        pw_unlink(output, input);
+    }
+}
+
 fn node_name(node: &Value) -> Option<&str> {
     (node.get("type")?.as_str()? == "PipeWire:Interface:Node").then_some(())?;
     node.get("info")?.get("props")?.get("node.name")?.as_str()
@@ -398,12 +485,48 @@ fn stop_graph(child: &mut Child) -> Result<(), String> {
     // keep the child alive and let the next supervisor pass observe a stable
     // graph instead.
     if spatial_index == 0 && equalizer_name.is_empty() {
+        // If PipeWire itself no longer has the capture node, no client can be
+        // attached to it: the child is an empty shell (for example after the
+        // session PipeWire restarted) and is safe to stop.
+        if spatial_capture_node(&pw_dump()?)?.is_none() {
+            return kill_child(child);
+        }
         return Err(
             "the spatial sink disappeared before its client inputs could be confirmed empty; keeping the graph alive"
                 .into(),
         );
     }
 
+    // While the output stays linked, the equalizer router sees a connected
+    // spatial graph and promotes registered streams straight back to it,
+    // undoing the drain. Unlink first; the drain below then converges.
+    disconnect_spatial_output();
+    let result = drain_and_stop(child, spatial_index, &equalizer_name);
+    if result.is_err() {
+        // The graph is kept because it still carries streams: give them back
+        // their path to the headset.
+        if let Err(error) = connect_spatial_output() {
+            eprintln!("spatial supervisor: could not reconnect the kept graph: {error}");
+        }
+    }
+    result
+}
+
+fn kill_child(child: &mut Child) -> Result<(), String> {
+    child
+        .kill()
+        .map_err(|error| format!("could not stop the spatial PipeWire graph: {error}"))?;
+    child
+        .wait()
+        .map_err(|error| format!("could not reap the spatial PipeWire graph: {error}"))?;
+    Ok(())
+}
+
+fn drain_and_stop(
+    child: &mut Child,
+    spatial_index: u64,
+    equalizer_name: &str,
+) -> Result<(), String> {
     // Drain loop: re-check that the spatial sink is truly empty.  A stream
     // can arrive between the initial listing and now (the H2 window); if so,
     // move it and re-check.  Only kill the graph when the sink has zero
@@ -411,13 +534,7 @@ fn stop_graph(child: &mut Child) -> Result<(), String> {
     for attempt in 0..DRAIN_MAX_ATTEMPTS {
         let remaining = client_inputs_on_spatial(spatial_index)?;
         if remaining == 0 {
-            child
-                .kill()
-                .map_err(|error| format!("could not stop the spatial PipeWire graph: {error}"))?;
-            child
-                .wait()
-                .map_err(|error| format!("could not reap the spatial PipeWire graph: {error}"))?;
-            return Ok(());
+            return kill_child(child);
         }
         // There are still client streams — move them and retry.
         eprintln!(
@@ -426,7 +543,7 @@ fn stop_graph(child: &mut Child) -> Result<(), String> {
             DRAIN_MAX_ATTEMPTS,
             remaining
         );
-        move_spatial_inputs(spatial_index, &equalizer_name)?;
+        move_spatial_inputs(spatial_index, equalizer_name)?;
         thread::sleep(DRAIN_INTERVAL);
     }
 
@@ -596,6 +713,19 @@ fn spawn_pipewire(config: &Path) -> Result<Child, String> {
 
 fn spawn_connected_pipewire(config: &Path) -> Result<Child, String> {
     let mut child = spawn_pipewire(config)?;
+    match wait_and_connect(&mut child) {
+        Ok(()) => Ok(child),
+        Err(error) => {
+            // Never leave a half-started graph behind: an orphan would make
+            // the next spawn refuse with "a spatial graph already exists".
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
+        }
+    }
+}
+
+fn wait_and_connect(child: &mut Child) -> Result<(), String> {
     for _ in 0..GRAPH_READY_ATTEMPTS {
         if let Some(status) = child
             .try_wait()
@@ -604,19 +734,12 @@ fn spawn_connected_pipewire(config: &Path) -> Result<Child, String> {
             return Err(format!("spatial PipeWire graph exited with {status}"));
         }
         if spatial_graph_exists()? {
-            if let Err(error) = connect_spatial_output() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "could not connect the spatial output to the equalizer: {error}"
-                ));
-            }
-            return Ok(child);
+            return connect_spatial_output().map_err(|error| {
+                format!("could not connect the spatial output to the equalizer: {error}")
+            });
         }
         thread::sleep(GRAPH_READY_INTERVAL);
     }
-    let _ = child.kill();
-    let _ = child.wait();
     Err("the spatial PipeWire graph did not become observable in time".into())
 }
 
@@ -632,26 +755,53 @@ fn spatial_graph_exists() -> Result<bool, String> {
 /// Reconcile intent with the observable controls. A command failure is not a
 /// lifecycle failure: retaining the child is essential because it may carry
 /// streams, and the next supervisor pass can retry after PipeWire recovers.
-fn reconcile_mix_with_target(target: impl FnOnce() -> Result<bool, String>) {
+/// Returns `false` only when PipeWire was observed without the capture node,
+/// i.e. the child is alive but no longer hosts the graph.
+fn reconcile_mix_with_target(target: impl FnOnce() -> Result<bool, String>) -> bool {
     // Unlike the immediate CLI path, the supervisor can have spent a long
     // time in preflight since it chose SetMix. Re-read the persisted gate
     // inside the same lock that serializes ramps so it cannot restore an old
     // wet/dry target after a newer CLI toggle has completed.
     match set_mix_if_graph_exists_with_target(target) {
-        Ok(true) => {}
-        Ok(false) => eprintln!("spatial supervisor: graph disappeared before its mix was updated"),
-        Err(error) => eprintln!("spatial supervisor: could not update live mix: {error}"),
+        Ok(true) => true,
+        Ok(false) => {
+            eprintln!("spatial supervisor: graph disappeared before its mix was updated");
+            false
+        }
+        Err(error) => {
+            eprintln!("spatial supervisor: could not update live mix: {error}");
+            true
+        }
     }
 }
 
 fn reconcile_mix_from_profile(
     load_profile: impl FnOnce() -> Result<spatial::SpatialProfile, String>,
-) {
-    reconcile_mix_with_target(|| load_profile().map(|profile| profile.enabled));
+) -> bool {
+    reconcile_mix_with_target(|| load_profile().map(|profile| profile.enabled))
 }
 
-fn reconcile_mix() {
-    reconcile_mix_from_profile(spatial::load);
+fn reconcile_mix() -> bool {
+    reconcile_mix_from_profile(spatial::load)
+}
+
+/// Consecutive supervisor passes a running graph may fail its readiness
+/// check (a `pw-dump` timeout, the equalizer briefly restarting) before it is
+/// torn down. A single transient failure must not move every stream.
+const READINESS_GRACE_PASSES: u32 = 3;
+
+/// The link check costs one `pw-dump`; run it every few passes (about every
+/// two seconds) rather than on every 500 ms pass.
+const LINK_CHECK_PASSES: u32 = 4;
+
+/// Consecutive passes a live child may run without its capture node before
+/// it is replaced.
+const MISSING_GRAPH_PASSES: u32 = 3;
+
+/// Whether a running graph should still be treated as ready although this
+/// pass's readiness check failed transiently.
+fn within_readiness_grace(child: ChildState, failed_passes: u32) -> bool {
+    child == ChildState::Running && failed_passes <= READINESS_GRACE_PASSES
 }
 
 /// Persistent systemd-service entrypoint. The graph is a child process owned
@@ -660,10 +810,18 @@ fn reconcile_mix() {
 pub fn run() -> Result<(), String> {
     let mut child: Option<Child> = None;
     let mut respawn_backoff = RespawnBackoff::default();
+    let mut failed_readiness_passes = 0_u32;
+    let mut missing_graph_passes = 0_u32;
+    let mut passes_since_link_check = 0_u32;
     loop {
         let profile = spatial::load();
         let desired = desired_config();
-        let ready = desired.as_ref().is_ok_and(|config| config.is_some());
+        let mut ready = desired.as_ref().is_ok_and(|config| config.is_some());
+        if desired.is_err() {
+            failed_readiness_passes = failed_readiness_passes.saturating_add(1);
+        } else {
+            failed_readiness_passes = 0;
+        }
         let mut exited_status = None;
         let child_state = match child.as_mut() {
             None => ChildState::Absent,
@@ -692,6 +850,14 @@ pub fn run() -> Result<(), String> {
                 delay.as_secs_f32()
             );
         }
+        if let Err(error) = &desired
+            && within_readiness_grace(child_state, failed_readiness_passes)
+        {
+            eprintln!(
+                "spatial supervisor: readiness check failed ({failed_readiness_passes}/{READINESS_GRACE_PASSES}), keeping the graph: {error}"
+            );
+            ready = true;
+        }
         let action = match profile.as_ref() {
             Ok(profile) => next_action(child_state, profile, ready),
             Err(_) if child_state == ChildState::Running => SupervisorAction::Teardown,
@@ -701,23 +867,87 @@ pub fn run() -> Result<(), String> {
             (SupervisorAction::Spawn, Ok(Some(config)), Ok(_profile))
                 if respawn_backoff.ready() =>
             {
-                if spatial_graph_exists()? {
-                    return Err(
-                        "a spatial graph already exists; refusing to create a second graph".into(),
-                    );
+                match spatial_graph_exists() {
+                    Ok(true) => {
+                        // An unowned graph: exiting lets systemd clean the
+                        // cgroup instead of creating a second capture sink.
+                        return Err(
+                            "a spatial graph already exists; refusing to create a second graph"
+                                .into(),
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("spatial supervisor: {error}");
+                        thread::sleep(ROUTE_INTERVAL);
+                        continue;
+                    }
                 }
-                child = Some(spawn_connected_pipewire(&write_config(&config)?)?);
-                respawn_backoff.record_spawn();
-                // The renderer already initializes the graph from its gate.
-                // Reconcile anyway in case intent changed while it spawned;
-                // a transient command failure never sacrifices the graph.
-                reconcile_mix();
+                match write_config(&config).and_then(|path| spawn_connected_pipewire(&path)) {
+                    Ok(spawned) => {
+                        child = Some(spawned);
+                        missing_graph_passes = 0;
+                        respawn_backoff.record_spawn();
+                        // The renderer already initializes the graph from its
+                        // gate. Reconcile anyway in case intent changed while
+                        // it spawned; a transient command failure never
+                        // sacrifices the graph.
+                        reconcile_mix();
+                    }
+                    Err(error) => {
+                        // Treat a failed start like a crash so the backoff
+                        // applies, instead of exiting and letting systemd
+                        // recreate a client-visible sink every few seconds.
+                        let delay = respawn_backoff.record_exit();
+                        eprintln!(
+                            "spatial supervisor: {error}; retrying in {} seconds",
+                            delay.as_secs_f32()
+                        );
+                    }
+                }
             }
             (SupervisorAction::SetMix, _, _) => {
+                passes_since_link_check = passes_since_link_check.saturating_add(1);
+                let link_result = if passes_since_link_check >= LINK_CHECK_PASSES {
+                    passes_since_link_check = 0;
+                    repair_spatial_output()
+                } else {
+                    Ok(false)
+                };
+                match link_result {
+                    Ok(true) => {
+                        eprintln!(
+                            "spatial supervisor: reconnected the spatial output to the equalizer"
+                        )
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!(
+                        "spatial supervisor: could not reconnect the spatial output: {error}"
+                    ),
+                }
                 // This observes the live controls before ramping. It makes a
                 // CLI transition idempotent for the supervisor rather than
                 // replaying a second wet/dry ramp 500 ms later.
-                reconcile_mix();
+                if reconcile_mix() {
+                    missing_graph_passes = 0;
+                } else {
+                    missing_graph_passes = missing_graph_passes.saturating_add(1);
+                    if missing_graph_passes >= MISSING_GRAPH_PASSES
+                        && let Some(mut stale) = child.take()
+                    {
+                        // The process is alive but hosts no graph (its module
+                        // unloaded after a PipeWire restart). No client can be
+                        // attached to a node that does not exist.
+                        let _ = stale.kill();
+                        let _ = stale.wait();
+                        missing_graph_passes = 0;
+                        let delay = respawn_backoff.record_exit();
+                        eprintln!(
+                            "spatial supervisor: replacing a graph process without nodes in {} seconds",
+                            delay.as_secs_f32()
+                        );
+                    }
+                }
             }
             (SupervisorAction::Teardown, _, _) => {
                 let Some(active) = child.as_mut() else {
@@ -1177,6 +1407,10 @@ mod tests {
         runner.push_output(EQUALIZER_NODE);
         runner.push_output(&inputs(&[(300, 400)]));
         queue_move(&runner, &[(300, 400)]);
+        // The output is unlinked from the equalizer before the drain so the
+        // equalizer router cannot promote the moved streams back.
+        runner.push_output("");
+        runner.push_output("");
         // The verification read closes H2: a new, unregistered stream appears
         // after the first listing and must also be evacuated.
         runner.push_output(&inputs(&[(301, 400)]));
@@ -1199,6 +1433,19 @@ mod tests {
 
         let calls = runner.command_lines();
         assert_registration_precedes_every_move(&calls);
+        let unlink = calls
+            .iter()
+            .position(|call| {
+                call == &format!("pw-link --disconnect {SPATIAL_OUTPUT_FL} {EQUALIZER_INPUT_FL}")
+            })
+            .expect("the spatial output is unlinked before draining");
+        let late_move = calls
+            .iter()
+            .position(|call| {
+                call == "pactl move-sink-input 301 jambalinux-soniccore-game-equalizer"
+            })
+            .expect("late stream moved");
+        assert!(unlink < late_move);
         assert!(calls.iter().any(|call| {
             call == "pactl move-sink-input 300 jambalinux-soniccore-game-equalizer"
         }));
@@ -1216,11 +1463,17 @@ mod tests {
         runner.push_output(EQUALIZER_NODE);
         runner.push_output(&inputs(&[(300, 400)]));
         queue_move(&runner, &[(300, 400)]);
+        runner.push_output("");
+        runner.push_output("");
         for _ in 0..DRAIN_MAX_ATTEMPTS {
             runner.push_output(&inputs(&[(301, 400)]));
             runner.push_output(&inputs(&[(301, 400)]));
             queue_move(&runner, &[(301, 400)]);
         }
+        // The kept graph is relinked to the proven equalizer input.
+        runner.push_output(EQUALIZER_NODE);
+        runner.push_output("");
+        runner.push_output("");
 
         let _guard = crate::command::set_runner(runner.clone());
         crate::pipewire::install_mock_state_for_test();
@@ -1229,7 +1482,13 @@ mod tests {
 
         assert!(error.contains("keeping the graph alive"));
         assert!(child.try_wait().expect("observe child").is_none());
-        assert_registration_precedes_every_move(&runner.command_lines());
+        let calls = runner.command_lines();
+        assert_registration_precedes_every_move(&calls);
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some(format!("pw-link --wait {SPATIAL_OUTPUT_FR} {EQUALIZER_INPUT_FR}").as_str()),
+            "a graph kept with streams must get its output back: {calls:?}"
+        );
         reap(&mut child);
         crate::pipewire::clear_mock_state_for_test();
     }
@@ -1263,6 +1522,116 @@ mod tests {
                 .iter()
                 .any(|call| call.contains("move-sink-input"))
         );
+        reap(&mut child);
+    }
+
+    fn linked_graph_dump(links: &[(&str, &str)]) -> String {
+        // Nodes 87 (spatial output) and 74 (equalizer) with their stereo
+        // ports, plus the requested links between them.
+        let mut objects = vec![
+            serde_json::json!({ "id": 74, "type": "PipeWire:Interface:Node", "info": { "props": {
+                "node.name": TARGET_EQUALIZER_SINK, "media.class": "Audio/Sink" } } }),
+            serde_json::json!({ "id": 88, "type": "PipeWire:Interface:Node", "info": { "props": {
+                "node.name": SPATIAL_OUTPUT_NODE, "media.class": "Audio/Source" } } }),
+        ];
+        let ports = [
+            (10, 88, "output_FL"),
+            (11, 88, "output_FR"),
+            (20, 74, "playback_FL"),
+            (21, 74, "playback_FR"),
+        ];
+        for (id, node, name) in ports {
+            objects.push(
+                serde_json::json!({ "id": id, "type": "PipeWire:Interface:Port",
+                "info": { "props": { "node.id": node, "port.name": name } } }),
+            );
+        }
+        for (index, (output, input)) in links.iter().enumerate() {
+            let port = |name: &str| ports.iter().find(|port| port.2 == name).unwrap().0;
+            objects.push(
+                serde_json::json!({ "id": 500 + index, "type": "PipeWire:Interface:Link",
+                "info": { "output-port-id": port(output), "input-port-id": port(input) } }),
+            );
+        }
+        serde_json::Value::Array(objects).to_string()
+    }
+
+    #[test]
+    fn a_recreated_equalizer_gets_the_spatial_output_relinked() {
+        let both = linked_graph_dump(&[("output_FL", "playback_FL"), ("output_FR", "playback_FR")]);
+        let objects: Vec<Value> = serde_json::from_str(&both).unwrap();
+        assert!(missing_output_links(&objects).is_empty());
+
+        // The equalizer node was recreated: only the FL link survived.
+        let partial = linked_graph_dump(&[("output_FL", "playback_FL")]);
+        let objects: Vec<Value> = serde_json::from_str(&partial).unwrap();
+        assert_eq!(
+            missing_output_links(&objects),
+            [(SPATIAL_OUTPUT_FR, EQUALIZER_INPUT_FR)]
+        );
+
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        runner.push_output(&linked_graph_dump(&[]));
+        runner.push_output("");
+        runner.push_output("");
+        let _guard = crate::command::set_runner(runner.clone());
+        assert!(repair_spatial_output().unwrap());
+        assert_eq!(
+            runner.command_lines()[1..],
+            [
+                format!("pw-link --wait {SPATIAL_OUTPUT_FL} {EQUALIZER_INPUT_FL}"),
+                format!("pw-link --wait {SPATIAL_OUTPUT_FR} {EQUALIZER_INPUT_FR}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn repair_does_not_link_while_the_equalizer_ports_are_absent() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        runner.push_output(&spatial_capture_dump(1.0, 0.0));
+        let _guard = crate::command::set_runner(runner.clone());
+        assert!(!repair_spatial_output().unwrap());
+        assert_eq!(runner.command_lines(), ["pw-dump"]);
+    }
+
+    #[test]
+    fn a_transient_readiness_failure_does_not_tear_down_a_running_graph() {
+        for pass in 1..=READINESS_GRACE_PASSES {
+            assert!(within_readiness_grace(ChildState::Running, pass));
+        }
+        assert!(!within_readiness_grace(
+            ChildState::Running,
+            READINESS_GRACE_PASSES + 1
+        ));
+        assert!(!within_readiness_grace(ChildState::Absent, 1));
+        assert!(!within_readiness_grace(ChildState::Exited, 1));
+    }
+
+    #[test]
+    fn a_graph_without_nodes_is_stopped_when_its_pulse_sink_vanished() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        // PulseAudio no longer lists the spatial sink, and PipeWire confirms
+        // the capture node is gone too: no client can be attached.
+        runner.push_output(&SINKS.replace("jambalinux-soniccore-game-spatial", "gone"));
+        runner.push_output(EQUALIZER_NODE);
+        let _guard = crate::command::set_runner(runner.clone());
+        let mut child = live_child();
+        stop_graph(&mut child).expect("an empty process may be stopped");
+        assert!(child.try_wait().expect("observe child").is_some());
+    }
+
+    #[test]
+    fn a_graph_hidden_only_from_pulse_is_kept() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        // pipewire-pulse lost the sink but PipeWire still has the node, so
+        // streams may still be attached: keep the graph.
+        runner.push_output(&SINKS.replace("jambalinux-soniccore-game-spatial", "gone"));
+        runner.push_output(&spatial_capture_dump(1.0, 0.0));
+        let _guard = crate::command::set_runner(runner.clone());
+        let mut child = live_child();
+        let error = stop_graph(&mut child).expect_err("streams may still be attached");
+        assert!(error.contains("keeping the graph alive"));
+        assert!(child.try_wait().expect("observe child").is_none());
         reap(&mut child);
     }
 }

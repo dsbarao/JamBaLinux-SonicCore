@@ -76,8 +76,11 @@ systemctl --user enable jambalinux-soniccore-spatial.service
 # already-running service cannot keep an older binary. Band changes never use
 # systemctl and update the persistent equalizer node in place.
 systemctl --user restart jambalinux-soniccore.service
+# Stop spatial while the equalizer still exists: its ExecStop moves streams to
+# the equalizer sink and fails if that sink is already gone.
+systemctl --user stop jambalinux-soniccore-spatial.service
 systemctl --user restart jambalinux-soniccore-equalizer.service
-systemctl --user restart jambalinux-soniccore-spatial.service
+systemctl --user start jambalinux-soniccore-spatial.service
 # The ACP overlay only takes effect when WirePlumber recreates the card; the
 # installer does not restart it, so audio is never cut without being asked.
 "$ACP_OVERLAY" --install

@@ -353,20 +353,61 @@ fn read_state() -> Result<Option<BackendState>, String> {
     }
     let state = state_path()?;
     match fs::read_to_string(&state) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map(Some)
-            .map_err(|error| format!("{}: {error}", state.display())),
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(error) => {
+                // A truncated or corrupt routing state (power loss) must not
+                // keep the equalizer service in an endless retry loop. The
+                // file only caches routing proofs; set it aside and start
+                // fresh, keeping the bad copy for inspection.
+                let aside = state.with_extension(format!(
+                    "corrupt.{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs())
+                        .unwrap_or_default()
+                ));
+                fs::rename(&state, &aside).map_err(|rename_error| {
+                    format!(
+                        "{}: {error}; could not set it aside: {rename_error}",
+                        state.display()
+                    )
+                })?;
+                eprintln!(
+                    "{}: {error}; moved to {} and starting with empty routing state",
+                    state.display(),
+                    aside.display()
+                );
+                Ok(None)
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{}: {error}", state.display())),
     }
 }
 
 fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write as _;
     let directory = path.parent().ok_or("invalid PipeWire state path")?;
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&temporary, contents).map_err(|error| format!("{}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path).map_err(|error| format!("{}: {error}", path.display()))
+    let written = File::create(&temporary).and_then(|mut file| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("{}: {error}", temporary.display()));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("{}: {error}", path.display()));
+    }
+    // Persist the rename itself; best effort, the data is already durable.
+    if let Ok(directory) = File::open(directory) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 fn write_state(state: &BackendState) -> Result<(), String> {
@@ -1083,10 +1124,20 @@ pub fn register_spatial_fallback_streams(input_serials: &[u64]) -> Result<(), St
         state.unproven_streams.retain(|identity| {
             identity.object_serial != input.object_serial || identity.stream_key != input.stream_key
         });
+        // The spatial sink only feeds the Game equalizer, so a stream found
+        // on it was chosen for Game processing even if it never touched the
+        // physical Game sink (the user can pick "Game Spatial" directly).
+        // Record that proof; otherwise the equalizer router would quarantine
+        // the restored stream and evacuate it to the default output.
+        if !state.proven_stream_keys.contains(&input.stream_key) {
+            state.proven_stream_keys.push(input.stream_key.clone());
+            if state.proven_stream_keys.len() > 100 {
+                state.proven_stream_keys.remove(0);
+            }
+        }
         if !state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
-        }) && state.proven_stream_keys.contains(&input.stream_key)
-        {
+        }) {
             state.routed_streams.push(RoutedStream {
                 object_serial: input.object_serial,
                 stream_key: input.stream_key.clone(),
@@ -1139,6 +1190,12 @@ fn plan_restore_routes(
         .iter()
         .find(|sink| sink.name == VIRTUAL_SINK)
         .map(|sink| sink.object_serial);
+    // Streams promoted to the spatial graph depend on the equalizer too: its
+    // output feeds the equalizer sink, which disappears with this service.
+    let spatial_sink_serial = sinks
+        .iter()
+        .find(|sink| sink.name == SPATIAL_SINK_NODE)
+        .map(|sink| sink.object_serial);
     let mut actions = Vec::new();
     let mut remaining_routes = Vec::new();
     for route in &state.routed_streams {
@@ -1148,7 +1205,9 @@ fn plan_restore_routes(
             // The stream ended; no restoration remains to perform.
             continue;
         };
-        if Some(input.sink_serial) != virtual_sink_serial {
+        if Some(input.sink_serial) != virtual_sink_serial
+            && Some(input.sink_serial) != spatial_sink_serial
+        {
             // The user or session manager already moved it elsewhere. Respect
             // that newer destination instead of overwriting it on shutdown.
             continue;
@@ -1810,6 +1869,20 @@ pub fn restore_routes() -> Result<(), String> {
     // systemd executes ExecStop, before it terminates the service cgroup.
     state.routing_paused = true;
     write_state(&state)?;
+    let result = restore_paused_routes(state);
+    if result.is_err() {
+        // Restoration did not complete. If the service keeps running (the
+        // CLI `disable` aborts before stopping it), a persisted pause would
+        // silently stop all Game routing until the next restart.
+        if let Ok(Some(mut current)) = read_state() {
+            current.routing_paused = false;
+            let _ = write_state(&current);
+        }
+    }
+    result
+}
+
+fn restore_paused_routes(state: BackendState) -> Result<(), String> {
     let sinks = pulse_sinks(&pactl_json(&["list", "sinks"])?)?;
     let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
     let plan = plan_restore_routes(&sinks, &inputs, state);
@@ -2283,6 +2356,52 @@ mod tests {
                 if sink_name == &game.name
         ));
         assert!(plan.state.routed_streams.is_empty());
+    }
+
+    #[test]
+    fn restore_plan_moves_a_stream_parked_on_the_spatial_sink_back_to_game() {
+        let (mut sinks, game) = routing_sinks();
+        // The spatial graph feeds the equalizer that is about to disappear,
+        // so its streams must be restored too instead of losing their route.
+        sinks.push(PulseSink {
+            object_serial: 400,
+            name: SPATIAL_SINK_NODE.into(),
+        });
+        let state = BackendState {
+            routed_streams: vec![RoutedStream {
+                object_serial: 14,
+                stream_key: "restore".into(),
+                original_sink_name: game.name.clone(),
+                original_sink_serial: game.object_serial,
+            }],
+            ..BackendState::default()
+        };
+        let plan = plan_restore_routes(&sinks, &[playback_input(14, 400, "restore")], state);
+
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [RouteAction::MoveSinkInput { input_serial: 14, sink_name }]
+                if sink_name == &game.name
+        ));
+        assert!(plan.state.routed_streams.is_empty());
+    }
+
+    #[test]
+    fn a_failed_restore_does_not_leave_routing_paused() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        // `equalizer disable` restores routes before stopping the service;
+        // pipewire-pulse fails mid-way, so the service keeps running.
+        runner.push_error("pactl timed out");
+        let _guard = crate::command::set_runner(runner.clone());
+        MOCK_STATE.with(|m| *m.borrow_mut() = Some(BackendState::default()));
+
+        assert!(restore_routes().is_err());
+        let state = MOCK_STATE.with(|m| m.borrow().clone().unwrap());
+        assert!(
+            !state.routing_paused,
+            "a failed restore must resume routing"
+        );
+        MOCK_STATE.with(|m| *m.borrow_mut() = None);
     }
 
     #[test]
@@ -2777,7 +2896,7 @@ mod tests {
     }
 
     #[test]
-    fn unproven_stream_on_spatial_sink_is_evacuated_safely() {
+    fn stream_chosen_on_spatial_sink_keeps_its_game_route_on_teardown() {
         let runner = Arc::new(crate::command::ScriptedRunner::new());
         // 1. pactl --format=json list sinks
         runner.push_output(r#"[
@@ -2831,12 +2950,18 @@ mod tests {
             && args.contains("300")
             && args.contains("jambalinux-soniccore-game-equalizer")));
 
-        // The stream should NOT be blindly registered as Game!
+        // The spatial sink feeds only the Game equalizer, so the stream keeps
+        // its Game destination: it is registered against the exact Game sink
+        // and its key becomes proven. Leaving it unregistered made the
+        // equalizer router quarantine it and evacuate it to the default
+        // output (possibly Chat or HDMI).
         let state = MOCK_STATE.with(|m| m.borrow().clone().unwrap());
-        assert!(
-            state.routed_streams.is_empty(),
-            "Stream was blindly registered!"
-        );
+        assert_eq!(state.routed_streams.len(), 1);
+        let route = &state.routed_streams[0];
+        assert_eq!(route.object_serial, 300);
+        assert_eq!(route.original_sink_name, "alsa_output.usb_quantum.game");
+        assert!(state.proven_stream_keys.contains(&route.stream_key));
+        assert!(state.unproven_streams.is_empty());
 
         // Clean up mock
         MOCK_STATE.with(|m| *m.borrow_mut() = None);

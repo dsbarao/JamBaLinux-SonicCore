@@ -266,10 +266,11 @@ sources, including the microphone, remain outside the chain. The virtual
 equalizer sink is never selected as the default; if it appears as the default,
 the service restores the recorded non-virtual default.
 
-Band changes, predefined profile selection, and **Zerar bandas** issue four
-`Props` updates to the existing
-PipeWire filter, separated by three nominal 10 ms intervals. The resulting
-30 ms ramp excludes command and scheduling overhead. Real-system validation on
+Band changes, predefined profile selection, and **Zerar bandas** ramp the
+existing PipeWire filter through `Props` updates 22 ms apart (about one audio
+quantum), moving no band more than 0.25 dB per step. A ramp uses at least four
+and at most 48 updates, so a small change takes about 70 ms and a full-scale
+reset about one second, excluding command and scheduling overhead. Real-system validation on
 2026-09-19 measured the live audio effect and about 100 ms end-to-end command
 time while preserving the service PID and filter-node identity. The update path
 does not restart the service or deliberately recreate the filter node.
