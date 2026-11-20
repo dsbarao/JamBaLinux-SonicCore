@@ -652,6 +652,16 @@ pub fn rename_custom_profile(
     let mut profile = validate(profile.clone())?;
     let index = custom_profile_index(&profile, id)?;
     let name = normalize_name(name)?;
+    // The selector lists factory presets and custom profiles together; a
+    // custom "FPS" would be indistinguishable from the built-in one.
+    if PRESETS
+        .iter()
+        .any(|preset| name_key(preset.name) == name_key(&name))
+    {
+        return Err(format!(
+            "`{name}` is the name of a factory preset; choose another name"
+        ));
+    }
     if profile
         .custom_profiles
         .iter()
@@ -1138,5 +1148,18 @@ mod tests {
             fs::read(&path).expect("read preserved profile after invalid custom"),
             original_content
         );
+    }
+
+    #[test]
+    fn custom_profiles_cannot_reuse_a_factory_preset_name() {
+        let profile = EqualizerProfile::default();
+        for name in ["FPS", "fps", "  Bass Boost ", "escape from tarkov"] {
+            let error = create_custom_profile(&profile, name).unwrap_err();
+            assert!(error.contains("factory preset"), "{name}: {error}");
+        }
+        let created = create_custom_profile(&profile, "Meu FPS").unwrap();
+        let id = created.custom_profiles[0].id.clone();
+        assert!(rename_custom_profile(&created, &id, "Flat").is_err());
+        assert!(rename_custom_profile(&created, &id, "Flat 2").is_ok());
     }
 }

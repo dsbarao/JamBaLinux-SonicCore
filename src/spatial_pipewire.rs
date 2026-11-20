@@ -23,6 +23,10 @@ use crate::spatial::graph::{
 
 const CONFIG_NAME: &str = "pipewire-spatial.conf";
 const ROUTE_INTERVAL: Duration = Duration::from_millis(500);
+/// Pass interval while a running graph needed nothing. CLI and widget mix
+/// changes are applied by the command itself, so this only delays automatic
+/// recovery by half a second while halving the idle polling cost.
+const STEADY_INTERVAL: Duration = Duration::from_secs(1);
 const GRAPH_READY_ATTEMPTS: usize = 40;
 const GRAPH_READY_INTERVAL: Duration = Duration::from_millis(50);
 const MIX_RAMP_STEPS: u32 = 4;
@@ -151,12 +155,33 @@ fn set_mix(node_id: u32, from: SpatialMix, to: SpatialMix) -> Result<(), String>
 fn set_mix_if_graph_exists_with_target(
     target: impl FnOnce() -> Result<bool, String>,
 ) -> Result<bool, String> {
+    set_mix_if_graph_exists_observed(None, target)
+}
+
+/// Like [`set_mix_if_graph_exists_with_target`], but first consults a
+/// `pw-dump` snapshot the supervisor already took this pass. When that
+/// snapshot already shows the target mix (the steady state) no further
+/// `pw-dump` is spent; any mismatch is re-read fresh under the lock before
+/// ramping, so a stale snapshot can never drive a ramp.
+fn set_mix_if_graph_exists_observed(
+    observed: Option<&[Value]>,
+    target: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
     // The CLI and the supervisor are separate processes.  Keep this guard for
     // the entire read/ramp/verify transaction rather than merely around each
     // `pw-cli` invocation, otherwise their individual ramp steps can
     // interleave and produce an audible bounce to stale intent.
     let _mix_lock = spatial::mix_lock()?;
     let enabled = target()?;
+    if let Some(objects) = observed {
+        match spatial_capture_node(objects)? {
+            None => return Ok(false),
+            Some(node) if spatial_mix(node)?.matches(SpatialMix::target(enabled)) => {
+                return Ok(true);
+            }
+            Some(_) => {}
+        }
+    }
     let nodes = pw_dump()?;
     let Some(node) = spatial_capture_node(&nodes)? else {
         return Ok(false);
@@ -307,13 +332,17 @@ fn missing_output_links(objects: &[Value]) -> Vec<(&'static str, &'static str)> 
 /// Re-creates the spatial→equalizer links after the equalizer node was
 /// recreated (service restart, PipeWire recovery). The graph disables
 /// autoconnect, so without this repair its streams would stay silent.
+#[cfg(test)]
 fn repair_spatial_output() -> Result<bool, String> {
-    let objects = pw_dump()?;
-    let missing = missing_output_links(&objects);
+    repair_spatial_output_observed(&pw_dump()?)
+}
+
+fn repair_spatial_output_observed(objects: &[Value]) -> Result<bool, String> {
+    let missing = missing_output_links(objects);
     if missing.is_empty() {
         return Ok(false);
     }
-    audio_sink_named(&objects, TARGET_EQUALIZER_SINK)?;
+    audio_sink_named(objects, TARGET_EQUALIZER_SINK)?;
     for (output, input) in missing {
         pw_link_success(output, input)?;
     }
@@ -587,7 +616,9 @@ fn write_config(contents: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn desired_config() -> Result<Option<String>, String> {
+/// `objects` is this pass's `pw-dump` snapshot; it is only consulted for a
+/// binaural profile, so an empty slice is fine when no graph is wanted.
+fn desired_config(objects: &[Value]) -> Result<Option<String>, String> {
     let profile = spatial::load()?;
     if profile.mode != spatial::SpatialMode::BinauralStereo {
         return Ok(None);
@@ -598,7 +629,7 @@ fn desired_config() -> Result<Option<String>, String> {
             .error
             .unwrap_or_else(|| "spatial capability unavailable".into()));
     }
-    ensure_equalizer_target()?;
+    audio_sink_named(objects, TARGET_EQUALIZER_SINK)?;
     let hrir = capability
         .dataset
         .hrir_path
@@ -744,12 +775,16 @@ fn wait_and_connect(child: &mut Child) -> Result<(), String> {
 }
 
 fn spatial_graph_exists() -> Result<bool, String> {
-    Ok(pw_dump()?.iter().any(|node| {
+    Ok(spatial_graph_in(&pw_dump()?))
+}
+
+fn spatial_graph_in(objects: &[Value]) -> bool {
+    objects.iter().any(|node| {
         matches!(
             node_name(node),
             Some(SPATIAL_SINK_NODE | SPATIAL_OUTPUT_NODE)
         )
-    }))
+    })
 }
 
 /// Reconcile intent with the observable controls. A command failure is not a
@@ -758,11 +793,18 @@ fn spatial_graph_exists() -> Result<bool, String> {
 /// Returns `false` only when PipeWire was observed without the capture node,
 /// i.e. the child is alive but no longer hosts the graph.
 fn reconcile_mix_with_target(target: impl FnOnce() -> Result<bool, String>) -> bool {
+    reconcile_mix_observed(None, target)
+}
+
+fn reconcile_mix_observed(
+    observed: Option<&[Value]>,
+    target: impl FnOnce() -> Result<bool, String>,
+) -> bool {
     // Unlike the immediate CLI path, the supervisor can have spent a long
     // time in preflight since it chose SetMix. Re-read the persisted gate
     // inside the same lock that serializes ramps so it cannot restore an old
     // wet/dry target after a newer CLI toggle has completed.
-    match set_mix_if_graph_exists_with_target(target) {
+    match set_mix_if_graph_exists_observed(observed, target) {
         Ok(true) => true,
         Ok(false) => {
             eprintln!("spatial supervisor: graph disappeared before its mix was updated");
@@ -790,10 +832,6 @@ fn reconcile_mix() -> bool {
 /// torn down. A single transient failure must not move every stream.
 const READINESS_GRACE_PASSES: u32 = 3;
 
-/// The link check costs one `pw-dump`; run it every few passes (about every
-/// two seconds) rather than on every 500 ms pass.
-const LINK_CHECK_PASSES: u32 = 4;
-
 /// Consecutive passes a live child may run without its capture node before
 /// it is replaced.
 const MISSING_GRAPH_PASSES: u32 = 3;
@@ -812,10 +850,22 @@ pub fn run() -> Result<(), String> {
     let mut respawn_backoff = RespawnBackoff::default();
     let mut failed_readiness_passes = 0_u32;
     let mut missing_graph_passes = 0_u32;
-    let mut passes_since_link_check = 0_u32;
     loop {
         let profile = spatial::load();
-        let desired = desired_config();
+        // One `pw-dump` per pass, shared by every check below. Each dump costs
+        // ~20 ms of CPU and ~450 KB of JSON; the previous two or three per
+        // 500 ms pass kept the supervisor at 11-16% of a core while idle.
+        let wants_graph = profile
+            .as_ref()
+            .is_ok_and(|profile| profile.mode == spatial::SpatialMode::BinauralStereo);
+        let snapshot = (wants_graph || child.is_some()).then(pw_dump);
+        let desired = match &snapshot {
+            Some(Ok(objects)) => desired_config(objects),
+            Some(Err(error)) => Err(error.clone()),
+            None => desired_config(&[]),
+        };
+        let objects = snapshot.and_then(Result::ok);
+        let mut steady = false;
         let mut ready = desired.as_ref().is_ok_and(|config| config.is_some());
         if desired.is_err() {
             failed_readiness_passes = failed_readiness_passes.saturating_add(1);
@@ -867,7 +917,12 @@ pub fn run() -> Result<(), String> {
             (SupervisorAction::Spawn, Ok(Some(config)), Ok(_profile))
                 if respawn_backoff.ready() =>
             {
-                match spatial_graph_exists() {
+                // `desired` is Ok only when this pass's snapshot succeeded.
+                match objects
+                    .as_deref()
+                    .map(spatial_graph_in)
+                    .ok_or("no PipeWire snapshot")
+                {
                     Ok(true) => {
                         // An unowned graph: exiting lets systemd clean the
                         // cgroup instead of creating a second capture sink.
@@ -907,13 +962,11 @@ pub fn run() -> Result<(), String> {
                 }
             }
             (SupervisorAction::SetMix, _, _) => {
-                passes_since_link_check = passes_since_link_check.saturating_add(1);
-                let link_result = if passes_since_link_check >= LINK_CHECK_PASSES {
-                    passes_since_link_check = 0;
-                    repair_spatial_output()
-                } else {
-                    Ok(false)
+                let link_result = match objects.as_deref() {
+                    Some(objects) => repair_spatial_output_observed(objects),
+                    None => Ok(false),
                 };
+                let links_intact = matches!(link_result, Ok(false));
                 match link_result {
                     Ok(true) => {
                         eprintln!(
@@ -928,8 +981,11 @@ pub fn run() -> Result<(), String> {
                 // This observes the live controls before ramping. It makes a
                 // CLI transition idempotent for the supervisor rather than
                 // replaying a second wet/dry ramp 500 ms later.
-                if reconcile_mix() {
+                if reconcile_mix_observed(objects.as_deref(), || {
+                    spatial::load().map(|profile| profile.enabled)
+                }) {
                     missing_graph_passes = 0;
+                    steady = links_intact && failed_readiness_passes == 0;
                 } else {
                     missing_graph_passes = missing_graph_passes.saturating_add(1);
                     if missing_graph_passes >= MISSING_GRAPH_PASSES
@@ -969,7 +1025,11 @@ pub fn run() -> Result<(), String> {
             (SupervisorAction::Keep, _, _) => {}
             _ => {}
         }
-        thread::sleep(ROUTE_INTERVAL);
+        thread::sleep(if steady {
+            STEADY_INTERVAL
+        } else {
+            ROUTE_INTERVAL
+        });
     }
 }
 
@@ -1633,5 +1693,46 @@ mod tests {
         assert!(error.contains("keeping the graph alive"));
         assert!(child.try_wait().expect("observe child").is_none());
         reap(&mut child);
+    }
+
+    #[test]
+    fn a_matching_snapshot_reconciles_the_mix_without_another_pw_dump() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        let _guard = crate::command::set_runner(runner.clone());
+        let snapshot: Vec<Value> = serde_json::from_str(&spatial_capture_dump(1.0, 0.0)).unwrap();
+
+        // Steady state: the snapshot already shows the wet target.
+        assert!(reconcile_mix_observed(Some(&snapshot), || Ok(true)));
+        assert!(
+            runner.command_lines().is_empty(),
+            "no extra command expected"
+        );
+
+        // The snapshot shows no capture node: reported as a missing graph.
+        assert!(!reconcile_mix_observed(Some(&[]), || Ok(true)));
+        assert!(runner.command_lines().is_empty());
+    }
+
+    #[test]
+    fn a_mismatching_snapshot_is_reread_fresh_before_ramping() {
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        // The fresh read under the lock already shows dry: a CLI toggle won
+        // the race, so no ramp is sent from the stale snapshot.
+        runner.push_output(&spatial_capture_dump(0.0, 1.0));
+        let _guard = crate::command::set_runner(runner.clone());
+        let stale: Vec<Value> = serde_json::from_str(&spatial_capture_dump(1.0, 0.0)).unwrap();
+
+        assert!(reconcile_mix_observed(Some(&stale), || Ok(false)));
+        assert_eq!(runner.command_lines(), ["pw-dump"]);
+    }
+
+    #[test]
+    fn desired_config_checks_the_equalizer_in_the_shared_snapshot() {
+        let objects: Vec<Value> = serde_json::from_str(EQUALIZER_NODE).unwrap();
+        assert!(audio_sink_named(&objects, TARGET_EQUALIZER_SINK).is_ok());
+        assert!(audio_sink_named(&[], TARGET_EQUALIZER_SINK).is_err());
+        assert!(!spatial_graph_in(&objects));
+        let graph: Vec<Value> = serde_json::from_str(&spatial_capture_dump(1.0, 0.0)).unwrap();
+        assert!(spatial_graph_in(&graph));
     }
 }
