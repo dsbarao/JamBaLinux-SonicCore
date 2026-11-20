@@ -76,7 +76,8 @@ stage_packaging() {
     cp -a -- "$PLASMOID_SOURCE" "$STAGE_DIR/$PLASMOID_ID"
     PLASMOID_INSTALL="$STAGE_DIR/$PLASMOID_ID"
     sed -i "s|\$HOME/.cargo/bin/soniccore|$CARGO_BIN_DIR/soniccore|" \
-        "$PLASMOID_INSTALL/contents/ui/main.qml"
+        "$PLASMOID_INSTALL/contents/ui/main.qml" \
+        "$PLASMOID_INSTALL/contents/ui/configBattery.qml"
     SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$SERVICE_SOURCE")"
     EQUALIZER_SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$EQUALIZER_SERVICE_SOURCE")"
     SPATIAL_SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$SPATIAL_SERVICE_SOURCE")"
@@ -86,7 +87,8 @@ stage_packaging() {
     LAUNCHER_INSTALL="$STAGE_DIR/$(basename -- "$LAUNCHER_SOURCE")"
     sed "s|~/.cargo/bin/soniccore|$CARGO_BIN_DIR/soniccore|" "$LAUNCHER_SOURCE" > "$LAUNCHER_INSTALL"
     local staged
-    for staged in "$PLASMOID_INSTALL/contents/ui/main.qml" "$SERVICE_INSTALL" \
+    for staged in "$PLASMOID_INSTALL/contents/ui/main.qml" \
+        "$PLASMOID_INSTALL/contents/ui/configBattery.qml" "$SERVICE_INSTALL" \
         "$EQUALIZER_SERVICE_INSTALL" "$SPATIAL_SERVICE_INSTALL" "$LAUNCHER_INSTALL"; do
         grep -Fq "$CARGO_BIN_DIR/soniccore" "$staged" \
             || fail "não foi possível apontar $staged para $CARGO_BIN_DIR"

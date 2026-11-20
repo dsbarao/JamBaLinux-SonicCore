@@ -406,6 +406,31 @@ The rule matches only USB device `0ecb:2069`, HID interface `05`, and uses
 systemd-logind's `uaccess` mechanism. It does not use world-writable mode,
 create a privileged daemon, or grant access to unrelated hidraw devices.
 
+### Battery history and lighting economy
+
+The daemon records every change of battery percentage, charging, or lighting
+state in `$XDG_STATE_HOME/jambalinux-soniccore/battery-history.jsonl`
+(default `~/.local/state/…`), together with the effect, the mean LED
+brightness, and the ambient mode (recorded only). Discharging intervals give a
+measured drain per hour with the lights on and off and an estimate of the
+time left, shown in the widget once there is enough data.
+
+The optional economy uses only the confirmed lighting on/off control:
+
+```bash
+soniccore power                         # settings, measured drain, time left
+soniccore power set low-battery 20      # lights off at 20% or less, away from the charger
+soniccore power set idle 10             # lights off after 10 minutes without sound
+soniccore power set idle off
+```
+
+Lights come back on with the same colors and effect when charging (or 5
+points above the threshold) or when sound returns. Switching them on during
+an economy period is respected until the condition arms again. While the
+economy keeps the lights off, OpenRGB writes are refused like under
+`lighting-hold`. Ambient (ANC/TalkThru) is never changed. The widget's
+**Configurar → Bateria** page sets the same options.
+
 ### Live meter and audio path
 
 Two read-only commands feed the widget's upcoming "Vivo" theme; neither

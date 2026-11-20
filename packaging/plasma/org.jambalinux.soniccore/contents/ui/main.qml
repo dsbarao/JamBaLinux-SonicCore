@@ -58,6 +58,13 @@ PlasmoidItem {
     property string lightingSource: ""
     property real lightingUpdatedAtMs: 0
     property bool lightingHeld: false
+    // Battery economy: why it switched the lights off ("low-battery",
+    // "idle" or empty) and the measured estimate of hours left.
+    property string powerSaving: ""
+    property real hoursLeft: -1
+    readonly property string hoursLeftText: hoursLeft > 0 && !charging
+        ? (hoursLeft >= 1 ? `~${Math.round(hoursLeft)} h restantes` : `~${Math.max(1, Math.round(hoursLeft * 60))} min restantes`)
+        : ""
     property real nowMs: Date.now()
     // OpenRGB wrote within the last few seconds and nobody took the lights
     // back: changes made here would be overwritten by its next frame.
@@ -772,6 +779,7 @@ PlasmoidItem {
         lightingSource = ""
         lightingUpdatedAtMs = 0
         lightingHeld = false
+        powerSaving = ""
     }
 
     function applyResult(data) {
@@ -795,6 +803,7 @@ PlasmoidItem {
             lightingSource = String(result.lighting_source ?? "")
             lightingUpdatedAtMs = Number(result.lighting_updated_at_ms ?? 0)
             lightingHeld = result.lighting_held === true
+            powerSaving = String(result.power_saving ?? "")
             nowMs = Date.now()
             microphoneState = String(result.microphone ?? "unknown")
             sidetoneLevel = String(result.sidetone_level ?? "unknown")
@@ -943,6 +952,7 @@ PlasmoidItem {
             accentB: root.vivoAccentB
             equipmentImage: root.equipmentImage
             pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
+            hoursLeftText: root.hoursLeftText
         }
 
         Image {
@@ -966,6 +976,14 @@ PlasmoidItem {
             color: root.batteryColor
             font.pixelSize: Kirigami.Units.gridUnit * 1.7
             font.bold: true
+        }
+
+        PlasmaComponents.Label {
+            visible: !root.vivo && root.hoursLeftText.length > 0
+            Layout.alignment: Qt.AlignHCenter
+            Layout.maximumHeight: implicitHeight
+            text: root.hoursLeftText
+            opacity: 0.7
         }
 
         RowLayout {
@@ -1475,6 +1493,17 @@ PlasmoidItem {
                     wrapMode: Text.Wrap
                     horizontalAlignment: Text.AlignHCenter
                     color: Kirigami.Theme.neutralTextColor
+                }
+
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    visible: root.openSection === "lighting" && root.powerSaving.length > 0
+                    text: root.powerSaving === "low-battery"
+                        ? "Luzes apagadas para economizar bateria (bateria baixa). Elas voltam ao carregar; ligar agora desativa a economia até lá."
+                        : "Luzes apagadas para economizar bateria (sem som). Elas voltam quando o som voltar; ligar agora mantém acesas."
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    opacity: 0.8
                 }
 
                 PlasmaComponents.Label {
@@ -2146,6 +2175,32 @@ PlasmoidItem {
         onRegisteredChanged: {
             if (registered) root.refresh()
         }
+    }
+
+    // Measured battery estimate, refreshed while the popup is open.
+    Plasma5Support.DataSource {
+        id: powerSource
+        engine: "executable"
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            if (Number(data["exit code"] ?? -1) !== 0) return
+            try {
+                const power = JSON.parse(String(data.stdout ?? ""))
+                const hours = Number(power?.history?.hours_left)
+                root.hoursLeft = Number.isFinite(hours) ? hours : -1
+                root.powerSaving = String(power?.saving ?? "")
+            } catch (error) {
+                root.hoursLeft = -1
+            }
+        }
+    }
+
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.expanded
+        triggeredOnStart: true
+        onTriggered: powerSource.connectSource(root.soniccoreCommand(["power", "--format", "json"]))
     }
 
     // While the lighting section is open, follow who controls the lights.

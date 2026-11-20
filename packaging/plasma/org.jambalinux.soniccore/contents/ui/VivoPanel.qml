@@ -25,6 +25,7 @@ Item {
     property color accentB: Kirigami.Theme.highlightColor
     property url equipmentImage
     property string pathCommand: ""
+    property string hoursLeftText: ""
 
     // Plasma's "Animation speed: Instant" sets durations to zero.
     readonly property bool animate: Kirigami.Units.longDuration > 1
@@ -234,6 +235,14 @@ Item {
             color: panel.batteryColor
             font.bold: true
             font.pixelSize: Kirigami.Units.gridUnit * 1.1
+        }
+
+        PlasmaComponents.Label {
+            Layout.alignment: Qt.AlignHCenter
+            visible: panel.hoursLeftText.length > 0
+            text: panel.hoursLeftText
+            opacity: 0.7
+            font.pixelSize: Kirigami.Units.gridUnit * 0.7
         }
 
         // Audio path: Apps -> Espacial -> EQ -> Fone.

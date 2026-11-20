@@ -7,4 +7,9 @@ ConfigModel {
         icon: "preferences-desktop-theme"
         source: "configAppearance.qml"
     }
+    ConfigCategory {
+        name: "Bateria"
+        icon: "battery-good"
+        source: "configBattery.qml"
+    }
 }

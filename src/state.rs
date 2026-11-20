@@ -57,6 +57,9 @@ pub struct RuntimeState {
     pub lighting_updated_at_ms: Option<u128>,
     /// SonicCore took the lighting: writes from OpenRGB are refused.
     pub lighting_held: Option<bool>,
+    /// Why the battery economy switched the lights off (`low-battery` or
+    /// `idle`), while it keeps them off.
+    pub power_saving: Option<String>,
 }
 
 /// The cache action to take after sending a complete two-zone lighting
@@ -501,6 +504,35 @@ pub fn emit_changed_signal() {
         "Changed",
         &(),
     );
+}
+
+/// Signature of the state file used to notice writes made by other
+/// processes: the OpenRGB plugin and the economy go through the CLI, whose
+/// own processes have no signal connection.
+fn state_file_signature() -> Option<(std::time::SystemTime, u64)> {
+    let metadata = fs::metadata(path().ok()?).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// Daemon thread: emits `Changed` whenever the state file changes, so the
+/// widget follows every client (OpenRGB included) without its popup open.
+/// The state is atomically replaced, so a changed signature is a new state.
+pub fn spawn_change_watcher() -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("soniccore-state-watch".into())
+        .spawn(|| {
+            let mut last = state_file_signature();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let current = state_file_signature();
+                if current != last {
+                    last = current;
+                    emit_changed_signal();
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("failed to start the state watcher: {error}"))
 }
 
 pub fn update_control(feature: &str, value: &str) -> Result<(), String> {

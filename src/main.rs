@@ -19,6 +19,7 @@ mod equalizer;
 mod hid;
 mod meter;
 mod pipewire;
+mod power;
 mod spatial;
 mod spatial_pipewire;
 mod state;
@@ -218,6 +219,7 @@ struct StatusOutput {
     lighting_source: Option<String>,
     lighting_updated_at_ms: Option<u128>,
     lighting_held: Option<bool>,
+    power_saving: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -781,6 +783,8 @@ fn monitor(dry_run: bool) -> Result<bool, String> {
 fn daemon() -> Result<bool, String> {
     state::init_signal_service()?;
     spawn_charging_watcher()?;
+    power::spawn_policy()?;
+    state::spawn_change_watcher()?;
     let mut runtime = match state::load() {
         Ok(state) => state,
         Err(state::LoadError::Missing) => state::RuntimeState::default(),
@@ -1331,7 +1335,11 @@ fn set_control(command: SetCommand) -> Result<bool, String> {
         None
     };
     if is_lighting_control {
-        let held = state::load().ok().and_then(|cached| cached.lighting_held);
+        // While the battery economy keeps the lights off, OpenRGB must not
+        // switch them back on either: that counts as held too.
+        let held = state::load()
+            .ok()
+            .map(|cached| cached.lighting_held == Some(true) || cached.power_saving.is_some());
         lighting_write_allowed(state::lighting_source(), held)?;
     }
     let reports = if is_profile_control {
@@ -1521,6 +1529,7 @@ fn status_output_from_cached_state(cached: state::RuntimeState) -> StatusOutput 
         lighting_source: cached.lighting_source,
         lighting_updated_at_ms: cached.lighting_updated_at_ms,
         lighting_held: cached.lighting_held,
+        power_saving: cached.power_saving,
     }
 }
 
@@ -1615,6 +1624,7 @@ fn status(options: StatusOptions) -> Result<bool, String> {
                 lighting_source: None,
                 lighting_updated_at_ms: None,
                 lighting_held: None,
+                power_saving: None,
             })?;
         } else {
             println!(
@@ -1663,6 +1673,7 @@ fn status(options: StatusOptions) -> Result<bool, String> {
             lighting_source: cached.lighting_source,
             lighting_updated_at_ms: cached.lighting_updated_at_ms,
             lighting_held: cached.lighting_held,
+            power_saving: cached.power_saving,
         })?;
     } else {
         println!("battery: {battery}%");
@@ -1730,7 +1741,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -2404,6 +2415,19 @@ fn main() {
         "set" => parse_set_command(args).and_then(set_control),
         "lighting-hold" => lighting_hold(args),
         "meter" => meter_command(args),
+        "power" => match (args.next(), args.next(), args.next(), args.next()) {
+            (None, ..) => power::print_status(false).map(|()| true),
+            (Some(flag), Some(format), None, _) if flag == "--format" && format == "json" => {
+                power::print_status(true).map(|()| true)
+            }
+            (Some(verb), Some(setting), Some(value), None) if verb == "set" => {
+                power::set(&setting, &value).map(|()| true)
+            }
+            _ => Err(
+                "usage: soniccore power [--format json] | power set <low-battery|idle> <off|N>"
+                    .into(),
+            ),
+        },
         "audio-path" => match (args.next().as_deref(), args.next().as_deref(), args.next()) {
             (Some("--format"), Some("json"), None) => audio_path::print_json().map(|()| true),
             _ => Err("usage: soniccore audio-path --format json".into()),
@@ -2813,6 +2837,7 @@ mod tests {
             lighting_source: None,
             lighting_updated_at_ms: None,
             lighting_held: None,
+            power_saving: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["schema"], 1);
