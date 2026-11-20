@@ -180,6 +180,8 @@ test_custom_cargo_home_is_written_into_installed_files() {
         grep -Fq "ExecStart=$cargo_home/bin/soniccore" "$home/.config/systemd/user/$unit.service"
         ! grep -Fq '.cargo/bin' "$home/.config/systemd/user/$unit.service"
     done
+    grep -Fqx "Exec=$cargo_home/bin/soniccore meter --dbus" \
+        "$home/.local/share/dbus-1/services/org.jambalinux.soniccore.Meter.service"
     grep -Fq "exec $cargo_home/bin/soniccore show" \
         "$home/.local/share/applications/jambalinux-soniccore.desktop"
     grep -Fq "\"$cargo_home/bin/soniccore\"" \
@@ -199,6 +201,8 @@ test_default_cargo_home_installs_packaging_verbatim() {
 
     cmp -s -- "$PROJECT_DIR/packaging/systemd/jambalinux-soniccore.service" \
         "$home/.config/systemd/user/jambalinux-soniccore.service"
+    grep -Fqx "Exec=$home/.cargo/bin/soniccore meter --dbus" \
+        "$home/.local/share/dbus-1/services/org.jambalinux.soniccore.Meter.service"
     cmp -s -- "$PROJECT_DIR/packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml" \
         "$home/.local/share/plasma/plasmoids/org.jambalinux.soniccore/contents/ui/main.qml"
 }

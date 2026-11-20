@@ -406,6 +406,26 @@ The rule matches only USB device `0ecb:2069`, HID interface `05`, and uses
 systemd-logind's `uaccess` mechanism. It does not use world-writable mode,
 create a privileged daemon, or grant access to unrelated hidraw devices.
 
+### Live meter and audio path
+
+Two read-only commands feed the widget's upcoming "Vivo" theme; neither
+changes routing nor touches the headset.
+
+```bash
+soniccore meter --format json --frames 25   # 32 spectrum bands + peak, 25 per second
+soniccore audio-path --format json          # apps -> spatial -> EQ -> Quantum Game
+```
+
+`meter` records the monitor of the exact Quantum Game sink with a passive
+`pw-record` capture and analyzes it with a 2048-point FFT (31 Hz to 16 kHz,
+-70 to -10 dBFS mapped onto 0 to 1); silence skips the FFT. The widget reaches
+it through the session bus: `tools/install-user.sh` installs a D-Bus
+activation file for `org.jambalinux.soniccore.Meter`, so `soniccore meter
+--dbus` starts only when a frame is requested, stops capturing two seconds
+after the last request, and exits after thirty idle seconds. `audio-path`
+reads one `pw-dump` snapshot and reports each stage (present, running) and
+each link of the Game path.
+
 ### OpenRGB plugin
 
 OpenRGB 1.1 does not detect the Quantum 810. The optional plugin in

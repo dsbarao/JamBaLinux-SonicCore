@@ -1,0 +1,5 @@
+# D-Bus activation for the on-demand spectrum meter used by the widget.
+# tools/install-user.sh replaces @SONICCORE@ with the absolute CLI path.
+[D-BUS Service]
+Name=org.jambalinux.soniccore.Meter
+Exec=@SONICCORE@ meter --dbus

@@ -13,9 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+mod audio_path;
 mod command;
 mod equalizer;
 mod hid;
+mod meter;
 mod pipewire;
 mod spatial;
 mod spatial_pipewire;
@@ -1255,6 +1257,34 @@ fn lighting_write_allowed(source: &str, held: Option<bool>) -> Result<(), String
     }
 }
 
+fn meter_command(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
+    match args.next().as_deref() {
+        Some("--dbus") => {
+            no_arguments("meter --dbus", args)?;
+            meter::serve_dbus()?;
+        }
+        Some("--format") if args.next().as_deref() == Some("json") => {
+            let limit = match (args.next().as_deref(), args.next()) {
+                (None, _) => None,
+                (Some("--frames"), Some(count)) => Some(
+                    count
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|count| *count > 0)
+                        .ok_or("meter --frames needs a positive number")?,
+                ),
+                _ => {
+                    return Err("usage: soniccore meter --format json [--frames N] | --dbus".into());
+                }
+            };
+            no_arguments("meter", args)?;
+            meter::print_frames(limit)?;
+        }
+        _ => return Err("usage: soniccore meter --format json [--frames N] | --dbus".into()),
+    }
+    Ok(true)
+}
+
 fn lighting_hold(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
     let held = match (args.next().as_deref(), args.next()) {
         (Some("on"), None) => true,
@@ -1700,7 +1730,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -2373,6 +2403,11 @@ fn main() {
         "probe-status" => no_arguments("probe-status", args).and_then(|()| probe_status()),
         "set" => parse_set_command(args).and_then(set_control),
         "lighting-hold" => lighting_hold(args),
+        "meter" => meter_command(args),
+        "audio-path" => match (args.next().as_deref(), args.next().as_deref(), args.next()) {
+            (Some("--format"), Some("json"), None) => audio_path::print_json().map(|()| true),
+            _ => Err("usage: soniccore audio-path --format json".into()),
+        },
         "equalizer" | "eq" => equalizer(args),
         "spatial" => spatial(args),
         "notify" => parse_dry_run("notify", args).and_then(notify),

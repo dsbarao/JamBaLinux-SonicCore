@@ -298,7 +298,7 @@ fn service_active() -> Result<bool, String> {
     named_service_active(UNIT_NAME)
 }
 
-fn pw_dump() -> Result<Vec<Value>, String> {
+pub(crate) fn pw_dump() -> Result<Vec<Value>, String> {
     let output = command_output("pw-dump", &[])?;
     if !output.status.success() {
         return Err(command_failure("pw-dump", &output));
@@ -500,6 +500,11 @@ fn game_sink(node: &Value) -> Option<Target> {
             .and_then(Value::as_str)
             == Some("playback");
     quantum_game_pcm.then(|| target_from_node(node)).flatten()
+}
+
+/// Node name of the exact Quantum Game sink in a `pw-dump` snapshot.
+pub(crate) fn game_sink_name(nodes: &[Value]) -> Result<String, String> {
+    discover_game_sink(nodes).map(|target| target.node_name)
 }
 
 fn discover_game_sink(nodes: &[Value]) -> Result<Target, String> {

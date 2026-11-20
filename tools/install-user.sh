@@ -14,6 +14,8 @@ readonly SPATIAL_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-sonic
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore.desktop"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
+readonly METER_SERVICE_SOURCE="$PROJECT_DIR/packaging/dbus/org.jambalinux.soniccore.Meter.service"
+readonly METER_SERVICE_TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.jambalinux.soniccore.Meter.service"
 readonly CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 readonly CARGO_BINARY="$CARGO_BIN_DIR/soniccore"
 readonly DEFAULT_CARGO_BIN_DIR="$HOME/.cargo/bin"
@@ -44,6 +46,7 @@ check_prerequisites() {
     [[ -f "$EQUALIZER_SERVICE_SOURCE" ]] || fail "serviço systemd do equalizador não encontrado"
     [[ -f "$SPATIAL_SERVICE_SOURCE" ]] || fail "serviço systemd espacial não encontrado"
     [[ -f "$LAUNCHER_SOURCE" ]] || fail "lançador KDE não encontrado"
+    [[ -f "$METER_SERVICE_SOURCE" ]] || fail "ativação D-Bus do medidor não encontrada"
     [[ -x "$ACP_OVERLAY" ]] || fail "script do overlay ACP não encontrado"
     # The binary path is written into systemd units, a shell command and a
     # sed replacement: refuse characters that would need escaping there.
@@ -118,6 +121,14 @@ install -Dm644 "$SERVICE_INSTALL" "$SERVICE_TARGET"
 install -Dm644 "$EQUALIZER_SERVICE_INSTALL" "$EQUALIZER_SERVICE_TARGET"
 install -Dm644 "$SPATIAL_SERVICE_INSTALL" "$SPATIAL_SERVICE_TARGET"
 install -Dm644 "$LAUNCHER_INSTALL" "$LAUNCHER_TARGET"
+# D-Bus activation needs an absolute Exec path (the path was validated above).
+mkdir -p -- "$(dirname -- "$METER_SERVICE_TARGET")"
+sed "s|@SONICCORE@|$CARGO_BINARY|" "$METER_SERVICE_SOURCE" > "$METER_SERVICE_TARGET"
+chmod 644 -- "$METER_SERVICE_TARGET"
+# The session bus reads activation files at start-up; ask it to look again.
+if command -v busctl >/dev/null 2>&1; then
+    busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig >/dev/null 2>&1 || true
+fi
 systemctl --user daemon-reload
 systemctl --user enable jambalinux-soniccore.service
 systemctl --user enable jambalinux-soniccore-equalizer.service
