@@ -53,6 +53,11 @@ PlasmoidItem {
     readonly property color pickerColor: Qt.hsva(pickerHue, pickerSaturation, pickerValue, 1)
     property int gameChatValue: -1
     property bool controlBusy: false
+    // Live color while dragging the picker: only the latest value waits, and
+    // it is sent when the running command finishes and the throttle allows.
+    property string pendingLightingFeature: ""
+    property string pendingLightingColor: ""
+    property string lastLiveLightingKey: ""
     property bool updating: false
     // Set when a refresh is requested while another is running, so a burst
     // of daemon signals is never reduced to the first, stale read.
@@ -173,6 +178,29 @@ PlasmoidItem {
         actionMessage = "Aplicando…"
         const controlCommand = soniccoreCommand(["set", feature, value])
         executable.connectSource(controlCommand)
+    }
+
+    function queueLightingColor() {
+        if (!deviceAvailable || !canApplyLightingColor()) return
+        pendingLightingFeature = lightingFeature()
+        pendingLightingColor = pickerHex()
+        if (!lightingColorThrottle.running) flushLightingColor()
+    }
+
+    function flushLightingColor() {
+        if (pendingLightingColor === "" || controlBusy) return
+        const feature = pendingLightingFeature
+        const value = pendingLightingColor
+        pendingLightingFeature = ""
+        pendingLightingColor = ""
+        // Each color write sends a full lighting profile to the headset, so
+        // the same value is never sent twice in a row.
+        const key = `${feature} ${value}`
+        if (key === lastLiveLightingKey) return
+        lastLiveLightingKey = key
+        controlBusy = true
+        executable.connectSource(soniccoreCommand(["set", feature, value]))
+        lightingColorThrottle.restart()
     }
 
     function refreshEqualizer() {
@@ -624,6 +652,8 @@ PlasmoidItem {
     }
 
     function loadPicker() {
+        // A new target or segment starts a new live-color sequence.
+        lastLiveLightingKey = ""
         const selected = selectedLightingColor()
         if (typeof selected !== "string") return
         const hex = normalizeColor(selected)
@@ -1546,7 +1576,9 @@ PlasmoidItem {
                     Layout.preferredWidth: 220
                     Layout.preferredHeight: 220
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy && root.canApplyLightingColor()
+                    // Stays usable while a write runs: the latest color is
+                    // queued and sent as soon as the headset is free.
+                    enabled: root.deviceAvailable && root.canApplyLightingColor()
 
                     readonly property real centerX: width / 2
                     readonly property real centerY: height / 2
@@ -1618,6 +1650,7 @@ PlasmoidItem {
                             if (distance >= innerRadius && distance <= outerRadius) {
                                 root.pickerHue = (Math.atan2(offsetY, offsetX) / (2 * Math.PI) + 1) % 1
                                 svCanvas.requestPaint()
+                                root.queueLightingColor()
                                 return
                             }
 
@@ -1629,6 +1662,7 @@ PlasmoidItem {
                                     (pointerX - left) / colorPicker.squareSize))
                                 root.pickerValue = Math.max(0, Math.min(1,
                                     1 - (pointerY - top) / colorPicker.squareSize))
+                                root.queueLightingColor()
                             }
                         }
 
@@ -1670,7 +1704,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter
                     visible: root.openSection === "lighting"
-                    enabled: root.deviceAvailable && !root.controlBusy && root.canApplyLightingColor()
+                    enabled: root.deviceAvailable && root.canApplyLightingColor()
                     spacing: Kirigami.Units.smallSpacing
 
                     Rectangle {
@@ -1689,12 +1723,6 @@ PlasmoidItem {
                         font.family: "monospace"
                     }
 
-                    PlasmaComponents.Button {
-                        text: "Aplicar"
-                        icon.name: "dialog-ok-apply"
-                        enabled: root.canApplyLightingColor()
-                        onClicked: root.runControl(root.lightingFeature(), root.pickerHex())
-                    }
                 }
 
                 RowLayout {
@@ -1825,12 +1853,15 @@ PlasmoidItem {
                     clearAction.restart()
                     refreshAfterControl.restart()
                 } else {
+                    // Let the same color be retried after a failed write.
+                    root.lastLiveLightingKey = ""
                     root.actionFailed = true
                     root.actionMessage = root.friendlyError(stderr, exitCode, "write")
                     clearAction.interval = 6000
                     clearAction.restart()
                     refreshAfterControl.restart()
                 }
+                root.flushLightingColor()
                 return
             }
             root.finishRefresh(data)
@@ -2024,6 +2055,15 @@ PlasmoidItem {
         onRegisteredChanged: {
             if (registered) root.refresh()
         }
+    }
+
+    // At most one color write every 150 ms while dragging; the last color is
+    // always sent once the drag stops.
+    Timer {
+        id: lightingColorThrottle
+        interval: 150
+        repeat: false
+        onTriggered: root.flushLightingColor()
     }
 
     Timer {
