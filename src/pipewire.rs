@@ -60,9 +60,14 @@ impl FilterWatch {
 // clicks. 26/09: 4 steps 10 ms apart were shorter than the 21 ms quantum (1024
 // frames at 48 kHz); half the steps landed in the same cycle and the gain moved
 // in audible 0.5 dB+ jumps while a slider was dragged.
-const RAMP_STEPS: u32 = 4;
-const RAMP_MAX_STEP_DB: f32 = 0.25;
-const RAMP_MAX_STEPS: u32 = 48;
+// 21/11: the 0.25 dB / 4-step minimum made every slider move take ~200 ms and
+// switch the biquads many times in a row, which was heard as lag and clicks
+// while dragging. The bands are now mixer factors on fixed band-passes (see
+// render), so like the spatial controls a change up to 2 dB lands in one
+// step; larger jumps (presets, reset) still ramp, 2 dB per audio cycle.
+const RAMP_STEPS: u32 = 1;
+const RAMP_MAX_STEP_DB: f32 = 2.0;
+const RAMP_MAX_STEPS: u32 = 12;
 const RAMP_STEP_INTERVAL: Duration = Duration::from_millis(22);
 
 fn backend_schema() -> u8 {
@@ -1171,18 +1176,32 @@ fn applied_bands(node: &Value) -> Option<Vec<Band>> {
             let Some(key) = pair[0].as_str() else {
                 continue;
             };
-            let Some(index) = key
-                .strip_prefix("eq_band_")
-                .and_then(|value| value.strip_suffix(":Gain"))
-                .and_then(|value| value.parse::<usize>().ok())
-            else {
+            // Current graph: the band's linear gain on its mixer
+            // (`eq_band_N:Gain 2`); graphs started before it: a peaking
+            // filter's gain in dB (`eq_band_N:Gain`).
+            let Some(rest) = key.strip_prefix("eq_band_") else {
+                continue;
+            };
+            let (index, linear) = if let Some(index) = rest.strip_suffix(":Gain 2") {
+                (index, true)
+            } else if let Some(index) = rest.strip_suffix(":Gain") {
+                (index, false)
+            } else {
+                continue;
+            };
+            let Some(index) = index.parse::<usize>().ok() else {
                 continue;
             };
             let Some(&frequency_hz) = BANDS_HZ.get(index) else {
                 continue;
             };
-            let Some(gain_db) = pair[1].as_f64() else {
+            let Some(value) = pair[1].as_f64() else {
                 continue;
+            };
+            let gain_db = if linear {
+                20.0 * value.max(1e-6).log10()
+            } else {
+                value
             };
             gains.insert(frequency_hz, gain_db as f32);
         }
@@ -1228,25 +1247,46 @@ fn gains_match(applied: &[Band], expected: &[f32]) -> bool {
 }
 
 fn render(profile: &EqualizerProfile, target: &str) -> String {
-    let mut nodes = String::new();
+    // Each band splits its frequency range off with a fixed band-pass and
+    // adds it back scaled (Regalia–Mitra form):
+    //     out = in - bandpass(in) + K * bandpass(in)
+    // which at the centre frequency is exactly K (the band's gain), close to
+    // a Q=1 peaking filter elsewhere. Changing a band then only changes the
+    // linear factor K on a mixer; the filters never recompute their
+    // coefficients, which is what clicked and stepped while a slider was
+    // dragged with peaking filters. The mixer gains cannot be negative, so
+    // the "- bandpass" comes through an invert node.
+    let mut nodes = String::from(
+        "                    { type = builtin name = eq_in label = copy }\n",
+    );
     let mut links = String::new();
+    let mut previous = "eq_in:Out".to_owned();
     for (index, band) in profile.dsp_bands().iter().enumerate() {
-        // Every band is a peaking filter centred on its frequency. Shelves
-        // at 31 Hz and 16 kHz put their midpoint (+6 dB at +12 dB) on the
-        // band and act almost only below 45 Hz or above 14 kHz, so those two
-        // sliders made no audible difference.
-        let label = "bq_peaking";
         nodes.push_str(&format!(
-            "                    {{ type = builtin name = eq_band_{index} label = {label} control = {{ \"Freq\" = {:.1} \"Q\" = 1.0 \"Gain\" = {:.1} }} }}\n",
-            band.frequency_hz, band.gain_db
+            "                    {{ type = builtin name = eq_bp_{index} label = bq_bandpass control = {{ \"Freq\" = {:.1} \"Q\" = 1.0 }} }}\n",
+            band.frequency_hz
         ));
-        if index > 0 {
+        nodes.push_str(&format!(
+            "                    {{ type = builtin name = eq_inv_{index} label = invert }}\n"
+        ));
+        nodes.push_str(&format!(
+            "                    {{ type = builtin name = eq_band_{index} label = mixer control = {{ \"Gain 1\" = 1.0 \"Gain 2\" = {:.4} \"Gain 3\" = 1.0 }} }}\n",
+            band_factor(band.gain_db)
+        ));
+        for (output, input) in [
+            (previous.clone(), format!("eq_bp_{index}:In")),
+            (previous.clone(), format!("eq_band_{index}:In 1")),
+            (format!("eq_bp_{index}:Out"), format!("eq_band_{index}:In 2")),
+            (format!("eq_bp_{index}:Out"), format!("eq_inv_{index}:In")),
+            (format!("eq_inv_{index}:Out"), format!("eq_band_{index}:In 3")),
+        ] {
             links.push_str(&format!(
-                "                    {{ output = \"eq_band_{}:Out\" input = \"eq_band_{index}:In\" }}\n",
-                index - 1
+                "                    {{ output = \"{output}\" input = \"{input}\" }}\n"
             ));
         }
+        previous = format!("eq_band_{index}:Out");
     }
+    let last = BANDS_HZ.len() - 1;
     let base = r#"context.properties = { log.level = 0 }
 context.spa-libs = {
     audio.convert.* = audioconvert/libspa-audioconvert
@@ -1254,7 +1294,7 @@ context.spa-libs = {
 }
 "#;
     let filter = format!(
-        "# Generated by JamBaLinux SonicCore. Do not edit while the equalizer is active.\n# Ten peaking bands with Q=1.0 are an initial approximation, not QuantumENGINE parity.\ncontext.modules = [\n    {{ name = libpipewire-module-filter-chain\n        args = {{\n            node.description = \"JamBaLinux Game Equalizer\"\n            media.name = \"JamBaLinux Game Equalizer\"\n            filter.graph = {{\n                nodes = [\n{nodes}                ]\n                links = [\n{links}                ]\n            }}\n            audio.channels = 2\n            audio.position = [ FL FR ]\n            capture.props = {{\n                node.name = \"{VIRTUAL_SINK}\"\n                node.description = \"JamBaLinux Game Equalizer\"\n                media.class = Audio/Sink\n                node.virtual = true\n                priority.session = 0\n                priority.driver = 0\n            }}\n            playback.props = {{\n                node.name = \"{OUTPUT_NODE}\"\n                node.passive = true\n                target.object = \"{}\"\n            }}\n        }}\n    }}\n]\n",
+        "# Generated by JamBaLinux SonicCore. Do not edit while the equalizer is active.\n# Ten bands (fixed Q=1.0 band-passes scaled by a mixer) are an initial approximation, not QuantumENGINE parity.\ncontext.modules = [\n    {{ name = libpipewire-module-filter-chain\n        args = {{\n            node.description = \"JamBaLinux Game Equalizer\"\n            media.name = \"JamBaLinux Game Equalizer\"\n            filter.graph = {{\n                nodes = [\n{nodes}                ]\n                links = [\n{links}                ]\n                inputs = [ \"eq_in:In\" ]\n                outputs = [ \"eq_band_{last}:Out\" ]\n            }}\n            audio.channels = 2\n            audio.position = [ FL FR ]\n            capture.props = {{\n                node.name = \"{VIRTUAL_SINK}\"\n                node.description = \"JamBaLinux Game Equalizer\"\n                media.class = Audio/Sink\n                node.virtual = true\n                priority.session = 0\n                priority.driver = 0\n            }}\n            playback.props = {{\n                node.name = \"{OUTPUT_NODE}\"\n                node.passive = true\n                target.object = \"{}\"\n            }}\n        }}\n    }}\n]\n",
         pipewire_string(target)
     );
     let filter = filter.replacen(
@@ -1856,11 +1896,18 @@ fn spawn_pipewire(config: &Path) -> Result<Child, String> {
         .map_err(|error| format!("could not start the persistent PipeWire equalizer: {error}"))
 }
 
+/// A band's boost or cut as the linear factor its mixer applies to the band.
+fn band_factor(gain_db: f32) -> f32 {
+    10f32.powf(gain_db / 20.0)
+}
+
 fn gain_payload(gains: &[f32]) -> String {
     let values = gains
         .iter()
         .enumerate()
-        .map(|(index, gain)| format!("\"eq_band_{index}:Gain\" {gain:.3}"))
+        .map(|(index, gain)| {
+            format!("\"eq_band_{index}:Gain 2\" {:.4}", band_factor(*gain))
+        })
         .collect::<Vec<_>>()
         .join(" ");
     format!("{{ params = [ {values} ] }}")
@@ -2484,7 +2531,8 @@ mod tests {
         let mut profile = crate::equalizer::preset_profile("bass-boost").unwrap();
         profile.bypassed = true;
         let graph = render(&profile, "alsa_output.usb_Quantum_Game");
-        assert_eq!(graph.matches("\"Gain\" = 0.0").count(), 10);
+        // Flat: every band adds its range back at unity.
+        assert_eq!(graph.matches("\"Gain 2\" = 1.0000").count(), 10);
         assert!(profile_gains(&profile).iter().all(|gain| *gain == 0.0));
         assert!(profile_matches(&profile.dsp_bands(), &profile));
         assert!(!profile_matches(&profile.bands, &profile));
@@ -2493,11 +2541,20 @@ mod tests {
     #[test]
     fn graph_has_ten_approximate_biquads_and_protects_default_priority() {
         let graph = render(&EqualizerProfile::default(), "alsa_output.usb_Quantum_Game");
+        // Ten fixed band-passes, each scaled on its mixer (no coefficient
+        // changes while a slider moves). The 31 Hz and 16 kHz bands are
+        // band-passes too: shelves centred there were inaudible.
         assert_eq!(graph.matches("label = bq_").count(), 10);
-        // The 31 Hz and 16 kHz bands are peaking too: shelves centred there
-        // were inaudible.
-        assert_eq!(graph.matches("label = bq_peaking").count(), 10);
+        assert_eq!(graph.matches("label = bq_bandpass").count(), 10);
+        assert_eq!(graph.matches("label = invert").count(), 10);
+        assert_eq!(graph.matches("label = mixer").count(), 10);
         assert!(!graph.contains("shelf"));
+        assert!(graph.contains("inputs = [ \"eq_in:In\" ]"));
+        assert!(graph.contains("outputs = [ \"eq_band_9:Out\" ]"));
+        // Each stage feeds the next.
+        assert!(graph.contains("output = \"eq_band_3:Out\" input = \"eq_bp_4:In\""));
+        assert!(graph.contains("output = \"eq_band_3:Out\" input = \"eq_band_4:In 1\""));
+        assert!(graph.contains("output = \"eq_inv_4:Out\" input = \"eq_band_4:In 3\""));
         assert!(graph.contains("target.object = \"alsa_output.usb_Quantum_Game\""));
         assert!(graph.contains("node.name = \"jambalinux-soniccore-game-equalizer\""));
         assert!(graph.contains("priority.session = 0"));
@@ -3077,11 +3134,30 @@ mod tests {
     }
 
     #[test]
+    fn applied_bands_read_the_mixer_factor_in_db() {
+        let mut params = Vec::new();
+        for index in 0..10 {
+            params.push(serde_json::json!(format!("eq_band_{index}:Gain 1")));
+            params.push(serde_json::json!(1.0));
+            params.push(serde_json::json!(format!("eq_band_{index}:Gain 2")));
+            params.push(serde_json::json!(if index == 4 { 2.0 } else { 1.0 }));
+        }
+        let node = serde_json::json!({ "info": { "params": { "Props": [ { "params": params } ] } } });
+        let bands = applied_bands(&node).unwrap();
+        assert!((bands[4].gain_db - 6.0206).abs() < 0.01, "{:?}", bands[4]);
+        assert!(bands[0].gain_db.abs() < 1e-4);
+    }
+
+    #[test]
     fn one_control_payload_contains_all_ten_bands() {
         let payload = gain_payload(&[0.0; 10]);
-        assert_eq!(payload.matches(":Gain").count(), 10);
+        assert_eq!(payload.matches(":Gain 2").count(), 10);
         assert!(payload.starts_with("{ params = ["));
-        assert!(payload.contains("\"eq_band_9:Gain\" 0.000"));
+        assert!(payload.contains("\"eq_band_9:Gain 2\" 1.0000"));
+        // +6 dB is twice the band, -6 dB half.
+        let lifted = gain_payload(&[6.0206, -6.0206, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(lifted.contains("\"eq_band_0:Gain 2\" 2.0000"), "{lifted}");
+        assert!(lifted.contains("\"eq_band_1:Gain 2\" 0.5000"), "{lifted}");
     }
 
     #[test]
@@ -3177,10 +3253,12 @@ mod tests {
     }
 
     #[test]
-    fn ramp_moves_at_most_a_quarter_db_per_audio_cycle() {
-        assert_eq!(ramp_steps(&[0.0; 10], &[1.0; 10]), RAMP_STEPS);
-        assert_eq!(ramp_steps(&[0.0; 10], &[3.0; 10]), 12);
-        assert_eq!(ramp_steps(&[2.0; 10], &[1.9; 10]), RAMP_STEPS);
+    fn ramp_moves_at_most_two_db_per_audio_cycle() {
+        // A slider nudge lands at once.
+        assert_eq!(ramp_steps(&[0.0; 10], &[1.0; 10]), 1);
+        assert_eq!(ramp_steps(&[2.0; 10], &[1.9; 10]), 1);
+        assert_eq!(ramp_steps(&[0.0; 10], &[2.0; 10]), 1);
+        assert_eq!(ramp_steps(&[0.0; 10], &[3.0; 10]), 2);
         assert_eq!(ramp_steps(&[-12.0; 10], &[12.0; 10]), RAMP_MAX_STEPS);
         assert!(RAMP_STEP_INTERVAL >= Duration::from_millis(1024 * 1000 / 48_000));
     }
@@ -3205,9 +3283,9 @@ mod tests {
             .iter()
             .filter(|call| call.starts_with("pw-cli set-param 105 Props"))
             .count();
-        assert_eq!(ramp, 12, "0 -> 3 dB in 0.25 dB steps: {calls:?}");
+        assert_eq!(ramp, 2, "0 -> 3 dB in 2 dB steps: {calls:?}");
         assert_eq!(calls.last().map(String::as_str), Some("pw-dump 105"));
-        assert_eq!(calls.len(), 1 + 12 + 1);
+        assert_eq!(calls.len(), 1 + 2 + 1);
     }
 
     #[test]
@@ -3228,7 +3306,7 @@ mod tests {
         assert!(err.contains("recreated"), "{err}");
         assert!(err.contains("restored"), "{err}");
         let calls = runner.command_lines();
-        assert_eq!(calls[1 + 12], "pw-dump 105");
+        assert_eq!(calls[1 + 2], "pw-dump 105");
         assert!(
             calls.last().is_some_and(|call| call == "pw-dump"),
             "{calls:?}"
@@ -3252,7 +3330,7 @@ mod tests {
 
         assert!(err.contains("did not match"), "{err}");
         assert!(err.contains("restored"), "{err}");
-        assert_eq!(runner.command_lines()[1 + 12], "pw-dump 105");
+        assert_eq!(runner.command_lines()[1 + 2], "pw-dump 105");
     }
 
     fn ready_spatial_capability() -> crate::spatial::CapabilityReport {

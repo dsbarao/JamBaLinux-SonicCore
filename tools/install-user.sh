@@ -144,6 +144,16 @@ install -Dm644 "$SPATIAL_SERVICE_INSTALL" "$SPATIAL_SERVICE_TARGET"
 install -Dm644 "$LAUNCHER_INSTALL" "$LAUNCHER_TARGET"
 install -Dm644 "$AUTOSTART_SOURCE" "$AUTOSTART_TARGET"
 install -Dm644 "$ICON_SOURCE" "$ICON_TARGET"
+# An icon cache in the user's hicolor folder that predates the icon hides
+# it (Qt and KWin trust the cache and show a blank icon). Refresh it, or set
+# it aside when it cannot be rebuilt; without it the folder is read directly.
+ICON_CACHE="$(dirname -- "$(dirname -- "$(dirname -- "$ICON_TARGET")")")/icon-theme.cache"
+if [[ -f "$ICON_CACHE" ]] && ! LC_ALL=C grep -aqF 'scalable/apps' "$ICON_CACHE"; then
+    if ! gtk-update-icon-cache -f -q -t "$(dirname -- "$ICON_CACHE")" >/dev/null 2>&1 \
+        || ! LC_ALL=C grep -aqF 'scalable/apps' "$ICON_CACHE"; then
+        mv -f -- "$ICON_CACHE" "$ICON_CACHE.old"
+    fi
+fi
 # The app carries its own copy of the interface (QML, shaders, images).
 rm -rf -- "$APP_TARGET"
 install -Dm755 "$APP_SOURCE/soniccore-app" "$APP_TARGET/soniccore-app"
