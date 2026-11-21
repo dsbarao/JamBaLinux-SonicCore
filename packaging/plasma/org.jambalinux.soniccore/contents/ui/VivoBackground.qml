@@ -4,8 +4,10 @@ import QtQuick.Shapes
 
 import org.kde.kirigami as Kirigami
 
+import "palette.js" as Palette
+
 // Background of the "Vivo" popup.
-// - "aurora": three soft light blobs in the headset lights' colors drifting
+// - "aurora": three to five soft light blobs in the headset lights' colors drifting
 //   slowly; the bass makes them swell.
 // - "glass": the desktop wallpaper, downscaled and blurred once (the blurred
 //   texture is cached; only a slow zoom moves it), dimmed for legibility,
@@ -21,10 +23,17 @@ Item {
     property real bass: 0               // 0..1 from the live meter
     property color accentA: Kirigami.Theme.highlightColor
     property color accentB: Kirigami.Theme.highlightColor
+    // The headset lights' colors in order; empty uses accentA/accentB.
+    property var lightPalette: []
+
+    function paletteAt(position) {
+        return Palette.at(lightPalette, position, mix(accentA, accentB, position))
+    }
     property url wallpaper
 
     readonly property bool animate: Kirigami.Units.longDuration > 1
     readonly property real strength: [0.22, 0.38, 0.56][Math.max(0, Math.min(2, intensity))]
+    readonly property int blobCount: Math.max(3, Math.min(5, lightPalette.length))
     property real t: 0
     property real pulse: 0
     // Accumulated motion for the shader styles: sound speeds them up
@@ -85,8 +94,11 @@ Item {
             property real pulse: background.pulse
             property real strength: background.strength
             property real aspect: width / Math.max(1, height)
-            property color colorA: background.accentA
-            property color colorB: background.accentB
+            property color color0: background.paletteAt(0)
+            property color color1: background.paletteAt(0.25)
+            property color color2: background.paletteAt(0.5)
+            property color color3: background.paletteAt(0.75)
+            property color color4: background.paletteAt(1)
             fragmentShader: Qt.resolvedUrl("../shaders/particles.frag.qsb")
         }
 
@@ -97,8 +109,11 @@ Item {
             property real phase: background.phase
             property real pulse: background.pulse
             property real strength: background.strength
-            property color colorA: background.accentA
-            property color colorB: background.accentB
+            property color color0: background.paletteAt(0)
+            property color color1: background.paletteAt(0.25)
+            property color color2: background.paletteAt(0.5)
+            property color color3: background.paletteAt(0.75)
+            property color color4: background.paletteAt(1)
             fragmentShader: Qt.resolvedUrl("../shaders/waves.frag.qsb")
         }
 
@@ -145,7 +160,9 @@ Item {
         // position, scale and opacity change, which the GPU does for free.
         // Changing gradient geometry every frame cost ~8% of a CPU core.
         Repeater {
-            model: background.style === "aurora" ? 3 : background.style === "glass" ? 1 : 0
+            // One blob per light color (3 to 5), so every color shows.
+            model: background.style === "aurora" ? background.blobCount
+                : background.style === "glass" ? 1 : 0
             delegate: Item {
                 id: blob
                 required property int index
@@ -159,8 +176,8 @@ Item {
                     ? canvas.height * 0.22
                     : canvas.height * (0.45 + 0.32 * Math.cos(background.t * 0.05 + index * 1.3))
                 readonly property color tone: glow
-                    ? background.mix(background.accentA, background.accentB, 0.5)
-                    : background.mix(background.accentA, background.accentB, index / 2)
+                    ? background.paletteAt(0.5)
+                    : background.paletteAt(index / Math.max(1, background.blobCount - 1))
 
                 width: baseRadius * 2
                 height: baseRadius * 2

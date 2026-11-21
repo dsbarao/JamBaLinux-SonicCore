@@ -8,6 +8,8 @@ import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.plasma.workspace.dbus as DBus
 
+import "palette.js" as Palette
+
 // The "Vivo" header: battery ring around the headset, the Game audio path
 // with flowing links, and a live spectrum, all in the headset lights' colors.
 // It only reads state: the spectrum comes from the on-demand D-Bus meter and
@@ -23,6 +25,12 @@ Item {
     property color batteryColor: Kirigami.Theme.disabledTextColor
     property color accentA: Kirigami.Theme.highlightColor
     property color accentB: Kirigami.Theme.highlightColor
+    // The headset lights' colors in order; empty uses accentA/accentB.
+    property var lightPalette: []
+
+    function paletteAt(position) {
+        return Palette.at(lightPalette, position, mix(accentA, accentB, position))
+    }
     property url equipmentImage
     property string pathCommand: ""
     property string hoursLeftText: ""
@@ -119,7 +127,7 @@ Item {
         if (state === "broken") return Kirigami.Theme.negativeTextColor
         if (state === "off") return Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
                                             Kirigami.Theme.textColor.b, 0.18)
-        return mix(accentA, accentB, (index + 0.5) / 3)
+        return paletteAt((index + 0.5) / 3)
     }
 
     Timer {
@@ -350,7 +358,7 @@ Item {
                     required property int index
                     readonly property bool present: pathRow.stagePresent(index)
                     readonly property color tint: present
-                        ? panel.mix(panel.accentA, panel.accentB, index / 3)
+                        ? panel.paletteAt(index / 3)
                         : Kirigami.Theme.disabledTextColor
                     x: pathRow.nodeX(index) - width / 2
                     width: Kirigami.Units.gridUnit * 3.5
@@ -411,7 +419,7 @@ Item {
                 layer.enabled: panel.soundActive
                 layer.effect: MultiEffect {
                     shadowEnabled: true
-                    shadowColor: panel.mix(panel.accentA, panel.accentB, 0.5)
+                    shadowColor: panel.paletteAt(0.5)
                     shadowBlur: 0.9
                     shadowHorizontalOffset: 0
                     shadowVerticalOffset: 0
@@ -432,7 +440,7 @@ Item {
                             radius: Math.min(width / 2, 2)
                             // A thin floor keeps the shape visible in silence.
                             height: Math.max(2, parent.height * level)
-                            color: panel.mix(panel.accentA, panel.accentB, index / (panel.bandCount - 1))
+                            color: panel.paletteAt(index / (panel.bandCount - 1))
                             opacity: panel.soundActive ? 0.95 : 0.3
                         }
                     }

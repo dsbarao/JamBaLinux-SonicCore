@@ -12,9 +12,20 @@ layout(std140, binding = 0) uniform buf {
     float phase;      // advances with time, faster with sound
     float pulse;      // 0..1 bass
     float strength;   // 0.22 / 0.38 / 0.56 intensity
-    vec4 colorA;
-    vec4 colorB;
+    vec4 color0;      // the headset lights' palette, sampled at
+    vec4 color1;      // 0, 0.25, 0.5, 0.75 and 1
+    vec4 color2;
+    vec4 color3;
+    vec4 color4;
 };
+
+vec3 paletteAt(float position) {
+    float scaled = clamp(position, 0.0, 1.0) * 4.0;
+    vec3 tone = mix(color0.rgb, color1.rgb, clamp(scaled, 0.0, 1.0));
+    tone = mix(tone, color2.rgb, clamp(scaled - 1.0, 0.0, 1.0));
+    tone = mix(tone, color3.rgb, clamp(scaled - 2.0, 0.0, 1.0));
+    return mix(tone, color4.rgb, clamp(scaled - 3.0, 0.0, 1.0));
+}
 
 void main() {
     vec2 uv = qt_TexCoord0;
@@ -31,7 +42,7 @@ void main() {
         float core = 1.0 - smoothstep(0.0, 1.5 * pixel, distance);
         float halo = exp(-distance * 55.0) * 0.55;
         float weight = (core + halo) * strength * (1.4 + 0.8 * pulse);
-        vec3 tone = mix(colorA.rgb, colorB.rgb, k / 3.0);
+        vec3 tone = paletteAt(k / 3.0);
         color += tone * weight;
         alpha += weight;
     }

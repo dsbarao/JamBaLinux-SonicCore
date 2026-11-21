@@ -9,6 +9,8 @@ import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.plasma.plasmoid
 import org.kde.plasma.workspace.dbus as DBus
 
+import "palette.js" as Palette
+
 PlasmoidItem {
     id: root
 
@@ -159,6 +161,10 @@ PlasmoidItem {
     // fall back to the system accent.
     readonly property color vivoAccentA: vivoAccent(Array.isArray(logoColors) ? logoColors[0] : logoColor)
     readonly property color vivoAccentB: vivoAccent(Array.isArray(ringColors) ? ringColors[0] : ringColor)
+    // Every light color (all segments of both zones), so the theme follows
+    // multi-color effects too, not just the first segment.
+    readonly property var vivoPalette: Palette.build(lightingEnabled, logoColors ?? logoColor,
+                                                     ringColors ?? ringColor, 5)
     readonly property bool deviceAvailable: batteryPercent >= 0 && headsetConnected !== false
     readonly property bool daemonAvailable: daemonWatcher.registered
     readonly property color batteryColor: headsetConnected === false
@@ -936,6 +942,7 @@ PlasmoidItem {
             bass: vivoPanel.bass
             accentA: root.vivoAccentA
             accentB: root.vivoAccentB
+            lightPalette: root.vivoPalette
             wallpaper: root.wallpaperUrl
         }
 
@@ -978,6 +985,7 @@ PlasmoidItem {
                 batteryColor: root.batteryColor
                 accentA: root.vivoAccentA
                 accentB: root.vivoAccentB
+                lightPalette: root.vivoPalette
                 equipmentImage: root.equipmentImage
                 pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
                 outputIsQuantum: root.outputIsQuantum

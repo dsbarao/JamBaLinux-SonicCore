@@ -116,3 +116,24 @@ test("com outra saída tocando, o topo mostra o ícone e o nome dela", () => {
     assert.match(vivoSource, /\(panel\.outputIsQuantum \? "" : "Fone "\)/)
     assert.match(mainSource, /soniccoreCommand\(\["output", "--format", "json"\]\)/)
 })
+
+test("a paleta do Vivo usa todas as cores das luzes, sem preto nem repetidas", async () => {
+    const paletteSource = await readFile(new URL("ui/palette.js", base), "utf8")
+    const Qt = { rgba: (r, g, b, a) => ({ r, g, b, a }) }
+    const Palette = new Function("Qt", paletteSource.replace(".pragma library", "")
+        + "\nreturn { build, at }")(Qt)
+    const wave = ["#37309a", "#9a3095", "#9a3033", "#9a8530", "#309a30"]
+
+    assert.deepEqual(Palette.build(true, wave, wave, 5), wave)
+    assert.deepEqual(Palette.build(true, "#FF0000", ["#000000", "00ff00", "bad"], 5),
+        ["#ff0000", "#00ff00"])
+    assert.deepEqual(Palette.build(false, wave, wave, 5), [])
+    assert.deepEqual(Palette.build(true, null, null, 5), [])
+
+    assert.equal(Palette.at([], 0.5, "fallback"), "fallback")
+    assert.deepEqual(Palette.at(["#ff0000", "#0000ff"], 0.5, null), { r: 0.5, g: 0, b: 0.5, a: 1 })
+    assert.deepEqual(Palette.at(wave, 1, null).g, 0x9a / 255)
+    // The header, the spectrum and the background all read the palette.
+    assert.match(mainSource, /lightPalette: root\.vivoPalette[\s\S]*lightPalette: root\.vivoPalette/)
+    assert.doesNotMatch(vivoSource, /mix\(panel\.accentA, panel\.accentB/)
+})
