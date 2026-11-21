@@ -32,6 +32,12 @@ Item {
     property url wallpaper
 
     readonly property bool animate: Kirigami.Units.longDuration > 1
+    // Half-float layers avoid banding in soft gradients (very visible on an
+    // HDR screen), but in a see-through window (Opacidade below 100%) they
+    // composite inconsistently and the whole window flickers; there the
+    // plain 8-bit format is used.
+    readonly property int layerFormat: opacity < 0.999
+        ? ShaderEffectSource.RGBA8 : ShaderEffectSource.RGBA16F
     readonly property real strength: [0.22, 0.38, 0.56][Math.max(0, Math.min(2, intensity))]
     readonly property int blobCount: Math.max(3, Math.min(5, lightPalette.length))
     property real t: 0
@@ -76,9 +82,7 @@ Item {
         id: canvas
         anchors.fill: parent
         layer.enabled: background.style !== "none"
-        // Half-float layers: 8-bit ones show banding in soft gradients,
-        // which an HDR screen makes very visible.
-        layer.format: ShaderEffectSource.RGBA16F
+        layer.format: background.layerFormat
         layer.smooth: true
         layer.effect: MultiEffect {
             maskEnabled: true
@@ -136,7 +140,7 @@ Item {
             asynchronous: true
             cache: true
             layer.enabled: visible && !sharp
-            layer.format: ShaderEffectSource.RGBA16F
+            layer.format: background.layerFormat
             layer.smooth: true
             layer.mipmap: true
             layer.effect: MultiEffect {
@@ -195,7 +199,7 @@ Item {
                     anchors.fill: parent
                     layer.enabled: true
                     layer.smooth: true
-                    layer.format: ShaderEffectSource.RGBA16F
+                    layer.format: background.layerFormat
 
                     ShapePath {
                         strokeColor: "transparent"
