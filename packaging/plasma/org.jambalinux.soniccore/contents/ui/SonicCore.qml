@@ -37,6 +37,12 @@ Item {
     property string actionMessage: ""
     property bool actionFailed: false
     property string openSection: ""
+    // "Vincular com OpenRGB": `soniccore openrgb` status, refreshed when the
+    // lights section opens, and the result of the last link attempt.
+    property var openRgbStatus: null
+    property bool openRgbLinking: false
+    property string openRgbMessage: ""
+    readonly property string openRgbLinkCommand: soniccoreCommand(["openrgb", "link", "--format", "json"])
     property string ambientMode: "unknown"
     property var headsetConnected: null
     property string microphoneState: "unknown"
@@ -226,6 +232,74 @@ Item {
         actionMessage = "Aplicando…"
         const controlCommand = soniccoreCommand(["set", feature, value])
         executable.connectSource(controlCommand)
+    }
+
+    function refreshOpenRgb() {
+        openRgbSource.connectSource(soniccoreCommand(["openrgb", "--format", "json"]))
+    }
+
+    function linkOpenRgb() {
+        if (openRgbLinking) return
+        openRgbLinking = true
+        openRgbMessage = ""
+        openRgbSource.connectSource(openRgbLinkCommand)
+    }
+
+    function openRgbCanLink() {
+        const status = openRgbStatus
+        return !!status && status.openrgb_installed === true && status.supported === true
+            && (status.missing_tools ?? []).length === 0
+            && !(status.plugin_installed === true && status.plugin_current !== false)
+    }
+
+    function openRgbSummary() {
+        const status = openRgbStatus
+        if (openRgbLinking)
+            return "Vinculando: baixando os cabeçalhos do OpenRGB e compilando o plugin (leva alguns segundos)…"
+        if (openRgbMessage.length > 0) return openRgbMessage
+        if (!status) return ""
+        if (status.openrgb_installed !== true)
+            return "Instale o OpenRGB para controlar as luzes do fone junto com seus outros dispositivos RGB."
+        if (status.supported !== true)
+            return `O OpenRGB ${status.openrgb_version ?? "?"} ainda não é suportado (precisa da versão ${(status.supported_versions ?? []).join(", ")}).`
+        if (status.plugin_installed === true && status.plugin_enabled === false)
+            return "O plugin está instalado, mas desativado no OpenRGB (Configurações → Plugins)."
+        if (status.plugin_installed === true && status.plugin_current !== false)
+            return "Vinculado ao OpenRGB."
+        if ((status.missing_tools ?? []).length > 0)
+            return `Para vincular, instale antes: ${status.missing_tools.join(", ")}.`
+        if (status.plugin_installed === true)
+            return "Há uma versão nova do plugin do OpenRGB."
+        return "Vincule para o OpenRGB mostrar o fone como um dispositivo dele."
+    }
+
+    function applyOpenRgbResult(sourceName, data) {
+        let result = null
+        try {
+            result = JSON.parse(String(data.stdout ?? ""))
+        } catch (error) {
+        }
+        if (sourceName === openRgbLinkCommand) {
+            openRgbLinking = false
+            if (result && result.ok === true) {
+                openRgbMessage = result.openrgb_running === true
+                    ? "Vinculado! Feche e abra o OpenRGB para ele carregar o plugin."
+                    : "Vinculado! Abra o OpenRGB: o fone aparece na lista de dispositivos."
+            } else {
+                const detail = result?.message ?? String(data.stderr ?? "").trim()
+                openRgbMessage = `Não deu para vincular: ${detail || "erro desconhecido"}`
+            }
+            refreshOpenRgb()
+            return
+        }
+        if (result && result.schema === 1) openRgbStatus = result
+    }
+
+    onOpenSectionChanged: {
+        if (openSection === "lighting") {
+            if (!openRgbLinking) openRgbMessage = ""
+            refreshOpenRgb()
+        }
     }
 
     function runLightingHold(held) {
@@ -1587,6 +1661,38 @@ Item {
                         onClicked: root.runLightingHold(!root.lightingHeld)
                     }
 
+                    // "Vincular com OpenRGB": installs the plugin that shows
+                    // the headset as an OpenRGB device.
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.openSection === "lighting" && text.length > 0
+                        text: root.openRgbSummary()
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.8
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.openSection === "lighting"
+                            && (root.openRgbLinking || root.openRgbCanLink())
+
+                        PlasmaComponents.BusyIndicator {
+                            visible: root.openRgbLinking
+                            running: visible
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+                        }
+
+                        PlasmaComponents.Button {
+                            enabled: !root.openRgbLinking
+                            text: root.openRgbStatus?.plugin_installed === true
+                                ? "Atualizar o plugin do OpenRGB" : "Vincular com OpenRGB"
+                            icon.name: "insert-link"
+                            onClicked: root.linkOpenRgb()
+                        }
+                    }
+
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
                         visible: root.openSection === "lighting"
@@ -2237,6 +2343,15 @@ Item {
 
         onRegisteredChanged: {
             if (registered) root.refresh()
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: openRgbSource
+        engine: "executable"
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            root.applyOpenRgbResult(sourceName, data)
         }
     }
 

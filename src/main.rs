@@ -18,6 +18,7 @@ mod command;
 mod equalizer;
 mod hid;
 mod meter;
+mod openrgb;
 mod pipewire;
 mod power;
 mod spatial;
@@ -1777,7 +1778,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -2469,6 +2470,7 @@ fn main() {
             (Some("--format"), Some("json"), None) => wallpaper::print_json().map(|()| true),
             _ => Err("usage: soniccore wallpaper --format json".into()),
         },
+        "openrgb" => openrgb::command(args),
         "audio-path" => match (args.next().as_deref(), args.next().as_deref(), args.next()) {
             (Some("--format"), Some("json"), None) => audio_path::print_json().map(|()| true),
             _ => Err("usage: soniccore audio-path --format json".into()),
