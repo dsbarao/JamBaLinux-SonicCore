@@ -2136,12 +2136,55 @@ pub fn run(load_profile: impl Fn() -> Result<EqualizerProfile, String>) -> Resul
         match run_filter(&load_profile)? {
             FilterExit::Retarget(name) => {
                 eprintln!("the output changed to {name}; moving the equalizer there");
+                // The rebuilt filter starts from the saved profile, so record
+                // the old output's setting and load the new one's first.
+                let previous = read_state()
+                    .ok()
+                    .flatten()
+                    .map(|state| state.target_node_name);
+                if let Err(error) = switch_profile_for_output(previous.as_deref(), &name, false) {
+                    eprintln!("could not restore that output's equalizer setting: {error}");
+                }
                 if let Err(error) = retarget_routes() {
                     eprintln!("could not move the equalizer's streams to {name}: {error}");
                 }
             }
         }
     }
+}
+
+/// Remembers the equalizer setting of the output being left and brings back
+/// the one the new output had last time (if any). With `live`, the running
+/// filter is ramped to it; either way it is saved and rendered into the
+/// filter configuration. Returns the restored profile id, or "manual".
+fn switch_profile_for_output(
+    previous: Option<&str>,
+    next_output: &str,
+    live: bool,
+) -> Result<Option<String>, String> {
+    let mutation_lock = crate::equalizer::mutation_lock()?;
+    let current = crate::equalizer::load_for_mutation(&mutation_lock)?;
+    if let Some(previous) = previous.filter(|previous| *previous != next_output) {
+        crate::equalizer::remember_output_profile(&current, previous)?;
+    }
+    let Some(next) = crate::equalizer::profile_for_output(&current, next_output) else {
+        return Ok(None);
+    };
+    if live {
+        apply_profile(&next, &current)?;
+    }
+    if let Err(error) = crate::equalizer::save(&next) {
+        if live {
+            let _ = apply_profile(&current, &next);
+        }
+        return Err(format!("could not save the restored setting ({error})"));
+    }
+    write_atomic(&config_path()?, &render(&next, next_output))?;
+    Ok(Some(
+        next.active_profile_id
+            .clone()
+            .unwrap_or_else(|| "manual".into()),
+    ))
 }
 
 /// Points the running filter at `target` without restarting it: moves its
@@ -2224,6 +2267,20 @@ fn run_filter(
                             "the output changed to {}; moved the equalizer there without restarting it",
                             wanted.name
                         );
+                        match switch_profile_for_output(playing_into.as_deref(), &wanted.name, true)
+                        {
+                            Ok(Some(setting)) => {
+                                eprintln!(
+                                    "restored the equalizer setting last used there: {setting}"
+                                )
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "could not restore that output's equalizer setting: {error}"
+                                )
+                            }
+                        }
                         playing_into = Some(wanted.name.clone());
                         if let Err(error) = retarget_routes() {
                             eprintln!(

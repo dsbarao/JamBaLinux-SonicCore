@@ -449,6 +449,13 @@ service rebuilds its filter for the new output and points the restored
 destinations of its streams at it. Any Quantum 810 output chosen as default,
 Chat included, means its Game channel.
 
+Each output remembers its own equalizer setting in `output-profiles.json`:
+when the equalizer leaves an output it records the selected profile (or the
+exact bands of unsaved manual settings), and when it arrives at an output
+used before it ramps to that output's setting. A remembered profile is
+selected by id, so later edits of a custom profile are kept; an output never
+used before keeps the current setting.
+
 `output set` saves the choice in `output.json` and restarts the equalizer
 service, which rebuilds the filter for that output; the spatial graph relinks
 by itself, and the live meter and audio path follow it. Streams played on the

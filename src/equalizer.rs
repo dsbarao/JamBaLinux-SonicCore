@@ -533,6 +533,93 @@ pub fn updated_profile(
     Ok(profile)
 }
 
+const OUTPUT_PROFILES_NAME: &str = "output-profiles.json";
+
+/// The equalizer setting last used on one audio output: the selected
+/// profile (if any) and the exact bands, so unsaved manual settings come
+/// back too.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RememberedProfile {
+    #[serde(default)]
+    pub active_profile_id: Option<String>,
+    pub bands: Vec<Band>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OutputProfiles {
+    #[serde(default)]
+    schema: u8,
+    #[serde(default)]
+    outputs: std::collections::BTreeMap<String, RememberedProfile>,
+}
+
+fn output_profiles_path() -> Result<PathBuf, String> {
+    Ok(config_directory()?.join(OUTPUT_PROFILES_NAME))
+}
+
+fn load_output_profiles() -> OutputProfiles {
+    output_profiles_path()
+        .ok()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Records `profile` as the setting of `output`. Callers hold the mutation
+/// lock, like every other equalizer write.
+pub fn remember_output_profile(profile: &EqualizerProfile, output: &str) -> Result<(), String> {
+    let mut profiles = load_output_profiles();
+    profiles.schema = 1;
+    profiles.outputs.insert(
+        output.to_owned(),
+        RememberedProfile {
+            active_profile_id: profile.active_profile_id.clone(),
+            bands: profile.bands.clone(),
+        },
+    );
+    let path = output_profiles_path()?;
+    let text = serde_json::to_string_pretty(&profiles).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    let written = File::create(&temporary).and_then(|mut file| {
+        file.write_all(format!("{text}\n").as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(error) = written.and_then(|()| fs::rename(&temporary, &path)) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("{}: {error}", path.display()));
+    }
+    Ok(())
+}
+
+/// The setting `output` had last time, applied to `current`, or `None` when
+/// the output has no memory or already has that setting. A remembered
+/// factory or custom profile is selected by id, so later edits of a custom
+/// profile are kept; manual settings come back band for band.
+pub fn profile_for_output(current: &EqualizerProfile, output: &str) -> Option<EqualizerProfile> {
+    let remembered = load_output_profiles().outputs.remove(output)?;
+    restore_remembered(current, &remembered)
+}
+
+fn restore_remembered(
+    current: &EqualizerProfile,
+    remembered: &RememberedProfile,
+) -> Option<EqualizerProfile> {
+    let next = match remembered.active_profile_id.as_deref() {
+        Some(id) if profile_bands_by_id(current, id).is_some() => {
+            select_profile(current, id).ok()?
+        }
+        _ => {
+            let mut next = current.clone();
+            next.bands = remembered.bands.clone();
+            next.active_profile_id = None;
+            validate(next).ok()?
+        }
+    };
+    let unchanged = next.active_profile_id == current.active_profile_id
+        && bands_match(&next.bands, &current.bands);
+    (!unchanged).then_some(next)
+}
+
 /// Builds the canonical flat profile without persisting it.
 pub fn reset_profile() -> EqualizerProfile {
     EqualizerProfile::default()
@@ -1161,5 +1248,53 @@ mod tests {
         let id = created.custom_profiles[0].id.clone();
         assert!(rename_custom_profile(&created, &id, "Flat").is_err());
         assert!(rename_custom_profile(&created, &id, "Flat 2").is_ok());
+    }
+
+    #[test]
+    fn each_output_gets_back_its_own_profile() {
+        let base = EqualizerProfile::default();
+        let with_custom = create_custom_profile(&base, "Sonyx").unwrap();
+        let sonyx = with_custom.active_profile_id.clone().unwrap();
+        let fps = select_profile(&with_custom, "fps").unwrap();
+
+        // Remembered custom profile: selected by id from the current list.
+        let remembered = RememberedProfile {
+            active_profile_id: Some(sonyx.clone()),
+            bands: base.bands.clone(),
+        };
+        let restored = restore_remembered(&fps, &remembered).unwrap();
+        assert_eq!(restored.active_profile_id.as_deref(), Some(sonyx.as_str()));
+
+        // Manual settings come back band for band, as unsaved settings.
+        let mut manual = base.bands.clone();
+        manual[0].gain_db = 7.5;
+        let restored = restore_remembered(
+            &fps,
+            &RememberedProfile {
+                active_profile_id: None,
+                bands: manual.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.active_profile_id, None);
+        assert!(bands_match(&restored.bands, &manual));
+
+        // A deleted profile falls back to its remembered bands.
+        let gone = restore_remembered(
+            &fps,
+            &RememberedProfile {
+                active_profile_id: Some("custom-deleted".into()),
+                bands: manual,
+            },
+        )
+        .unwrap();
+        assert_eq!(gone.active_profile_id, None);
+
+        // Already on that setting: nothing to do.
+        let same = RememberedProfile {
+            active_profile_id: Some("fps".into()),
+            bands: fps.bands.clone(),
+        };
+        assert_eq!(restore_remembered(&fps, &same), None);
     }
 }
