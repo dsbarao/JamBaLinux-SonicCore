@@ -3,19 +3,19 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 const normalizerMatch = widgetSource.match(
     /    function normalizeBatteryPercent\(value\) \{([\s\S]*?)^    \}\n\n    function/m)
 const applyResultMatch = widgetSource.match(
-    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    compactRepresentation/m)
+    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    property Component compactRepresentation/m)
 const batteryColorMatch = widgetSource.match(
     /readonly property color batteryColor:\s*([\s\S]*?)(?=\n\s+ListModel)/m)
 
-assert.notEqual(normalizerMatch, null, "main.qml must expose normalizeBatteryPercent")
-assert.notEqual(applyResultMatch, null, "main.qml must expose applyResult")
-assert.notEqual(batteryColorMatch, null, "main.qml must expose batteryColor")
+assert.notEqual(normalizerMatch, null, "SonicCore.qml must expose normalizeBatteryPercent")
+assert.notEqual(applyResultMatch, null, "SonicCore.qml must expose applyResult")
+assert.notEqual(batteryColorMatch, null, "SonicCore.qml must expose batteryColor")
 
 const normalizeBatteryPercent = new Function(
     `function normalizeBatteryPercent(value) {${normalizerMatch[1]}}\nreturn normalizeBatteryPercent;`)()

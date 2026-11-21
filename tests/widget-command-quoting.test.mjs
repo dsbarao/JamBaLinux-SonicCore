@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 test("widget commands use one non-login shell command builder", () => {

@@ -3,15 +3,15 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 const normalizerMatch = widgetSource.match(
     /    function normalizeBatteryPercent\(value\) \{([\s\S]*?)^    \}\n\n    function applyResult/m)
 const applyResultMatch = widgetSource.match(
-    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    compactRepresentation/m)
+    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    property Component compactRepresentation/m)
 
-assert.notEqual(normalizerMatch, null, "main.qml must expose the shared battery normalizer")
-assert.notEqual(applyResultMatch, null, "main.qml must apply normalized battery results")
+assert.notEqual(normalizerMatch, null, "SonicCore.qml must expose the shared battery normalizer")
+assert.notEqual(applyResultMatch, null, "SonicCore.qml must apply normalized battery results")
 const normalizeBatteryPercent = new Function(
     `function normalizeBatteryPercent(value) {${normalizerMatch[1]}}\nreturn normalizeBatteryPercent;`)()
 const applyResult = new Function("normalizeBatteryPercent", "friendlyError", "normalizeColor",

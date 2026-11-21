@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 const controlsMatch = widgetSource.match(
     /readonly property bool openRgbControlsLighting: ([\s\S]*?)\n\s+readonly property bool lightingWritable: (.*)\n/)
-assert.notEqual(controlsMatch, null, "main.qml must expose openRgbControlsLighting and lightingWritable")
+assert.notEqual(controlsMatch, null, "SonicCore.qml must expose openRgbControlsLighting and lightingWritable")
 
 function evaluate({ lightingHeld, lightingSource, nowMs, lightingUpdatedAtMs, deviceAvailable = true }) {
     const openRgbControlsLighting = new Function(

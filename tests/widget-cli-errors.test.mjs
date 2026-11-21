@@ -3,13 +3,13 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 const friendlyErrorMatch = widgetSource.match(
     /    function friendlyError\(([^)]*)\) \{([\s\S]*?)^    \}\n\n    function normalizeBatteryPercent/m)
 
-assert.notEqual(friendlyErrorMatch, null, "main.qml must declare friendlyError before normalizeBatteryPercent")
+assert.notEqual(friendlyErrorMatch, null, "SonicCore.qml must declare friendlyError before normalizeBatteryPercent")
 
 const friendlyError = new Function(
     `function friendlyError(${friendlyErrorMatch[1]}) {${friendlyErrorMatch[2]}}\nreturn friendlyError;`)()

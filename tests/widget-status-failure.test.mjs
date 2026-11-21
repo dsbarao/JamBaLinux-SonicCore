@@ -3,16 +3,16 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 const clearHeadsetStateMatch = widgetSource.match(
     /    function clearHeadsetState\(\) \{([\s\S]*?)^    \}\n\n    function applyResult/m)
 const applyResultMatch = widgetSource.match(
-    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    compactRepresentation/m)
+    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    property Component compactRepresentation/m)
 
-assert.notEqual(clearHeadsetStateMatch, null, "main.qml must declare clearHeadsetState before applyResult")
-assert.notEqual(applyResultMatch, null, "main.qml must apply results")
+assert.notEqual(clearHeadsetStateMatch, null, "SonicCore.qml must declare clearHeadsetState before applyResult")
+assert.notEqual(applyResultMatch, null, "SonicCore.qml must apply results")
 
 const clearHeadsetStateBody = clearHeadsetStateMatch[1]
 const applyResultBody = applyResultMatch[1]

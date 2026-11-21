@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml",
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml",
     import.meta.url
 )
 const widgetSource = await readFile(widgetPath, "utf8")
@@ -15,7 +15,7 @@ test("spatial polling timer runs only when popup is expanded and spatial section
     )
     assert.ok(
         spatialTimerMatch,
-        "spatial polling Timer calling root.refreshSpatial() should exist in main.qml"
+        "spatial polling Timer calling root.refreshSpatial() should exist in SonicCore.qml"
     )
 
     const timerBlock = spatialTimerMatch[0]

@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const base = new URL("../packaging/plasma/org.jambalinux.soniccore/contents/", import.meta.url)
-const mainSource = await readFile(new URL("ui/main.qml", base), "utf8")
+const mainSource = await readFile(new URL("ui/SonicCore.qml", base), "utf8")
 const configModel = await readFile(new URL("config/config.qml", base), "utf8")
 const batteryPage = await readFile(new URL("ui/configBattery.qml", base), "utf8")
 
 const hoursMatch = mainSource.match(/readonly property string hoursLeftText: ([\s\S]*?)\n\s+: ""/)
-assert.notEqual(hoursMatch, null, "main.qml must expose hoursLeftText")
+assert.notEqual(hoursMatch, null, "SonicCore.qml must expose hoursLeftText")
 
 function hoursLeftText(hoursLeft, charging) {
     return new Function("hoursLeft", "charging", `return ${hoursMatch[1]}\n: ""`)(hoursLeft, charging)

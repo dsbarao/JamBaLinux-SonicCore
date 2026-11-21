@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const base = new URL("../packaging/plasma/org.jambalinux.soniccore/contents/", import.meta.url)
-const mainSource = await readFile(new URL("ui/main.qml", base), "utf8")
+const mainSource = await readFile(new URL("ui/SonicCore.qml", base), "utf8")
 const vivoSource = await readFile(new URL("ui/VivoPanel.qml", base), "utf8")
 const configXml = await readFile(new URL("config/main.xml", base), "utf8")
 const configPage = await readFile(new URL("ui/configAppearance.qml", base), "utf8")
@@ -20,7 +20,7 @@ test("o tema Leve é o padrão e a página de configuração oferece os dois", (
     assert.match(configPage, /property string cfg_theme/)
     assert.match(configPage, /text: "Leve"/)
     assert.match(configPage, /text: "Vivo"/)
-    assert.match(mainSource, /readonly property bool vivo: Plasmoid\.configuration\.theme === "vivo"/)
+    assert.match(mainSource, /readonly property bool vivo: root\.configuration\.theme === "vivo"/)
 })
 
 test("o Vivo só substitui o topo e só roda com o painel aberto", () => {

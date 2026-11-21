@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/main.qml", import.meta.url)
+    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 function extractFunction(name, nextName) {
@@ -14,8 +14,8 @@ function extractFunction(name, nextName) {
 }
 
 const applyResultMatch = widgetSource.match(
-    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    compactRepresentation/m)
-assert.notEqual(applyResultMatch, null, "main.qml must apply status results")
+    /    function applyResult\(data\) \{([\s\S]*?)^    \}\n\n    property Component compactRepresentation/m)
+assert.notEqual(applyResultMatch, null, "SonicCore.qml must apply status results")
 const applyResult = new Function("normalizeBatteryPercent", "friendlyError",
     `return function applyResult(data) { with (this) {${applyResultMatch[1]}} };`)(
     () => -1, () => "")
