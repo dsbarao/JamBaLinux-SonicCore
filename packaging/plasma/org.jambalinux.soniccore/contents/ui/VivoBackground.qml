@@ -16,7 +16,7 @@ import "palette.js" as Palette
 Item {
     id: background
 
-    property string style: "aurora"     // "aurora", "glass", "particles", "waves" or "none"
+    property string style: "aurora"     // "aurora", "glass", "wallpaper", "particles", "waves" or "none"
     property int intensity: 1           // 0 subtle, 1 medium, 2 intense
     property bool reactive: true        // follow the bass
     property bool running: false
@@ -120,11 +120,13 @@ Item {
         // ---- Glass: the wallpaper, blurred once and cached ----
         Image {
             id: wallpaperImage
-            visible: background.style === "glass" && status === Image.Ready
+            // Glass blurs the wallpaper; "wallpaper" shows it as it is.
+            readonly property bool sharp: background.style === "wallpaper"
+            visible: (background.style === "glass" || sharp) && status === Image.Ready
             anchors.centerIn: parent
             width: parent.width
             height: parent.height
-            source: background.style === "glass" ? background.wallpaper : ""
+            source: background.style === "glass" || sharp ? background.wallpaper : ""
             // Decoded at the popup's own size: a small texture stretched
             // several times looks blocky even after blurring.
             sourceSize.height: Math.max(1, Math.ceil(height * 1.2))
@@ -133,7 +135,7 @@ Item {
             mipmap: true
             asynchronous: true
             cache: true
-            layer.enabled: visible
+            layer.enabled: visible && !sharp
             layer.format: ShaderEffectSource.RGBA16F
             layer.smooth: true
             layer.mipmap: true
@@ -145,14 +147,15 @@ Item {
                 saturation: 0.15
             }
             // Moving the cached texture costs nothing; re-blurring would.
-            scale: 1.12 + 0.03 * Math.sin(background.t * 0.05)
+            scale: sharp ? 1 : 1.12 + 0.03 * Math.sin(background.t * 0.05)
         }
 
         Rectangle {
-            visible: background.style === "glass"
+            visible: background.style === "glass" || background.style === "wallpaper"
             anchors.fill: parent
             color: Kirigami.Theme.backgroundColor
-            opacity: 0.62 - 0.1 * background.intensity
+            // The sharp wallpaper keeps more of the picture.
+            opacity: (background.style === "wallpaper" ? 0.38 : 0.62) - 0.1 * background.intensity
         }
 
         // ---- Light: aurora blobs, or the glass's central glow ----

@@ -1,4 +1,4 @@
-# JamBaLinux SonicCore v0.4 plan — sound modes
+# JamBaLinux Sonic Core v0.4 plan — sound modes
 
 Goal: give the app the sound options people expect from headset software on
 Windows (virtual surround, listening modes, dialogue and bass control), built

@@ -1734,7 +1734,7 @@ fn notify(dry_run: bool) -> Result<bool, String> {
     let urgency = if battery <= 20 { "critical" } else { "normal" };
     let process = Command::new("notify-send")
         .args([
-            "--app-name=JamBaLinux SonicCore",
+            "--app-name=JamBaLinux Sonic Core",
             "--icon=audio-headphones",
             &format!("--urgency={urgency}"),
             "JBL Quantum 810",
@@ -1763,7 +1763,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
     let process = Command::new("kdialog")
         .args([
             "--title",
-            "JamBaLinux SonicCore",
+            "JamBaLinux Sonic Core",
             "--msgbox",
             &format!("JBL Quantum 810 Wireless\nBateria: {battery}%"),
         ])
@@ -1776,9 +1776,9 @@ fn show(dry_run: bool) -> Result<bool, String> {
 }
 
 fn usage() {
-    eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
+    eprintln!("JamBaLinux Sonic Core — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound set <intensity|dialogue|bass|surround> <value>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -2421,23 +2421,30 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
                         .ok_or("the sound control value must be a number")?;
                     spatial::set_sound_control(&control, value)?
                 }
+                (Some("constant"), Some(value), None) => match value.as_str() {
+                    "on" => spatial::set_constant_volume(true)?,
+                    "off" => spatial::set_constant_volume(false)?,
+                    _ => return Err("spatial sound constant requires `on` or `off`".into()),
+                },
                 (Some(mode), None, None) if mode != "set" => {
                     spatial::set_listening_mode(spatial::ListeningMode::parse(mode)?)?
                 }
                 _ => {
                     return Err("usage: soniccore spatial sound <game|cinema|music|custom> | \
+                         sound constant <on|off> | \
                          sound set <intensity|dialogue|bass|surround> <value>"
                         .into());
                 }
             };
             apply_spatial_mix_best_effort(profile.enabled);
             println!(
-                "listening mode: {} (intensity {:.2}, dialogue {:+.1} dB, bass {:+.1} dB, surround {:+.1} dB)",
+                "listening mode: {} (intensity {:.2}, dialogue {:+.1} dB, bass {:+.1} dB, surround {:+.1} dB, constant volume {})",
                 profile.listening.as_str(),
                 profile.sound.intensity,
                 profile.sound.dialogue_db,
                 profile.sound.bass_db,
-                profile.sound.surround_db
+                profile.sound.surround_db,
+                if profile.sound.constant_volume { "on" } else { "off" }
             );
             Ok(true)
         }

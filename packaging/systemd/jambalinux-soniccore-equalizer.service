@@ -1,5 +1,5 @@
 [Unit]
-Description=JamBaLinux SonicCore PipeWire Game equalizer
+Description=JamBaLinux Sonic Core PipeWire Game equalizer
 After=graphical-session.target pipewire.service pipewire-pulse.service wireplumber.service
 Wants=pipewire.service pipewire-pulse.service wireplumber.service
 

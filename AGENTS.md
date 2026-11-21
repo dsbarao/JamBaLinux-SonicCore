@@ -1,4 +1,4 @@
-# JamBaLinux SonicCore
+# JamBaLinux Sonic Core
 
 Read `README.md`, `docs/rebranding.md`, and the relevant protocol documentation
 before changing behavior.

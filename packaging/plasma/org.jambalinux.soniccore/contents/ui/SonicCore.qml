@@ -30,7 +30,7 @@ Item {
         implicitHeight: cardBody.implicitHeight + Kirigami.Units.largeSpacing * 2
         radius: Kirigami.Units.cornerRadius * 2
         color: Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,
-            Kirigami.Theme.backgroundColor.b, root.vivo ? 0.6 : 1)
+            Kirigami.Theme.backgroundColor.b, (root.vivo ? 0.6 : 1) * root.backgroundOpacity)
         border.width: 1
         border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
             Kirigami.Theme.textColor.b, 0.15)
@@ -72,6 +72,12 @@ Item {
     }
 
     property var configuration: ({})
+    // The app's "Opacidade": how opaque the backgrounds are (text and
+    // controls stay solid). Hosts without it get fully opaque ones.
+    readonly property real backgroundOpacity: {
+        const value = Number(configuration.windowOpacity)
+        return Number.isFinite(value) ? Math.max(0.15, Math.min(1, value)) : 1
+    }
     property bool expanded: false
     signal toggleRequested()
 
@@ -354,6 +360,13 @@ Item {
         if (result && result.schema === 1) openRgbStatus = result
     }
 
+    // Picking a wallpaper background while the window is open looks the
+    // wallpaper up right away (it is otherwise read when the window opens).
+    onVivoBackgroundChanged: {
+        if (expanded && vivo && (vivoBackground === "glass" || vivoBackground === "wallpaper"))
+            wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
+    }
+
     // Every section is on screen whenever the panel is: load what each
     // one shows when it appears.
     onExpandedChanged: {
@@ -366,7 +379,7 @@ Item {
         loadPicker()
         refreshEqualizer()
         // The wallpaper can change at any time; look it up each time.
-        if (vivo && vivoBackground === "glass")
+        if (vivo && (vivoBackground === "glass" || vivoBackground === "wallpaper"))
             wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
     }
 
@@ -451,12 +464,43 @@ Item {
         spatialControlExecutable.connectSource(soniccoreSequence(steps))
     }
 
+    // Like the equalizer bands: while a handle is dragged its latest value
+    // waits here (one per control) and is sent as soon as the previous
+    // command returns, so the sound follows the drag without piling up.
+    property var pendingSpatialSound: ({})
+    property bool spatialSoundSending: false
+    readonly property var spatialSoundKeys: ({
+        "intensity": "intensity", "dialogue": "dialogue_db",
+        "bass": "bass_db", "surround": "surround_db"
+    })
+
     function setSpatialSoundControl(control, value) {
-        if (spatialBusy) return
-        spatialBusy = true
-        spatialActionMessage = "Ajustando…"
-        spatialControlExecutable.connectSource(soniccoreCommand(
-            ["spatial", "sound", "set", control, String(Math.round(value * 100) / 100)]))
+        const rounded = Math.round(Number(value) * 100) / 100
+        const pending = Object.assign({}, pendingSpatialSound)
+        pending[control] = rounded
+        pendingSpatialSound = pending
+        // Show it at once; the status read later confirms it.
+        const shown = Object.assign({}, spatialSound)
+        shown[spatialSoundKeys[control]] = rounded
+        spatialSound = shown
+        if (!spatialSoundSending) sendNextSpatialSound()
+    }
+
+    function sendNextSpatialSound() {
+        const controls = Object.keys(pendingSpatialSound)
+        if (controls.length === 0) {
+            spatialSoundSending = false
+            spatialSoundRefresh.restart()
+            return
+        }
+        const control = controls[0]
+        const pending = Object.assign({}, pendingSpatialSound)
+        const value = pending[control]
+        delete pending[control]
+        pendingSpatialSound = pending
+        spatialSoundSending = true
+        spatialSoundExecutable.connectSource(soniccoreCommand(
+            ["spatial", "sound", "set", control, String(value)]))
     }
 
     function listeningLabel(mode) {
@@ -1119,6 +1163,7 @@ Item {
         VivoBackground {
             anchors.fill: parent
             visible: root.vivo && root.vivoBackground !== "none"
+            opacity: root.backgroundOpacity
             style: root.vivoBackground
             intensity: root.configuration.backgroundIntensity
             reactive: root.configuration.backgroundReactive
@@ -1155,12 +1200,17 @@ Item {
 
                 // The headset overview, in a card like the other columns.
                 SectionCard {
-            PlasmaComponents.Label {
+            // The JamBaLinux Sonic Core wordmark (tools/build-brand.sh).
+            Image {
                 Layout.alignment: Qt.AlignHCenter
-                Layout.maximumHeight: implicitHeight
-                text: "JamBaLinux SonicCore"
-                font.bold: true
-                font.pixelSize: Kirigami.Units.gridUnit * 1.05
+                Layout.fillWidth: true
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 18
+                Layout.preferredHeight: width * sourceSize.height / Math.max(1, sourceSize.width)
+                source: Qt.resolvedUrl("../images/wordmark.png")
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                mipmap: true
+                Accessible.name: "JamBaLinux Sonic Core"
             }
 
             PlasmaComponents.Label {
@@ -1803,6 +1853,25 @@ Item {
                             }
                         }
 
+                        // Same loudness in every mode (the 3D path alone is
+                        // about 6 dB louder than plain stereo).
+                        PlasmaComponents.Switch {
+                            id: constantVolumeToggle
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Volume constante"
+                            checked: root.spatialSound.constant_volume !== false
+                            enabled: !root.spatialBusy
+                            onClicked: {
+                                const on = checked
+                                checked = Qt.binding(() => root.spatialSound.constant_volume !== false)
+                                if (root.spatialBusy) return
+                                root.spatialBusy = true
+                                root.spatialActionMessage = "Ajustando…"
+                                spatialControlExecutable.connectSource(root.soniccoreCommand(
+                                    ["spatial", "sound", "constant", on ? "on" : "off"]))
+                            }
+                        }
+
                         // Fine controls, shown while the 3D is on. Moving one
                         // turns the mode into "Personalizado".
                         GridLayout {
@@ -1850,12 +1919,21 @@ Item {
                                             to: soundRow.modelData.to
                                             stepSize: soundRow.modelData.step
                                             value: Number(root.spatialSound[soundRow.modelData.key] ?? 0)
-                                            // Sent once, when the handle is let go.
+                                            // Sent while dragging, at most every 60 ms, and
+                                            // once more on release with the final value.
+                                            onMoved: if (!soundSend.running) soundSend.start()
                                             onPressedChanged: {
                                                 if (pressed) return
+                                                soundSend.stop()
                                                 root.setSpatialSoundControl(soundRow.modelData.control, value)
-                                                // Follow the confirmed value again after the drag.
                                                 value = Qt.binding(() => Number(root.spatialSound[soundRow.modelData.key] ?? 0))
+                                            }
+
+                                            Timer {
+                                                id: soundSend
+                                                interval: 60
+                                                onTriggered: root.setSpatialSoundControl(
+                                                    soundRow.modelData.control, soundSlider.value)
                                             }
                                         }
 
@@ -2461,7 +2539,11 @@ Item {
                 root.spatialEnabled = result.enabled === true
                 root.spatialMode = String(result.mode ?? "off")
                 root.spatialListening = String(result.listening ?? "game")
-                if (result.sound && typeof result.sound === "object")
+                // A read taken while a drag is still being sent is older
+                // than what the handle shows.
+                if (result.sound && typeof result.sound === "object"
+                        && !root.spatialSoundSending
+                        && Object.keys(root.pendingSpatialSound).length === 0)
                     root.spatialSound = result.sound
                 root.spatialActive = result.active === true
                 root.spatialProcessingMode = String(result.processing_mode ?? (root.spatialEnabled ? "binaural" : "bypass"))
@@ -2487,6 +2569,25 @@ Item {
                 root.spatialError = `Resposta inválida do estado espacial: ${error}`
             }
         }
+    }
+
+    Plasma5Support.DataSource {
+        id: spatialSoundExecutable
+        engine: "executable"
+
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            if (Number(data["exit code"] ?? -1) !== 0)
+                root.spatialError = String(data.stderr ?? "").trim() || "Não foi possível ajustar o som"
+            root.sendNextSpatialSound()
+        }
+    }
+
+    // One status read after the last value of a drag, not after each step.
+    Timer {
+        id: spatialSoundRefresh
+        interval: 400
+        onTriggered: root.refreshSpatial()
     }
 
     Plasma5Support.DataSource {

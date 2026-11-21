@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only diagnostics for two audio symptoms of JamBaLinux SonicCore:
+# Read-only diagnostics for two audio symptoms of JamBaLinux Sonic Core:
 #
 #   spatial  Records timestamped PipeWire/PulseAudio events, the default sink,
 #            sinks, sink inputs (with their sink and corked flag), PipeWire
@@ -286,7 +286,7 @@ run_spatial() {
 	detect_mpris_tool
 	START_US=$(now_us)
 	{
-		printf '# JamBaLinux SonicCore audio transition diagnostics\n'
+		printf '# JamBaLinux Sonic Core audio transition diagnostics\n'
 		printf '# started: %s\n' "$(date --iso-8601=ns 2>/dev/null || date)"
 		printf '# duration: %ss, snapshot interval: %ss\n' "$duration" "$interval"
 		printf '# mpris: %s\n' "${MPRIS_TOOL:-unavailable}"

@@ -11,7 +11,7 @@ const widgetSource = await readFile(widgetPath, "utf8")
 test("spatial polling timer runs only when popup is expanded and spatial section is open", () => {
     // Find the Timer block that calls root.refreshSpatial()
     const spatialTimerMatch = widgetSource.match(
-        /Timer\s*\{[^}]*?onTriggered:\s*root\.refreshSpatial\(\)[^}]*\}/
+        /Timer\s*\{[^}]*?repeat:\s*true[^}]*?onTriggered:\s*root\.refreshSpatial\(\)[^}]*\}/
     )
     assert.ok(
         spatialTimerMatch,

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190">
+  <!-- JamBaLinux Sonic Core wordmark (text rendered with Fira Sans; the
+       committed PNGs are what the app and README use). -->
+  <defs>
+    <linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset=".4" stop-color="#b8c2d6"/>
+      <stop offset=".5" stop-color="#2f3650"/><stop offset=".58" stop-color="#e6ebf5"/>
+      <stop offset="1" stop-color="#7a8499"/></linearGradient>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset=".5" stop-color="#c084fc"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0f7ff"/><stop offset=".4" stop-color="#38bdf8"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+    <filter id="glow" x="-20%" y="-60%" width="140%" height="220%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <g stroke-linecap="round" opacity=".75">
+    <line x1="6" y1="128" x2="120" y2="128" stroke="#38bdf8" stroke-width="4"/>
+    <line x1="22" y1="146" x2="110" y2="146" stroke="#f472b6" stroke-width="3"/>
+  </g>
+  <text x="380" y="52" text-anchor="middle" font-family="Fira Sans Condensed" font-weight="800" font-size="40" letter-spacing="10" fill="url(#neon)" filter="url(#glow)" transform="skewX(-12) translate(12 0)">JamBaLinux</text>
+  <text x="380" y="160" text-anchor="middle" font-family="Fira Sans Compressed" font-weight="900" font-size="116" letter-spacing="4" fill="url(#chrome)" stroke="#0b0d16" stroke-width="3" transform="skewX(-12) translate(34 0)">SONIC CORE</text>
+  <path d="M566 10 l-24 46 h17 l-19 48 l42 -62 h-18 l15 -32z" fill="url(#bolt)" filter="url(#glow)"/>
+</svg>

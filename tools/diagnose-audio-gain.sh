@@ -144,7 +144,7 @@ main() {
 	LOG_FILE=$output
 	(set -o noclobber; : >"$LOG_FILE") 2>/dev/null || die "could not create output file: $LOG_FILE"
 	{
-		printf '# JamBaLinux SonicCore passive audio-gain observation\n'
+		printf '# JamBaLinux Sonic Core passive audio-gain observation\n'
 		printf '# No audio was captured and no PipeWire, SonicCore, HID, or routing state was changed.\n'
 		printf '# Warning: pactl may expose potentially sensitive application and media names; review before sharing.\n'
 		printf '# Raw command output is retained so missing fields are not invented.\n'

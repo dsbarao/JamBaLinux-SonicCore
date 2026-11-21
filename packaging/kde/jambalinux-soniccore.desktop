@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=JamBaLinux SonicCore
+Name=JamBaLinux Sonic Core
 Comment=Battery, equalizer and lights of the JBL Quantum 810 Wireless
 Exec=/bin/sh -lc "exec ~/.local/share/jambalinux-soniccore/app/soniccore-app"
-Icon=audio-headphones
+Icon=jambalinux-soniccore
 Terminal=false
 StartupNotify=false
 Categories=AudioVideo;Audio;Utility;

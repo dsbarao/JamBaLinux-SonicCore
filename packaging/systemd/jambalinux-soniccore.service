@@ -1,5 +1,5 @@
 [Unit]
-Description=JamBaLinux SonicCore headset state monitor
+Description=JamBaLinux Sonic Core headset state monitor
 After=graphical-session.target
 
 [Service]

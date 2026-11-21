@@ -93,7 +93,10 @@ test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros",
     assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && root\.vivoBackground !== "none"/)
     assert.match(mainSource, /running: root\.vivo && root\.expanded\n\s+bass: vivoPanel\.bass/)
     // The wallpaper is only looked up for the glass background.
-    assert.match(mainSource, /if \(vivo && vivoBackground === "glass"\)/)
+    assert.match(mainSource, /if \(vivo && \(vivoBackground === "glass" \|\| vivoBackground === "wallpaper"\)\)/)
+    // The app's opacity fades the background layer and the cards, not the text.
+    assert.match(mainSource, /visible: root\.vivo && root\.vivoBackground !== "none"\n\s+opacity: root\.backgroundOpacity/)
+    assert.match(mainSource, /\(root\.vivo \? 0\.6 : 1\) \* root\.backgroundOpacity/)
 })
 
 test("Partículas e Ondas usam os shaders compilados", async () => {

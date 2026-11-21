@@ -17,7 +17,7 @@ import "../plasma/org.jambalinux.soniccore/contents/ui"
 Kirigami.ApplicationWindow {
     id: window
 
-    title: "JamBaLinux SonicCore"
+    title: "JamBaLinux Sonic Core"
     width: Kirigami.Units.gridUnit * 68
     height: Kirigami.Units.gridUnit * 46
     minimumWidth: Kirigami.Units.gridUnit * 25
@@ -35,7 +35,15 @@ Kirigami.ApplicationWindow {
         property string background: "aurora"
         property int backgroundIntensity: 1
         property bool backgroundReactive: true
+        // How opaque the window's backgrounds are (0.15–1), in every theme:
+        // the window, the cards and the Vivo background; text and controls
+        // stay solid.
+        property real windowOpacity: 1
     }
+
+    color: Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,
+        Kirigami.Theme.backgroundColor.b, settings.windowOpacity)
+
 
     // The window's size as the user left it, kept across closing, logging
     // out and rebooting. Wayland does not let an app choose its position;
@@ -50,6 +58,9 @@ Kirigami.ApplicationWindow {
     }
 
     Component.onCompleted: {
+        // "Transparente" was a background before the opacity control existed.
+        if (settings.background === "transparent")
+            settings.background = "none"
         if (windowState.width >= minimumWidth && windowState.height >= minimumHeight) {
             width = windowState.width
             height = windowState.height
@@ -127,7 +138,7 @@ Kirigami.ApplicationWindow {
         id: tray
         visible: true
         icon.source: window.trayIcon
-        tooltip: `JamBaLinux SonicCore — ${window.batteryText}`
+        tooltip: `JamBaLinux Sonic Core — ${window.batteryText}`
         onActivated: function(reason) {
             if (reason === Platform.SystemTrayIcon.Trigger) window.toggle()
         }
@@ -153,7 +164,9 @@ Kirigami.ApplicationWindow {
 
     pageStack.initialPage: Kirigami.ScrollablePage {
         id: page
-        title: "SonicCore"
+        title: "Sonic Core"
+        // Let the window colour (and its transparency) show through.
+        background: Rectangle { color: "transparent" }
         padding: 0
         leftPadding: 0
         rightPadding: 0
@@ -184,6 +197,14 @@ Kirigami.ApplicationWindow {
                     onTriggered: settings.background = "glass"
                 }
                 Kirigami.Action {
+                    text: "Papel de parede"
+                    tooltip: "O papel de parede do monitor principal"
+                    checkable: true
+                    checked: settings.background === "wallpaper"
+                    onTriggered: settings.background = "wallpaper"
+                }
+
+                Kirigami.Action {
                     text: "Partículas"
                     checkable: true
                     checked: settings.background === "particles"
@@ -200,6 +221,26 @@ Kirigami.ApplicationWindow {
                     checkable: true
                     checked: settings.background === "none"
                     onTriggered: settings.background = "none"
+                }
+            },
+            // Opacity of the window's backgrounds, always in the toolbar.
+            Kirigami.Action {
+                text: "Opacidade"
+                displayComponent: RowLayout {
+                    spacing: Kirigami.Units.smallSpacing
+                    QQC2.Label { text: "Opacidade" }
+                    QQC2.Slider {
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                        from: 0.15
+                        to: 1
+                        stepSize: 0.05
+                        value: settings.windowOpacity
+                        onMoved: settings.windowOpacity = value
+                    }
+                    QQC2.Label {
+                        text: `${Math.round(settings.windowOpacity * 100)}%`
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                    }
                 }
             }
         ]

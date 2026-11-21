@@ -18,6 +18,8 @@ readonly AUTOSTART_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore-autos
 readonly AUTOSTART_TARGET="$HOME/.config/autostart/jambalinux-soniccore.desktop"
 readonly APP_SOURCE="$PROJECT_DIR/packaging/app"
 readonly APP_TARGET="$HOME/.local/share/jambalinux-soniccore/app"
+readonly ICON_SOURCE="$PROJECT_DIR/packaging/brand/jambalinux-soniccore.svg"
+readonly ICON_TARGET="$HOME/.local/share/icons/hicolor/scalable/apps/jambalinux-soniccore.svg"
 readonly METER_SERVICE_SOURCE="$PROJECT_DIR/packaging/dbus/org.jambalinux.soniccore.Meter.service"
 readonly METER_SERVICE_TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.jambalinux.soniccore.Meter.service"
 readonly CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -106,7 +108,7 @@ if [[ "${1:-}" == "--check" ]]; then
     check_prerequisites
     stage_packaging
     "$ACP_OVERLAY" --check
-    printf 'Pré-requisitos do JamBaLinux SonicCore verificados. Nenhuma alteração foi feita.\n'
+    printf 'Pré-requisitos do JamBaLinux Sonic Core verificados. Nenhuma alteração foi feita.\n'
     exit 0
 fi
 
@@ -141,9 +143,11 @@ install -Dm644 "$EQUALIZER_SERVICE_INSTALL" "$EQUALIZER_SERVICE_TARGET"
 install -Dm644 "$SPATIAL_SERVICE_INSTALL" "$SPATIAL_SERVICE_TARGET"
 install -Dm644 "$LAUNCHER_INSTALL" "$LAUNCHER_TARGET"
 install -Dm644 "$AUTOSTART_SOURCE" "$AUTOSTART_TARGET"
+install -Dm644 "$ICON_SOURCE" "$ICON_TARGET"
 # The app carries its own copy of the interface (QML, shaders, images).
 rm -rf -- "$APP_TARGET"
 install -Dm755 "$APP_SOURCE/soniccore-app" "$APP_TARGET/soniccore-app"
+install -Dm644 "$ICON_SOURCE" "$APP_TARGET/jambalinux-soniccore.svg"
 sed "s|^import \"../plasma/$PLASMOID_ID/contents/ui\"\$|import \"contents/ui\"|" \
     "$APP_SOURCE/main.qml" > "$APP_TARGET/main.qml"
 grep -Fqx 'import "contents/ui"' "$APP_TARGET/main.qml" \
@@ -177,8 +181,8 @@ systemctl --user start jambalinux-soniccore-spatial.service
 # installer does not restart it, so audio is never cut without being asked.
 "$ACP_OVERLAY" --install
 
-printf '\nJamBaLinux SonicCore instalado para o usuário atual.\n'
-printf 'O app abre pelo menu (JamBaLinux SonicCore) e inicia na bandeja ao entrar na sessão.\n'
+printf '\nJamBaLinux Sonic Core instalado para o usuário atual.\n'
+printf 'O app abre pelo menu (JamBaLinux Sonic Core) e inicia na bandeja ao entrar na sessão.\n'
 command -v qml6 >/dev/null 2>&1 || command -v qml >/dev/null 2>&1 \
     || printf 'aviso: qml6 não encontrado; instale o Qt Declarative para abrir o app.\n' >&2
 printf 'O Plasma não foi reiniciado automaticamente.\n'

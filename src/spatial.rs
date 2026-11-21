@@ -121,6 +121,7 @@ impl ListeningMode {
                 dialogue_db: 0.0,
                 bass_db: -3.0,
                 surround_db: 2.0,
+                constant_volume: true,
             }),
             // Full 3D, dialogue and bass lifted.
             Self::Cinema => Some(SoundSettings {
@@ -128,6 +129,7 @@ impl ListeningMode {
                 dialogue_db: 3.0,
                 bass_db: 3.0,
                 surround_db: 0.0,
+                constant_volume: true,
             }),
             // Mostly the original stereo, a little room, softer surrounds.
             Self::Music => Some(SoundSettings {
@@ -135,6 +137,7 @@ impl ListeningMode {
                 dialogue_db: 0.0,
                 bass_db: 0.0,
                 surround_db: -3.0,
+                constant_volume: true,
             }),
             Self::Custom => None,
         }
@@ -152,6 +155,14 @@ pub struct SoundSettings {
     pub bass_db: f32,
     /// Side and rear channels, dB.
     pub surround_db: f32,
+    /// Keep the overall loudness of the plain stereo path whatever the mode
+    /// and levels: the 3D path alone is about 6 dB louder, and lifts add up.
+    #[serde(default = "constant_volume_default")]
+    pub constant_volume: bool,
+}
+
+fn constant_volume_default() -> bool {
+    true
 }
 
 pub const INTENSITY_RANGE: (f32, f32) = (0.1, 1.0);
@@ -164,7 +175,16 @@ impl SoundSettings {
         dialogue_db: 0.0,
         bass_db: 0.0,
         surround_db: 0.0,
+        constant_volume: false,
     };
+
+    /// The same levels, whatever the loudness setting.
+    pub fn same_levels(&self, other: &Self) -> bool {
+        self.intensity == other.intensity
+            && self.dialogue_db == other.dialogue_db
+            && self.bass_db == other.bass_db
+            && self.surround_db == other.surround_db
+    }
 
     pub fn validate(self) -> Result<Self, String> {
         let (low, high) = INTENSITY_RANGE;
@@ -1535,10 +1555,13 @@ fn with_listening_mode(
     mut next: SpatialProfile,
     mode: ListeningMode,
 ) -> Result<SpatialProfile, String> {
+    let constant_volume = next.sound.constant_volume;
     next.sound = mode
         .settings()
         .or(next.custom_sound)
         .unwrap_or(next.sound);
+    // The loudness setting belongs to the user, not to the mode.
+    next.sound.constant_volume = constant_volume;
     next.listening = mode;
     validate(next)
 }
@@ -1570,10 +1593,23 @@ fn with_sound_control(
     }
     next.listening = [ListeningMode::Game, ListeningMode::Cinema, ListeningMode::Music]
         .into_iter()
-        .find(|mode| mode.settings() == Some(next.sound))
+        .find(|mode| mode.settings().is_some_and(|settings| settings.same_levels(&next.sound)))
         .unwrap_or(ListeningMode::Custom);
     next.custom_sound = Some(next.sound);
     validate(next)
+}
+
+/// Turns the automatic loudness compensation on or off.
+pub fn set_constant_volume(on: bool) -> Result<SpatialProfile, String> {
+    let _lock = mutation_lock()?;
+    let mut next = load()?;
+    next.sound.constant_volume = on;
+    if let Some(custom) = next.custom_sound.as_mut() {
+        custom.constant_volume = on;
+    }
+    let next = validate(next)?;
+    save(&next)?;
+    Ok(next)
 }
 
 pub fn set_mode(mode: SpatialMode) -> Result<SpatialProfile, String> {

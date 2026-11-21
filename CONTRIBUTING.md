@@ -1,6 +1,6 @@
 # Contributing
 
-JamBaLinux SonicCore accepts reproducible, safety-scoped Linux headset
+JamBaLinux Sonic Core accepts reproducible, safety-scoped Linux headset
 research. The first supported device is the JBL Quantum 810 Wireless. Keep
 software branding separate from actual hardware and protocol names; see
 [rebranding](docs/rebranding.md).

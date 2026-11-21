@@ -45,14 +45,18 @@ write() {
 
 case "${1:-}" in
     --install)
-        write Description "JamBaLinux SonicCore"
+        write Description "JamBaLinux Sonic Core"
         # The qml6 runtime's generic class plus the exact window title.
         write wmclass "org.qt-project.qml6"
         write wmclassmatch 1
         write wmclasscomplete false
-        write title "JamBaLinux SonicCore"
+        write title "JamBaLinux Sonic Core"
         write titlematch 1
         write types 1
+        # Taskbar and window icon: the app's own desktop entry (the qml6
+        # runtime would otherwise show a generic icon).
+        write desktopfile jambalinux-soniccore
+        write desktopfilerule 2
         # 4 = Remember: KWin keeps the last value the user left.
         write positionrule 4
         write sizerule 4
@@ -65,7 +69,7 @@ case "${1:-}" in
         ;;
     --uninstall)
         kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key Description --delete
-        for key in wmclass wmclassmatch wmclasscomplete title titlematch types positionrule \
+        for key in wmclass wmclassmatch wmclasscomplete title titlematch types desktopfile desktopfilerule positionrule \
             sizerule screenrule maximizehorizrule maximizevertrule position size screen \
             maximizehoriz maximizevert; do
             kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key "$key" --delete

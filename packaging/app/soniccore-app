@@ -14,7 +14,13 @@ fi
 QML="$(command -v qml6 || command -v qml || true)"
 [[ -n "$QML" ]] || { printf 'erro: qml6 (Qt Declarative) não encontrado\n' >&2; exit 1; }
 
+# The qml6 runtime would give the window Qt's own logo; use the app icon.
+ICON_ARGS=()
+ICON="$APP_DIR/jambalinux-soniccore.svg"
+[[ -f "$ICON" ]] && ICON_ARGS=(--qwindowicon "$ICON")
+
 if [[ "${1:-}" == "--tray" ]]; then
-    exec "$QML" --apptype widget "$MAIN" -- --tray
+    exec "$QML" "${ICON_ARGS[@]}" --transparent --apptype widget "$MAIN" -- --tray
 fi
-exec "$QML" --apptype widget "$MAIN"
+# --transparent gives the window an alpha channel for the see-through background.
+exec "$QML" "${ICON_ARGS[@]}" --transparent --apptype widget "$MAIN"

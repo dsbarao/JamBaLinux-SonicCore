@@ -3,7 +3,7 @@ name = "jambalinux-soniccore"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "JamBaLinux SonicCore — open-source gaming headset control and audio platform for Linux"
+description = "JamBaLinux Sonic Core — open-source gaming headset control and audio platform for Linux"
 
 [[bin]]
 name = "soniccore"

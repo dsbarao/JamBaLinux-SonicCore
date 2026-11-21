@@ -225,6 +225,51 @@ fn decibels(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
+/// Loudness model for "Volume constante", per ear, for typical stereo music
+/// after PipeWire's PSD upmix. Channel energies relative to one front
+/// channel (measured on a stereo probe through the upmix; the centre is
+/// counted after the voice high-pass):
+const UPMIX_ENERGY_FRONT: f32 = 1.0;
+const UPMIX_ENERGY_CENTRE: f32 = 1.2;
+const UPMIX_ENERGY_LFE: f32 = 0.33;
+const UPMIX_ENERGY_SIDE: f32 = 0.5;
+const UPMIX_ENERGY_REAR: f32 = 0.05;
+/// HRIR energy reaching one ear from each source (the HeSuVi 7.1 set this
+/// project was measured with): same-side front, far front, centre/LFE,
+/// same-side side, far side, same-side rear, far rear. The 3D path is about
+/// 6 dB louder than the plain one with these.
+const HRIR_ENERGY: [f32; 7] = [3.559, 0.152, 1.456, 3.667, 0.032, 1.049, 0.114];
+/// Share of music energy below the bass shelf.
+const LOW_BAND_SHARE: f32 = 0.35;
+
+fn path_energies(sound: &SoundSettings) -> (f32, f32) {
+    let centre = decibels(sound.dialogue_db).powi(2);
+    let lfe = decibels(sound.bass_db).powi(2);
+    let surround = decibels(sound.surround_db).powi(2);
+    let [near, far, middle, side_near, side_far, rear_near, rear_far] = HRIR_ENERGY;
+    let wet = UPMIX_ENERGY_FRONT * (near + far)
+        + UPMIX_ENERGY_CENTRE * centre * middle
+        + UPMIX_ENERGY_LFE * lfe * middle
+        + UPMIX_ENERGY_SIDE * surround * (side_near + side_far)
+        + UPMIX_ENERGY_REAR * surround * (rear_near + rear_far);
+    let dry = UPMIX_ENERGY_FRONT
+        + UPMIX_ENERGY_CENTRE * DRY_CENTRE.powi(2) * centre
+        + (UPMIX_ENERGY_SIDE + UPMIX_ENERGY_REAR) * 0.5 * surround;
+    // The bass shelf scales the low band of both paths.
+    let shelf = (1.0 - LOW_BAND_SHARE) + LOW_BAND_SHARE * lfe;
+    (wet * shelf, dry * shelf)
+}
+
+/// Output gain that keeps a mode as loud as plain stereo at unity levels.
+pub(crate) fn loudness_makeup(enabled: bool, sound: &SoundSettings) -> f32 {
+    let (_, reference) = path_energies(&SoundSettings::NEUTRAL);
+    let (wet, dry) = path_energies(sound);
+    let share = if enabled { sound.intensity } else { 0.0 };
+    // Both paths carry the same music, so their amplitudes add.
+    let amplitude = share * wet.sqrt() + (1.0 - share) * dry.sqrt();
+    (reference.sqrt() / amplitude.max(1e-3)).clamp(0.25, 2.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SpatialMix {
     pub wet: [f32; 2],
@@ -249,14 +294,19 @@ impl SpatialMix {
     /// The gate plus a listening mode's levels. Disabled, the plain stereo
     /// path plays alone, but the channel levels still follow the mode.
     pub(crate) fn for_sound(enabled: bool, sound: &SoundSettings) -> Self {
-        let wet = if enabled { sound.intensity } else { 0.0 };
+        let share = if enabled { sound.intensity } else { 0.0 };
+        let makeup = if sound.constant_volume {
+            loudness_makeup(enabled, sound)
+        } else {
+            1.0
+        };
         let centre = decibels(sound.dialogue_db);
         let lfe = decibels(sound.bass_db);
         let surround = decibels(sound.surround_db);
         let dry_centre = DRY_CENTRE * centre;
         Self {
-            wet: [wet; 2],
-            dry: [1.0 - wet; 2],
+            wet: [share * makeup; 2],
+            dry: [(1.0 - share) * makeup; 2],
             sound: [
                 centre,
                 centre,
@@ -1179,8 +1229,8 @@ mod tests {
         // Music keeps most of the plain stereo: 40 % 3D.
         let music = crate::spatial::ListeningMode::Music.settings().unwrap();
         let music_mix = SpatialMix::for_sound(true, &music);
-        assert_eq!(music_mix.wet, [0.4; 2]);
-        assert!((music_mix.dry[0] - 0.6).abs() < 1e-6);
+        let share = music_mix.wet[0] / (music_mix.wet[0] + music_mix.dry[0]);
+        assert!((share - 0.4).abs() < 1e-6, "{share}");
 
         let config = render_filter_chain_config_with_sound(
             Path::new(TEST_HRIR),
@@ -1208,5 +1258,34 @@ mod tests {
             .unwrap(),
             render_filter_chain_config(Path::new(TEST_HRIR), true).unwrap()
         );
+    }
+
+    #[test]
+    fn constant_volume_brings_every_mode_to_the_plain_stereo_loudness() {
+        use crate::spatial::{ListeningMode, SoundSettings};
+        let reference = path_energies(&SoundSettings::NEUTRAL).1.sqrt();
+        let loudness = |enabled: bool, sound: &SoundSettings| {
+            let (wet, dry) = path_energies(sound);
+            let mix = SpatialMix::for_sound(enabled, sound);
+            mix.wet[0] * wet.sqrt() + mix.dry[0] * dry.sqrt()
+        };
+        // The 3D path alone is about 6 dB louder than the plain one.
+        let (wet, dry) = path_energies(&SoundSettings::NEUTRAL);
+        let jump = 10.0 * (wet / dry).log10();
+        assert!((5.0..7.0).contains(&jump), "{jump} dB");
+
+        for mode in [ListeningMode::Game, ListeningMode::Cinema, ListeningMode::Music] {
+            let sound = mode.settings().unwrap();
+            for enabled in [true, false] {
+                let level = loudness(enabled, &sound);
+                assert!((level / reference - 1.0).abs() < 0.01, "{mode:?} {enabled}: {level}");
+            }
+        }
+        // Off, the levels are left alone.
+        let mut free = ListeningMode::Game.settings().unwrap();
+        free.constant_volume = false;
+        assert_eq!(SpatialMix::for_sound(true, &free).wet, [1.0; 2]);
+        // The neutral target (old graphs, tests) is untouched.
+        assert_eq!(SpatialMix::target(true).wet, [1.0; 2]);
     }
 }

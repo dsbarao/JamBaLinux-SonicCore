@@ -122,17 +122,34 @@ fn node_id_and_serial(node: &Value) -> Result<(u32, Option<u64>), String> {
     Ok((id, serial))
 }
 
+/// Steps for a transition: a small one (a slider being dragged) is applied
+/// at once, so the sound follows the hand; a large one (a mode change, the
+/// 3D switched on or off) keeps the click-free ramp.
+fn ramp_steps(from: SpatialMix, to: SpatialMix) -> u32 {
+    let small = from
+        .controls()
+        .into_iter()
+        .zip(to.controls())
+        .all(|((name, start), (_, end))| {
+            // Shelf gains are in dB; the rest are mixer factors.
+            let limit = if name.ends_with(":Gain") { 1.0 } else { 0.15 };
+            (end - start).abs() <= limit
+        });
+    if small { 1 } else { MIX_RAMP_STEPS }
+}
+
 fn set_mix(node_id: u32, from: SpatialMix, to: SpatialMix) -> Result<(), String> {
     let node = node_id.to_string();
-    for step in 1..=MIX_RAMP_STEPS {
-        let alpha = step as f32 / MIX_RAMP_STEPS as f32;
+    let steps = ramp_steps(from, to);
+    for step in 1..=steps {
+        let alpha = step as f32 / steps as f32;
         let mix = SpatialMix::interpolate(from, to, alpha);
         let payload = mix_payload(mix);
         let output = command_output("pw-cli", &["set-param", &node, "Props", &payload])?;
         if !output.status.success() {
             return Err(command_failure("pw-cli set-param", &output));
         }
-        if step < MIX_RAMP_STEPS {
+        if step < steps {
             thread::sleep(MIX_RAMP_INTERVAL);
         }
     }
@@ -1903,5 +1920,19 @@ mod tests {
         assert!(calls[0].starts_with("pw-cli set-param 60 Props"));
         assert!(calls[0].contains("psd"));
         assert!(streams_needing_upmix(&[]).is_empty());
+    }
+
+    #[test]
+    fn small_changes_skip_the_ramp_and_large_ones_keep_it() {
+        let game = crate::spatial::ListeningMode::Game.settings().unwrap();
+        let mut nudged = game;
+        nudged.bass_db += 0.5;
+        let from = SpatialMix::for_sound(true, &game);
+        assert_eq!(ramp_steps(from, SpatialMix::for_sound(true, &nudged)), 1);
+        // Switching the 3D off moves the wet path a lot.
+        assert_eq!(ramp_steps(from, SpatialMix::for_sound(false, &game)), MIX_RAMP_STEPS);
+        let mut lifted = game;
+        lifted.bass_db += 6.0;
+        assert_eq!(ramp_steps(from, SpatialMix::for_sound(true, &lifted)), MIX_RAMP_STEPS);
     }
 }

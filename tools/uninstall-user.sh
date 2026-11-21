@@ -11,6 +11,7 @@ readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 readonly AUTOSTART_TARGET="$HOME/.config/autostart/jambalinux-soniccore.desktop"
 readonly APP_TARGET="$HOME/.local/share/jambalinux-soniccore/app"
+readonly ICON_TARGET="$HOME/.local/share/icons/hicolor/scalable/apps/jambalinux-soniccore.svg"
 readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"
 readonly METER_SERVICE_TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.jambalinux.soniccore.Meter.service"
 readonly OPENRGB_PLUGIN="${XDG_CONFIG_HOME:-$HOME/.config}/OpenRGB/plugins/libJamBaLinuxSonicCorePlugin.so"
@@ -24,6 +25,7 @@ show_plan() {
     printf '  %s\n' "$LAUNCHER_TARGET"
     printf '  %s\n' "$AUTOSTART_TARGET"
     printf '  %s\n' "$APP_TARGET"
+    printf '  %s\n' "$ICON_TARGET"
     printf '  %s\n' "$CARGO_BINARY"
     printf '  %s\n' "$METER_SERVICE_TARGET"
     printf '  %s (plugin do OpenRGB, se instalado)\n' "$OPENRGB_PLUGIN"
@@ -54,6 +56,7 @@ if command -v kpackagetool6 >/dev/null 2>&1 && [[ -d "$PLASMOID_TARGET" ]]; then
 fi
 
 rm -rf -- "$APP_TARGET"
+rm -f -- "$ICON_TARGET"
 "$SCRIPT_DIR/kwin-window-rule.sh" --uninstall || true
 rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET" "$AUTOSTART_TARGET" "$METER_SERVICE_TARGET" "$OPENRGB_PLUGIN"
 # Files edited outside JamBaLinux are kept and reported; the rest still goes.
@@ -71,4 +74,4 @@ if [[ "$overlay_kept" -ne 0 ]]; then
     printf '%s\n' 'Remoção parcial: arquivos do overlay ACP modificados fora do JamBaLinux foram mantidos (veja acima).' >&2
     exit 1
 fi
-printf '%s\n' 'Componentes do JamBaLinux SonicCore instalados para o usuário foram removidos.'
+printf '%s\n' 'Componentes do JamBaLinux Sonic Core instalados para o usuário foram removidos.'

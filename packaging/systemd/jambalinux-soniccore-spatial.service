@@ -1,5 +1,5 @@
 [Unit]
-Description=JamBaLinux SonicCore spatial PipeWire lifecycle supervisor
+Description=JamBaLinux Sonic Core spatial PipeWire lifecycle supervisor
 After=graphical-session.target pipewire.service pipewire-pulse.service wireplumber.service jambalinux-soniccore-equalizer.service
 Wants=pipewire.service pipewire-pulse.service wireplumber.service jambalinux-soniccore-equalizer.service
 

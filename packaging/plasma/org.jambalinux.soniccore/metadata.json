@@ -12,7 +12,7 @@
     "Icon": "audio-headphones",
     "Id": "org.jambalinux.soniccore",
     "License": "MIT",
-    "Name": "JamBaLinux SonicCore",
+    "Name": "JamBaLinux Sonic Core",
     "Version": "0.2.0",
     "Website": "https://github.com/dsbarao/JamBaLinux-SonicCore"
   },

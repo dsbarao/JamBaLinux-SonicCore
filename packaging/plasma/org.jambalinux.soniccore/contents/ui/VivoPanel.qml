@@ -58,7 +58,9 @@ Item {
     property real dashPhase: 0
     property real chargePhase: 0
 
-    implicitHeight: Kirigami.Units.gridUnit * 15
+    // As tall as what it shows, so the status line below never sits on top
+    // of the spectrum.
+    implicitHeight: panelColumn.implicitHeight + Kirigami.Units.smallSpacing
 
     function mix(first, second, amount) {
         return Qt.rgba(first.r + (second.r - first.r) * amount,
@@ -176,6 +178,7 @@ Item {
     }
 
     ColumnLayout {
+        id: panelColumn
         anchors.fill: parent
         spacing: Kirigami.Units.smallSpacing
 
@@ -416,6 +419,7 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: Kirigami.Units.gridUnit * 3
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 3.5
 
             Row {
                 id: bars

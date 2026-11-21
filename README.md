@@ -1,16 +1,22 @@
-# JamBaLinux SonicCore
+<p align="center">
+  <img src="packaging/brand/jambalinux-soniccore-256.png" alt="" width="128">
+  <br>
+  <img src="packaging/brand/wordmark.png" alt="JamBaLinux Sonic Core" width="480">
+</p>
+
+# JamBaLinux Sonic Core
 
 Open-source gaming headset control and audio platform for Linux.
 
 **First supported device: JBL Quantum 810 Wireless.**
 
-JamBaLinux SonicCore began with safe device detection and now includes
+JamBaLinux Sonic Core began with safe device detection and now includes
 HID/USB integration, state monitoring, lighting, and strictly allowlisted
 headset controls. Its independent identity leaves room for additional devices
 while keeping host-side PipeWire audio processing separate from device
 protocol controls.
 
-> JamBaLinux SonicCore is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Harman International or JBL. JBL, Quantum, and related product names are trademarks of their respective owners.
+> JamBaLinux Sonic Core is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Harman International or JBL. JBL, Quantum, and related product names are trademarks of their respective owners.
 
 Technical identifiers use `jambalinux-soniccore`: the CLI is `soniccore`, the
 daemon is `soniccore-daemon`, and the service is `jambalinux-soniccore.service`.
@@ -159,7 +165,7 @@ install -Dm644 packaging/kde/jambalinux-soniccore.desktop \
   "$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 ```
 
-It then appears in the application menu as **JamBaLinux SonicCore**.
+It then appears in the application menu as **JamBaLinux Sonic Core**.
 
 ### Plasma 6 panel widget
 
@@ -250,7 +256,7 @@ kpackagetool6 --type Plasma/Applet --upgrade \
 ```
 
 Then enter Plasma edit mode, choose **Add Widgets**, search for
-**JamBaLinux SonicCore**, and drag it to the panel. The widget invokes only
+**JamBaLinux Sonic Core**, and drag it to the panel. The widget invokes only
 allowlisted `soniccore` commands. Its popup includes expandable controls
 for ambient mode (off/ANC/TalkThru), global lighting (on/off), an HSV color
 picker with five segments per zone, four effects, four animation speeds, and
@@ -576,7 +582,7 @@ percentage (90%, then 85%).
 The following is a conceptual direction, not a list of implemented modules:
 
 ```text
-JamBaLinux SonicCore
+JamBaLinux Sonic Core
 ├── Device Control
 │   ├── Battery
 │   ├── ANC / TalkThru

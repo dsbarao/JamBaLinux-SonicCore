@@ -251,7 +251,7 @@ impl Capture {
                 "-P",
                 // A passive capture of the sink's monitor: it never keeps the
                 // device awake and is never routed into the playback graph.
-                "{ stream.capture.sink = true node.passive = true node.name = \"jambalinux-soniccore-meter\" node.description = \"JamBaLinux SonicCore meter\" }",
+                "{ stream.capture.sink = true node.passive = true node.name = \"jambalinux-soniccore-meter\" node.description = \"JamBaLinux Sonic Core meter\" }",
                 "--target",
                 &game,
                 "-",
