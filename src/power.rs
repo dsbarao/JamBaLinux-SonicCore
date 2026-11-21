@@ -32,9 +32,12 @@ const TICK: Duration = Duration::from_secs(15);
 /// Lights come back after a low-battery economy only this far above the
 /// threshold, so they do not flicker around it.
 const RESTORE_MARGIN: u8 = 5;
-/// A gap this long between two samples means the headset was off or out of
-/// range; it is not counted as discharge time.
-const MAX_INTERVAL_HOURS: f64 = 3.0;
+/// While the headset is on, a sample is written at least this often even
+/// when nothing changed: the battery moves in 5% steps, which can take hours.
+const HEARTBEAT_MS: u128 = 30 * 60_000;
+/// A gap this long between two samples (well past the heartbeat) means the
+/// headset was off or out of range; it is not counted as discharge time.
+const MAX_INTERVAL_HOURS: f64 = 0.75;
 
 pub const REASON_LOW_BATTERY: &str = "low-battery";
 pub const REASON_IDLE: &str = "idle";
@@ -135,6 +138,11 @@ fn color_brightness(color: &str) -> Option<f32> {
 }
 
 fn sample_from(cached: &state::RuntimeState, at_ms: u128) -> Option<Sample> {
+    // A headset that is off keeps its last reading on screen; nothing is
+    // recorded until it comes back, so the time off is a gap.
+    if cached.headset_connected == Some(false) {
+        return None;
+    }
     let battery = cached.battery_percent?;
     let colors = cached
         .logo_colors
@@ -160,6 +168,14 @@ fn significant_change(previous: &Sample, next: &Sample) -> bool {
     previous.battery != next.battery
         || previous.charging != next.charging
         || previous.lighting != next.lighting
+}
+
+/// Whether `next` goes into the history: on a change, or as a heartbeat.
+fn should_record(previous: Option<&Sample>, next: &Sample) -> bool {
+    previous.is_none_or(|previous| {
+        significant_change(previous, next)
+            || next.at_ms.saturating_sub(previous.at_ms) >= HEARTBEAT_MS
+    })
 }
 
 fn append_sample(sample: &Sample) -> Result<(), String> {
@@ -416,9 +432,7 @@ pub fn spawn_policy() -> Result<(), String> {
                 };
 
                 if let Some(sample) = sample_from(&cached, now_ms())
-                    && last_sample
-                        .as_ref()
-                        .is_none_or(|previous| significant_change(previous, &sample))
+                    && should_record(last_sample.as_ref(), &sample)
                 {
                     if let Err(error) = append_sample(&sample) {
                         eprintln!("battery history: {error}");
@@ -623,6 +637,34 @@ mod tests {
         assert_eq!(summary.lights_on, None, "1 point in 20 min is not enough");
         assert_eq!(summary.hours_left, None);
         assert_eq!(summarize(&[], 0), Summary::default());
+    }
+
+    #[test]
+    fn a_heartbeat_keeps_slow_steps_measurable() {
+        let first = sample(0, 70, false, true);
+        assert!(should_record(None, &first));
+        assert!(!should_record(Some(&first), &sample(29, 70, false, true)));
+        assert!(should_record(Some(&first), &sample(30, 70, false, true)));
+        assert!(should_record(Some(&first), &sample(1, 65, false, true)));
+
+        // 5% in 2.5 hours, recorded every 30 minutes: 2%/h, not discarded.
+        let samples = (0..=5)
+            .map(|step| sample(step * 30, if step == 5 { 65 } else { 70 }, false, true))
+            .collect::<Vec<_>>();
+        let summary = summarize(&samples, 150 * 60_000);
+        assert!((summary.lights_on.unwrap().percent_per_hour - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn nothing_is_recorded_while_the_headset_is_off() {
+        let mut cached = state::RuntimeState {
+            battery_percent: Some(70),
+            headset_connected: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(sample_from(&cached, 0), None);
+        cached.headset_connected = Some(true);
+        assert_eq!(sample_from(&cached, 0).map(|sample| sample.battery), Some(70));
     }
 
     fn config(low: Option<u8>, idle: Option<u32>) -> PowerConfig {
