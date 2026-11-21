@@ -976,7 +976,11 @@ fn spatial_error(
 
 /// Reports what the observable filter controls are actually doing, rather
 /// than echoing the persisted gate while a live update is pending or failed.
-fn spatial_processing_mode(nodes: &[Value], input: Option<&Target>) -> &'static str {
+fn spatial_processing_mode(
+    nodes: &[Value],
+    input: Option<&Target>,
+    sound: &crate::spatial::SoundSettings,
+) -> &'static str {
     let Some(input) = input else { return "unknown" };
     let Some(node) = nodes
         .iter()
@@ -985,7 +989,7 @@ fn spatial_processing_mode(nodes: &[Value], input: Option<&Target>) -> &'static 
         return "unknown";
     };
     spatial_mix(node)
-        .map(|mix| mix.processing_mode().as_str())
+        .map(|mix| mix.processing_mode(sound).as_str())
         .unwrap_or("unknown")
 }
 
@@ -1019,7 +1023,7 @@ pub fn spatial_status(
             input = single_named_node(&nodes, SPATIAL_SINK_NODE);
             output = single_named_node(&nodes, SPATIAL_OUTPUT_NODE);
             target = single_named_audio_sink(&nodes, TARGET_EQUALIZER_SINK);
-            processing_mode = spatial_processing_mode(&nodes, input.as_ref());
+            processing_mode = spatial_processing_mode(&nodes, input.as_ref(), &profile.sound);
             input_format_7_1 = input
                 .as_ref()
                 .and_then(|node| audio_channels(&nodes, node.id))
@@ -1202,10 +1206,11 @@ fn graph_applied_bands(nodes: &[Value], node_id: u32) -> Option<Vec<Band>> {
 }
 
 fn profile_matches(applied: &[Band], expected: &EqualizerProfile) -> bool {
-    applied.len() == expected.bands.len()
+    let expected = expected.dsp_bands();
+    applied.len() == expected.len()
         && applied
             .iter()
-            .zip(&expected.bands)
+            .zip(&expected)
             .all(|(actual, expected)| {
                 actual.frequency_hz == expected.frequency_hz
                     && (actual.gain_db - expected.gain_db).abs() <= 0.05
@@ -1225,7 +1230,7 @@ fn gains_match(applied: &[Band], expected: &[f32]) -> bool {
 fn render(profile: &EqualizerProfile, target: &str) -> String {
     let mut nodes = String::new();
     let mut links = String::new();
-    for (index, band) in profile.bands.iter().enumerate() {
+    for (index, band) in profile.dsp_bands().iter().enumerate() {
         // Every band is a peaking filter centred on its frequency. Shelves
         // at 31 Hz and 16 kHz put their midpoint (+6 dB at +12 dB) on the
         // band and act almost only below 45 Hz or above 14 kHz, so those two
@@ -1873,7 +1878,7 @@ fn update_controls(node_id: u32, gains: &[f32]) -> Result<(), String> {
 }
 
 fn profile_gains(profile: &EqualizerProfile) -> Vec<f32> {
-    profile.bands.iter().map(|band| band.gain_db).collect()
+    profile.dsp_bands().iter().map(|band| band.gain_db).collect()
 }
 
 /// Steps needed so no band moves more than RAMP_MAX_STEP_DB per audio cycle;
@@ -2472,6 +2477,17 @@ mod tests {
             "type": "PipeWire:Interface:Node",
             "info": { "props": properties }
         })
+    }
+
+    #[test]
+    fn a_bypassed_profile_renders_and_verifies_flat() {
+        let mut profile = crate::equalizer::preset_profile("bass-boost").unwrap();
+        profile.bypassed = true;
+        let graph = render(&profile, "alsa_output.usb_Quantum_Game");
+        assert_eq!(graph.matches("\"Gain\" = 0.0").count(), 10);
+        assert!(profile_gains(&profile).iter().all(|gain| *gain == 0.0));
+        assert!(profile_matches(&profile.dsp_bands(), &profile));
+        assert!(!profile_matches(&profile.bands, &profile));
     }
 
     #[test]
@@ -3341,16 +3357,17 @@ mod tests {
         let binaural = controls(1.0, 0.0);
         let bypass = controls(0.0, 1.0);
         let transitioning = controls(0.5, 0.5);
+        let neutral = crate::spatial::SoundSettings::NEUTRAL;
         assert_eq!(
-            spatial_processing_mode(binaural.as_array().unwrap(), Some(&input)),
+            spatial_processing_mode(binaural.as_array().unwrap(), Some(&input), &neutral),
             "binaural"
         );
         assert_eq!(
-            spatial_processing_mode(bypass.as_array().unwrap(), Some(&input)),
+            spatial_processing_mode(bypass.as_array().unwrap(), Some(&input), &neutral),
             "bypass"
         );
         assert_eq!(
-            spatial_processing_mode(transitioning.as_array().unwrap(), Some(&input)),
+            spatial_processing_mode(transitioning.as_array().unwrap(), Some(&input), &neutral),
             "transitioning"
         );
     }

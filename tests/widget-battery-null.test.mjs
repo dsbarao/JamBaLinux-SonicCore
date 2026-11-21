@@ -81,5 +81,8 @@ test("direct and cached statuses share the result normalization and unknown UI",
     assert.match(widgetSource,
         /visible: root\.batteryPercent < 0\n\s+text: "—"/)
     assert.match(widgetSource,
-        /text: root\.batteryPercent >= 0 \? `\$\{root\.batteryPercent\}%` : "—"/)
+        /: root\.batteryPercent >= 0 \? `\$\{root\.batteryPercent\}%` : "—"/)
+    // Off, the dongle's last reading is stale: no percent is shown.
+    assert.match(widgetSource,
+        /text: root\.headsetConnected === false\n\s+\? \(root\.charging \? "Desligado · carregando" : "Desligado"\)/)
 })

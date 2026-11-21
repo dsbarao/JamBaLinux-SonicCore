@@ -14,6 +14,10 @@ readonly SPATIAL_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-sonic
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore.desktop"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
+readonly AUTOSTART_SOURCE="$PROJECT_DIR/packaging/kde/jambalinux-soniccore-autostart.desktop"
+readonly AUTOSTART_TARGET="$HOME/.config/autostart/jambalinux-soniccore.desktop"
+readonly APP_SOURCE="$PROJECT_DIR/packaging/app"
+readonly APP_TARGET="$HOME/.local/share/jambalinux-soniccore/app"
 readonly METER_SERVICE_SOURCE="$PROJECT_DIR/packaging/dbus/org.jambalinux.soniccore.Meter.service"
 readonly METER_SERVICE_TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.jambalinux.soniccore.Meter.service"
 readonly CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -33,7 +37,6 @@ require_command() {
 
 check_prerequisites() {
     require_command cargo
-    require_command kpackagetool6
     require_command pactl
     require_command pipewire
     require_command pw-link
@@ -46,6 +49,8 @@ check_prerequisites() {
     [[ -f "$EQUALIZER_SERVICE_SOURCE" ]] || fail "serviço systemd do equalizador não encontrado"
     [[ -f "$SPATIAL_SERVICE_SOURCE" ]] || fail "serviço systemd espacial não encontrado"
     [[ -f "$LAUNCHER_SOURCE" ]] || fail "lançador KDE não encontrado"
+    [[ -f "$AUTOSTART_SOURCE" ]] || fail "início automático do app não encontrado"
+    [[ -f "$APP_SOURCE/main.qml" && -x "$APP_SOURCE/soniccore-app" ]] || fail "app SonicCore não encontrado"
     [[ -f "$METER_SERVICE_SOURCE" ]] || fail "ativação D-Bus do medidor não encontrada"
     [[ -x "$ACP_OVERLAY" ]] || fail "script do overlay ACP não encontrado"
     # The binary path is written into systemd units, a shell command and a
@@ -85,13 +90,11 @@ stage_packaging() {
     sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$SERVICE_SOURCE" > "$SERVICE_INSTALL"
     sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$EQUALIZER_SERVICE_SOURCE" > "$EQUALIZER_SERVICE_INSTALL"
     sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$SPATIAL_SERVICE_SOURCE" > "$SPATIAL_SERVICE_INSTALL"
-    LAUNCHER_INSTALL="$STAGE_DIR/$(basename -- "$LAUNCHER_SOURCE")"
-    sed "s|~/.cargo/bin/soniccore|$CARGO_BIN_DIR/soniccore|" "$LAUNCHER_SOURCE" > "$LAUNCHER_INSTALL"
     local staged
     for staged in "$PLASMOID_INSTALL/contents/ui/SonicCore.qml" \
         "$PLASMOID_INSTALL/contents/ui/configBattery.qml" \
         "$PLASMOID_INSTALL/contents/ui/configOutput.qml" "$SERVICE_INSTALL" \
-        "$EQUALIZER_SERVICE_INSTALL" "$SPATIAL_SERVICE_INSTALL" "$LAUNCHER_INSTALL"; do
+        "$EQUALIZER_SERVICE_INSTALL" "$SPATIAL_SERVICE_INSTALL"; do
         grep -Fq "$CARGO_BIN_DIR/soniccore" "$staged" \
             || fail "não foi possível apontar $staged para $CARGO_BIN_DIR"
         ! grep -Fq '.cargo/bin' "$staged" || [[ "$CARGO_BIN_DIR" == *.cargo/bin* ]] \
@@ -115,16 +118,40 @@ cd -- "$PROJECT_DIR"
 cargo install --path . --bins --force
 [[ -x "$CARGO_BINARY" ]] || fail "soniccore não foi encontrado em $CARGO_BINARY após a instalação"
 
-if [[ -d "$PLASMOID_TARGET" ]]; then
-    kpackagetool6 --type Plasma/Applet --upgrade "$PLASMOID_INSTALL"
-else
-    kpackagetool6 --type Plasma/Applet --install "$PLASMOID_INSTALL"
-fi
+# SonicCore is an app now; the Plasma widget it replaced is taken off the
+# panels and uninstalled. Tray icons are capped at 22 px, the widget is gone.
+remove_old_widget() {
+    [[ -d "$PLASMOID_TARGET" ]] || return 0
+    local qdbus
+    qdbus="$(command -v qdbus6 || command -v qdbus || true)"
+    if [[ -n "$qdbus" ]]; then
+        "$qdbus" org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript \
+            "panels().concat(desktops()).forEach(c => c.widgets('$PLASMOID_ID').forEach(w => w.remove()))" \
+            >/dev/null 2>&1 || printf 'aviso: remova o widget antigo do painel manualmente.\n' >&2
+    fi
+    if command -v kpackagetool6 >/dev/null 2>&1; then
+        kpackagetool6 --type Plasma/Applet --remove "$PLASMOID_ID" >/dev/null 2>&1 || true
+    fi
+    rm -rf -- "$PLASMOID_TARGET"
+}
+remove_old_widget
 
 install -Dm644 "$SERVICE_INSTALL" "$SERVICE_TARGET"
 install -Dm644 "$EQUALIZER_SERVICE_INSTALL" "$EQUALIZER_SERVICE_TARGET"
 install -Dm644 "$SPATIAL_SERVICE_INSTALL" "$SPATIAL_SERVICE_TARGET"
 install -Dm644 "$LAUNCHER_INSTALL" "$LAUNCHER_TARGET"
+install -Dm644 "$AUTOSTART_SOURCE" "$AUTOSTART_TARGET"
+# The app carries its own copy of the interface (QML, shaders, images).
+rm -rf -- "$APP_TARGET"
+install -Dm755 "$APP_SOURCE/soniccore-app" "$APP_TARGET/soniccore-app"
+sed "s|^import \"../plasma/$PLASMOID_ID/contents/ui\"\$|import \"contents/ui\"|" \
+    "$APP_SOURCE/main.qml" > "$APP_TARGET/main.qml"
+grep -Fqx 'import "contents/ui"' "$APP_TARGET/main.qml" \
+    || fail "não foi possível apontar o app para a interface instalada"
+cp -r -- "$APP_SOURCE/icons" "$APP_TARGET/icons"
+cp -r -- "$PLASMOID_INSTALL/contents" "$APP_TARGET/contents"
+# KWin remembers the window's place, size and monitor (Wayland apps cannot).
+"$SCRIPT_DIR/kwin-window-rule.sh" --install || printf 'aviso: não foi possível criar a regra de janela do KWin.\n' >&2
 # D-Bus activation needs an absolute Exec path (the path was validated above).
 mkdir -p -- "$(dirname -- "$METER_SERVICE_TARGET")"
 sed "s|@SONICCORE@|$CARGO_BINARY|" "$METER_SERVICE_SOURCE" > "$METER_SERVICE_TARGET"
@@ -151,5 +178,8 @@ systemctl --user start jambalinux-soniccore-spatial.service
 "$ACP_OVERLAY" --install
 
 printf '\nJamBaLinux SonicCore instalado para o usuário atual.\n'
+printf 'O app abre pelo menu (JamBaLinux SonicCore) e inicia na bandeja ao entrar na sessão.\n'
+command -v qml6 >/dev/null 2>&1 || command -v qml >/dev/null 2>&1 \
+    || printf 'aviso: qml6 não encontrado; instale o Qt Declarative para abrir o app.\n' >&2
 printf 'O Plasma não foi reiniciado automaticamente.\n'
 printf 'A regra udev privilegiada também não foi alterada. Consulte o README se houver erro de permissão.\n'

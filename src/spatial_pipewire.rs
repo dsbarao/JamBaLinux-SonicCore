@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::spatial;
 use crate::spatial::graph::{
-    SPATIAL_DRY_CONTROLS, SPATIAL_OUTPUT_NODE, SPATIAL_SINK_NODE, SPATIAL_WET_CONTROLS, SpatialMix,
+    SPATIAL_OUTPUT_NODE, SPATIAL_SINK_NODE, SpatialMix,
     TARGET_EQUALIZER_SINK, spatial_mix,
 };
 
@@ -87,10 +87,9 @@ fn pw_dump() -> Result<Vec<Value>, String> {
 /// The only live controls that change when the spatial gate changes. Keeping
 /// the capture sink and its links alive avoids a client-visible device change.
 fn mix_payload(mix: SpatialMix) -> String {
-    let controls = SPATIAL_WET_CONTROLS
+    let controls = mix
+        .controls()
         .into_iter()
-        .zip(mix.wet)
-        .chain(SPATIAL_DRY_CONTROLS.into_iter().zip(mix.dry))
         .map(|(control, value)| format!("\"{control}\" {value:.3}"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -127,17 +126,7 @@ fn set_mix(node_id: u32, from: SpatialMix, to: SpatialMix) -> Result<(), String>
     let node = node_id.to_string();
     for step in 1..=MIX_RAMP_STEPS {
         let alpha = step as f32 / MIX_RAMP_STEPS as f32;
-        let interpolate = |start: f32, end: f32| start + ((end - start) * alpha);
-        let mix = SpatialMix {
-            wet: [
-                interpolate(from.wet[0], to.wet[0]),
-                interpolate(from.wet[1], to.wet[1]),
-            ],
-            dry: [
-                interpolate(from.dry[0], to.dry[0]),
-                interpolate(from.dry[1], to.dry[1]),
-            ],
-        };
+        let mix = SpatialMix::interpolate(from, to, alpha);
         let payload = mix_payload(mix);
         let output = command_output("pw-cli", &["set-param", &node, "Props", &payload])?;
         if !output.status.success() {
@@ -154,8 +143,26 @@ fn set_mix(node_id: u32, from: SpatialMix, to: SpatialMix) -> Result<(), String>
 /// only after taking the mix lock: the supervisor must not use a gate value
 /// sampled before its expensive readiness preflight while a foreground CLI
 /// command has since persisted the opposite value.
-fn set_mix_if_graph_exists_with_target(
-    target: impl FnOnce() -> Result<bool, String>,
+/// What a caller asks the live controls to become: the bare gate (the
+/// built-in levels) or a saved profile with its listening mode.
+pub(crate) trait MixIntent {
+    fn mix(self) -> SpatialMix;
+}
+
+impl MixIntent for bool {
+    fn mix(self) -> SpatialMix {
+        SpatialMix::target(self)
+    }
+}
+
+impl MixIntent for spatial::SpatialProfile {
+    fn mix(self) -> SpatialMix {
+        SpatialMix::for_sound(self.enabled, &self.sound)
+    }
+}
+
+fn set_mix_if_graph_exists_with_target<I: MixIntent>(
+    target: impl FnOnce() -> Result<I, String>,
 ) -> Result<bool, String> {
     set_mix_if_graph_exists_observed(None, target)
 }
@@ -165,20 +172,20 @@ fn set_mix_if_graph_exists_with_target(
 /// snapshot already shows the target mix (the steady state) no further
 /// `pw-dump` is spent; any mismatch is re-read fresh under the lock before
 /// ramping, so a stale snapshot can never drive a ramp.
-fn set_mix_if_graph_exists_observed(
+fn set_mix_if_graph_exists_observed<I: MixIntent>(
     observed: Option<&[Value]>,
-    target: impl FnOnce() -> Result<bool, String>,
+    target: impl FnOnce() -> Result<I, String>,
 ) -> Result<bool, String> {
     // The CLI and the supervisor are separate processes.  Keep this guard for
     // the entire read/ramp/verify transaction rather than merely around each
     // `pw-cli` invocation, otherwise their individual ramp steps can
     // interleave and produce an audible bounce to stale intent.
     let _mix_lock = spatial::mix_lock()?;
-    let enabled = target()?;
+    let target = target()?.mix();
     if let Some(objects) = observed {
         match spatial_capture_node(objects)? {
             None => return Ok(false),
-            Some(node) if spatial_mix(node)?.matches(SpatialMix::target(enabled)) => {
+            Some(node) if spatial_mix(node)?.matches(target) => {
                 return Ok(true);
             }
             Some(_) => {}
@@ -190,7 +197,6 @@ fn set_mix_if_graph_exists_observed(
     };
     let (node_id, serial) = node_id_and_serial(node)?;
     let from = spatial_mix(node)?;
-    let target = SpatialMix::target(enabled);
     if from.matches(target) {
         return Ok(true);
     }
@@ -214,7 +220,7 @@ fn set_mix_if_graph_exists_observed(
 /// moves a stream, changes a link, or starts/stops a process, so it is safe on
 /// the CLI's immediate toggle path.
 pub fn set_mix_if_graph_exists() -> Result<bool, String> {
-    set_mix_if_graph_exists_with_target(|| spatial::load().map(|profile| profile.enabled))
+    set_mix_if_graph_exists_with_target(spatial::load)
 }
 
 fn pactl_json(args: &[&str]) -> Result<Value, String> {
@@ -349,6 +355,82 @@ fn repair_spatial_output_observed(objects: &[Value]) -> Result<bool, String> {
         pw_link_success(output, input)?;
     }
     Ok(true)
+}
+
+/// Stereo upmix for the apps playing into the 3D sink. PipeWire converts each
+/// stream to the sink's 7.1 layout in the stream itself, and the default
+/// method copies stereo to the front pair only: centre and LFE stay silent,
+/// so the Diálogos and Graves levels could not act on stereo games. PSD
+/// upmix derives them (and the rears) from the stereo image. Only streams
+/// linked to the spatial sink are touched, live, so no PipeWire restart (and
+/// no lost microphone in open apps) is needed.
+const UPMIX_PAYLOAD: &str = "{ params = [ \"channelmix.upmix\" true \"channelmix.upmix-method\" \"psd\" \"channelmix.lfe-cutoff\" 150.0 \"channelmix.fc-cutoff\" 12000.0 \"channelmix.rear-delay\" 12.0 ] }";
+
+/// Ids of the playback streams linked into the spatial sink whose upmix is
+/// not PSD yet.
+fn streams_needing_upmix(objects: &[Value]) -> Vec<u32> {
+    let Some(sink) = objects
+        .iter()
+        .find(|node| node_name(node) == Some(SPATIAL_SINK_NODE))
+        .and_then(|node| node.get("id").and_then(Value::as_u64))
+    else {
+        return Vec::new();
+    };
+    let sources = objects
+        .iter()
+        .filter(|object| {
+            object.get("type").and_then(Value::as_str) == Some("PipeWire:Interface:Link")
+        })
+        .filter_map(|link| {
+            let info = link.get("info")?;
+            (info.get("input-node-id")?.as_u64()? == sink)
+                .then(|| info.get("output-node-id")?.as_u64())
+                .flatten()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    objects
+        .iter()
+        .filter_map(|node| {
+            let id = node.get("id")?.as_u64()?;
+            if !sources.contains(&id) {
+                return None;
+            }
+            let info = node.get("info")?;
+            if info.get("props")?.get("media.class")?.as_str()? != "Stream/Output/Audio" {
+                return None;
+            }
+            let method = info
+                .get("params")
+                .and_then(|params| params.get("Props"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|props| props.get("params").and_then(Value::as_array))
+                .find_map(|pairs| {
+                    pairs.as_chunks::<2>().0.iter().find_map(|pair| {
+                        (pair[0].as_str() == Some("channelmix.upmix-method"))
+                            .then(|| pair[1].as_str())
+                            .flatten()
+                    })
+                });
+            (method != Some("psd")).then(|| u32::try_from(id).ok()).flatten()
+        })
+        .collect()
+}
+
+/// Best effort: a stream may end between the snapshot and the update.
+fn upmix_spatial_streams(objects: &[Value]) {
+    for id in streams_needing_upmix(objects) {
+        let node = id.to_string();
+        match command_output("pw-cli", &["set-param", &node, "Props", UPMIX_PAYLOAD]) {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "spatial supervisor: could not upmix stream {id}: {}",
+                command_failure("pw-cli set-param", &output)
+            ),
+            Err(error) => eprintln!("spatial supervisor: could not upmix stream {id}: {error}"),
+        }
+    }
 }
 
 fn disconnect_spatial_output() {
@@ -636,7 +718,12 @@ fn desired_config(objects: &[Value]) -> Result<Option<String>, String> {
         .dataset
         .hrir_path
         .ok_or("the validated spatial dataset did not report an HRIR path")?;
-    spatial::graph::render_filter_chain_config(Path::new(&hrir), profile.enabled).map(Some)
+    spatial::graph::render_filter_chain_config_with_sound(
+        Path::new(&hrir),
+        profile.enabled,
+        &profile.sound,
+    )
+    .map(Some)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -794,13 +881,13 @@ fn spatial_graph_in(objects: &[Value]) -> bool {
 /// streams, and the next supervisor pass can retry after PipeWire recovers.
 /// Returns `false` only when PipeWire was observed without the capture node,
 /// i.e. the child is alive but no longer hosts the graph.
-fn reconcile_mix_with_target(target: impl FnOnce() -> Result<bool, String>) -> bool {
+fn reconcile_mix_with_target<I: MixIntent>(target: impl FnOnce() -> Result<I, String>) -> bool {
     reconcile_mix_observed(None, target)
 }
 
-fn reconcile_mix_observed(
+fn reconcile_mix_observed<I: MixIntent>(
     observed: Option<&[Value]>,
-    target: impl FnOnce() -> Result<bool, String>,
+    target: impl FnOnce() -> Result<I, String>,
 ) -> bool {
     // Unlike the immediate CLI path, the supervisor can have spent a long
     // time in preflight since it chose SetMix. Re-read the persisted gate
@@ -822,7 +909,7 @@ fn reconcile_mix_observed(
 fn reconcile_mix_from_profile(
     load_profile: impl FnOnce() -> Result<spatial::SpatialProfile, String>,
 ) -> bool {
-    reconcile_mix_with_target(|| load_profile().map(|profile| profile.enabled))
+    reconcile_mix_with_target(load_profile)
 }
 
 fn reconcile_mix() -> bool {
@@ -1012,6 +1099,9 @@ pub fn run() -> Result<(), String> {
                     None => Ok(false),
                 };
                 let links_intact = matches!(link_result, Ok(false));
+                if let Some(objects) = objects.as_deref() {
+                    upmix_spatial_streams(objects);
+                }
                 match link_result {
                     Ok(true) => {
                         eprintln!(
@@ -1026,9 +1116,7 @@ pub fn run() -> Result<(), String> {
                 // This observes the live controls before ramping. It makes a
                 // CLI transition idempotent for the supervisor rather than
                 // replaying a second wet/dry ramp 500 ms later.
-                if reconcile_mix_observed(objects.as_deref(), || {
-                    spatial::load().map(|profile| profile.enabled)
-                }) {
+                if reconcile_mix_observed(objects.as_deref(), spatial::load) {
                     missing_graph_passes = 0;
                     steady = links_intact && failed_readiness_passes == 0;
                 } else {
@@ -1080,6 +1168,7 @@ pub fn run() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::spatial::graph::{SPATIAL_DRY_CONTROLS, SPATIAL_WET_CONTROLS};
     use super::*;
     use std::sync::Arc;
 
@@ -1136,10 +1225,13 @@ mod tests {
     }
 
     fn profile(mode: spatial::SpatialMode, enabled: bool) -> spatial::SpatialProfile {
+        // The fixtures expose the graph's built-in levels.
         spatial::SpatialProfile {
             schema: spatial::SCHEMA,
             mode,
             enabled,
+            sound: spatial::SoundSettings::NEUTRAL,
+            ..Default::default()
         }
     }
 
@@ -1779,5 +1871,37 @@ mod tests {
         assert!(!spatial_graph_in(&objects));
         let graph: Vec<Value> = serde_json::from_str(&spatial_capture_dump(1.0, 0.0)).unwrap();
         assert!(spatial_graph_in(&graph));
+    }
+
+    #[test]
+    fn only_spatial_streams_without_psd_upmix_are_updated() {
+        let objects: Vec<Value> = serde_json::from_str(r#"[
+            { "id": 50, "type": "PipeWire:Interface:Node", "info": { "props": {
+                "node.name": "jambalinux-soniccore-game-spatial", "media.class": "Audio/Sink" } } },
+            { "id": 60, "type": "PipeWire:Interface:Node", "info": { "props": {
+                "media.class": "Stream/Output/Audio" },
+                "params": { "Props": [ { "params": [ "channelmix.upmix-method", "none" ] } ] } } },
+            { "id": 61, "type": "PipeWire:Interface:Node", "info": { "props": {
+                "media.class": "Stream/Output/Audio" },
+                "params": { "Props": [ { "params": [ "channelmix.upmix-method", "psd" ] } ] } } },
+            { "id": 62, "type": "PipeWire:Interface:Node", "info": { "props": {
+                "media.class": "Stream/Output/Audio" },
+                "params": { "Props": [ { "params": [ "channelmix.upmix-method", "none" ] } ] } } },
+            { "id": 70, "type": "PipeWire:Interface:Link", "info": { "output-node-id": 60, "input-node-id": 50 } },
+            { "id": 71, "type": "PipeWire:Interface:Link", "info": { "output-node-id": 61, "input-node-id": 50 } },
+            { "id": 72, "type": "PipeWire:Interface:Link", "info": { "output-node-id": 62, "input-node-id": 99 } }
+        ]"#).unwrap();
+        // 61 is already PSD; 62 plays elsewhere.
+        assert_eq!(streams_needing_upmix(&objects), vec![60]);
+
+        let runner = Arc::new(crate::command::ScriptedRunner::new());
+        runner.push_output("");
+        let _guard = crate::command::set_runner(runner.clone());
+        upmix_spatial_streams(&objects);
+        let calls = runner.command_lines();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].starts_with("pw-cli set-param 60 Props"));
+        assert!(calls[0].contains("psd"));
+        assert!(streams_needing_upmix(&[]).is_empty());
     }
 }

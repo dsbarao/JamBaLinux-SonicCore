@@ -78,11 +78,132 @@ impl SpatialMode {
     }
 }
 
+/// Listening modes: named starting points for [`SoundSettings`]. Moving a
+/// fine control turns the mode into `custom`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ListeningMode {
+    #[default]
+    Game,
+    Cinema,
+    Music,
+    Custom,
+}
+
+impl ListeningMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Game => "game",
+            Self::Cinema => "cinema",
+            Self::Music => "music",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "game" => Ok(Self::Game),
+            "cinema" => Ok(Self::Cinema),
+            "music" => Ok(Self::Music),
+            "custom" => Ok(Self::Custom),
+            other => Err(format!(
+                "unknown listening mode `{other}`; use game, cinema, music or custom"
+            )),
+        }
+    }
+
+    /// The settings a named mode stands for; `custom` has none of its own.
+    pub fn settings(self) -> Option<SoundSettings> {
+        match self {
+            // Full 3D, clearer rear/side cues (footsteps), bass held back.
+            Self::Game => Some(SoundSettings {
+                intensity: 1.0,
+                dialogue_db: 0.0,
+                bass_db: -3.0,
+                surround_db: 2.0,
+            }),
+            // Full 3D, dialogue and bass lifted.
+            Self::Cinema => Some(SoundSettings {
+                intensity: 1.0,
+                dialogue_db: 3.0,
+                bass_db: 3.0,
+                surround_db: 0.0,
+            }),
+            // Mostly the original stereo, a little room, softer surrounds.
+            Self::Music => Some(SoundSettings {
+                intensity: 0.4,
+                dialogue_db: 0.0,
+                bass_db: 0.0,
+                surround_db: -3.0,
+            }),
+            Self::Custom => None,
+        }
+    }
+}
+
+/// Live sound controls of the spatial graph, applied without rebuilding it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SoundSettings {
+    /// Share of the 3D (binaural) path, 0.1..=1.0; the rest is plain stereo.
+    pub intensity: f32,
+    /// Centre channel (dialogue), dB.
+    pub dialogue_db: f32,
+    /// LFE channel (bass effects), dB.
+    pub bass_db: f32,
+    /// Side and rear channels, dB.
+    pub surround_db: f32,
+}
+
+pub const INTENSITY_RANGE: (f32, f32) = (0.1, 1.0);
+pub const LEVEL_RANGE_DB: (f32, f32) = (-12.0, 6.0);
+
+impl SoundSettings {
+    /// Every channel at unity and full 3D: the graph's built-in levels.
+    pub const NEUTRAL: Self = Self {
+        intensity: 1.0,
+        dialogue_db: 0.0,
+        bass_db: 0.0,
+        surround_db: 0.0,
+    };
+
+    pub fn validate(self) -> Result<Self, String> {
+        let (low, high) = INTENSITY_RANGE;
+        if !(low..=high).contains(&self.intensity) {
+            return Err(format!("intensity must be between {low} and {high}"));
+        }
+        let (low, high) = LEVEL_RANGE_DB;
+        for (name, value) in [
+            ("dialogue", self.dialogue_db),
+            ("bass", self.bass_db),
+            ("surround", self.surround_db),
+        ] {
+            if !(low..=high).contains(&value) {
+                return Err(format!("{name} must be between {low} and {high} dB"));
+            }
+        }
+        Ok(self)
+    }
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        ListeningMode::Game.settings().unwrap_or(Self::NEUTRAL)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpatialProfile {
     pub schema: u8,
     pub enabled: bool,
     pub mode: SpatialMode,
+    #[serde(default)]
+    pub listening: ListeningMode,
+    #[serde(default)]
+    pub sound: SoundSettings,
+    /// The last hand-tuned settings, kept for "Personalizado" while another
+    /// mode is selected.
+    #[serde(default)]
+    pub custom_sound: Option<SoundSettings>,
 }
 
 impl Default for SpatialProfile {
@@ -91,6 +212,9 @@ impl Default for SpatialProfile {
             schema: SCHEMA,
             enabled: false,
             mode: SpatialMode::Off,
+            listening: ListeningMode::default(),
+            sound: SoundSettings::default(),
+            custom_sound: None,
         }
     }
 }
@@ -1082,6 +1206,10 @@ fn validate(profile: SpatialProfile) -> Result<SpatialProfile, String> {
     if profile.enabled && profile.mode == SpatialMode::Off {
         return Err("spatial cannot be enabled while its mode is `off`".into());
     }
+    profile.sound.validate()?;
+    if let Some(custom) = profile.custom_sound {
+        custom.validate()?;
+    }
     Ok(profile)
 }
 
@@ -1393,6 +1521,61 @@ pub fn set_enabled(enabled: bool) -> Result<SpatialProfile, String> {
     Ok(next)
 }
 
+/// Selects a listening mode and its settings.
+pub fn set_listening_mode(mode: ListeningMode) -> Result<SpatialProfile, String> {
+    let _lock = mutation_lock()?;
+    let next = with_listening_mode(load()?, mode)?;
+    save(&next)?;
+    Ok(next)
+}
+
+/// A named mode brings its own settings; `custom` brings back the last
+/// hand-tuned ones (the current settings when there are none yet).
+fn with_listening_mode(
+    mut next: SpatialProfile,
+    mode: ListeningMode,
+) -> Result<SpatialProfile, String> {
+    next.sound = mode
+        .settings()
+        .or(next.custom_sound)
+        .unwrap_or(next.sound);
+    next.listening = mode;
+    validate(next)
+}
+
+/// Changes one fine control; the mode becomes `custom` unless the result is
+/// exactly a named mode again.
+pub fn set_sound_control(control: &str, value: f32) -> Result<SpatialProfile, String> {
+    let _lock = mutation_lock()?;
+    let next = with_sound_control(load()?, control, value)?;
+    save(&next)?;
+    Ok(next)
+}
+
+fn with_sound_control(
+    mut next: SpatialProfile,
+    control: &str,
+    value: f32,
+) -> Result<SpatialProfile, String> {
+    match control {
+        "intensity" => next.sound.intensity = value,
+        "dialogue" => next.sound.dialogue_db = value,
+        "bass" => next.sound.bass_db = value,
+        "surround" => next.sound.surround_db = value,
+        other => {
+            return Err(format!(
+                "unknown sound control `{other}`; use intensity, dialogue, bass or surround"
+            ));
+        }
+    }
+    next.listening = [ListeningMode::Game, ListeningMode::Cinema, ListeningMode::Music]
+        .into_iter()
+        .find(|mode| mode.settings() == Some(next.sound))
+        .unwrap_or(ListeningMode::Custom);
+    next.custom_sound = Some(next.sound);
+    validate(next)
+}
+
 pub fn set_mode(mode: SpatialMode) -> Result<SpatialProfile, String> {
     let _lock = mutation_lock()?;
     let profile = load()?;
@@ -1669,6 +1852,7 @@ mod tests {
             schema: SCHEMA,
             enabled: true,
             mode: SpatialMode::Off,
+            ..Default::default()
         };
         assert!(validate(profile).is_err());
 
@@ -1676,6 +1860,7 @@ mod tests {
             schema: SCHEMA,
             enabled: true,
             mode: SpatialMode::BinauralStereo,
+            ..Default::default()
         };
         assert!(validate(profile).is_ok());
     }
@@ -1822,6 +2007,7 @@ mod tests {
             schema: SCHEMA,
             enabled: true,
             mode: SpatialMode::BinauralStereo,
+            ..Default::default()
         };
         let not_ready = capability_report(false, false, invalid_dataset_report());
         let next = enabled_profile(&profile, false, &not_ready).expect("disable always succeeds");
@@ -1834,6 +2020,7 @@ mod tests {
             schema: SCHEMA,
             enabled: true,
             mode: SpatialMode::BinauralStereo,
+            ..Default::default()
         };
         let next = moded_profile(&profile, SpatialMode::Off).expect("select off mode");
         assert!(!next.enabled);
@@ -1856,6 +2043,7 @@ mod tests {
             schema: SCHEMA,
             enabled: true,
             mode: SpatialMode::BinauralStereo,
+            ..Default::default()
         };
         save_to_path(&changed, &path).expect("atomically replace profile");
 
@@ -1882,6 +2070,7 @@ mod tests {
             schema: SCHEMA,
             enabled: true,
             mode: SpatialMode::Off,
+            ..Default::default()
         };
         assert!(save_to_path(&invalid, &path).is_err());
 
@@ -2617,5 +2806,48 @@ mod tests {
             );
             assert_eq!(report.sample_rate, Some(rate));
         }
+    }
+
+    #[test]
+    fn fine_controls_turn_a_mode_custom_and_back() {
+        let mut profile = SpatialProfile::default();
+        assert_eq!(profile.listening, ListeningMode::Game);
+        assert_eq!(Some(profile.sound), ListeningMode::Game.settings());
+
+        profile = with_sound_control(profile, "dialogue", 4.0).unwrap();
+        assert_eq!(profile.listening, ListeningMode::Custom);
+        assert_eq!(profile.sound.dialogue_db, 4.0);
+
+        // Back to exactly the game settings: the name returns.
+        profile = with_sound_control(profile, "dialogue", 0.0).unwrap();
+        assert_eq!(profile.listening, ListeningMode::Game);
+
+        // The hand-tuned settings survive a trip to another mode.
+        let tuned = with_sound_control(profile.clone(), "bass", 5.0).unwrap();
+        let cinema = with_listening_mode(tuned.clone(), ListeningMode::Cinema).unwrap();
+        assert_eq!(Some(cinema.sound), ListeningMode::Cinema.settings());
+        let custom = with_listening_mode(cinema, ListeningMode::Custom).unwrap();
+        assert_eq!(custom.listening, ListeningMode::Custom);
+        assert_eq!(custom.sound, tuned.sound);
+        assert_eq!(custom.sound.bass_db, 5.0);
+
+        assert!(with_sound_control(profile.clone(), "bass", 9.0).is_err());
+        assert!(with_sound_control(profile.clone(), "intensity", 0.0).is_err());
+        assert!(with_sound_control(profile, "treble", 1.0).is_err());
+    }
+
+    #[test]
+    fn profiles_saved_before_the_modes_read_as_game() {
+        let old = r#"{ "schema": 1, "enabled": true, "mode": "binaural-stereo" }"#;
+        let profile: SpatialProfile = serde_json::from_str(old).unwrap();
+        assert_eq!(profile.listening, ListeningMode::Game);
+        assert_eq!(Some(profile.sound), ListeningMode::Game.settings());
+        assert!(validate(profile).is_ok());
+        for mode in ["game", "cinema", "music"] {
+            let mode = ListeningMode::parse(mode).unwrap();
+            assert!(mode.settings().unwrap().validate().is_ok());
+        }
+        assert_eq!(ListeningMode::parse("custom").unwrap(), ListeningMode::Custom);
+        assert!(ListeningMode::parse("dts").is_err());
     }
 }

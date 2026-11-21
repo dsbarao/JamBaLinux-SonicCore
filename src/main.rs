@@ -1778,7 +1778,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux SonicCore — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound set <intensity|dialogue|bass|surround> <value>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -1822,6 +1822,9 @@ fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<
             })
             .unwrap_or_else(|| "Manual (not saved as a profile)".to_owned());
         println!("Selected: {selection}");
+        if profile.bypassed {
+            println!("Bypassed: natural sound, every band runs at 0 dB");
+        }
     }
     Ok(())
 }
@@ -1833,6 +1836,7 @@ struct EqualizerStatusOutput {
     active_profile_id: Option<String>,
     custom_profiles: Vec<equalizer::CustomEqualizerProfile>,
     preset: Option<&'static str>,
+    bypassed: bool,
     pipewire: pipewire::Status,
 }
 
@@ -1848,6 +1852,7 @@ fn print_equalizer_status(json: bool) -> Result<(), String> {
                 bands: profile.bands,
                 active_profile_id: profile.active_profile_id,
                 custom_profiles: profile.custom_profiles,
+                bypassed: profile.bypassed,
                 preset,
                 pipewire,
             })
@@ -1900,6 +1905,7 @@ struct EqualizerMutationOutput<'a> {
     schema: u8,
     applied_bands: &'a [equalizer::Band],
     active_profile_id: Option<&'a str>,
+    bypassed: bool,
     error: Option<String>,
 }
 
@@ -1915,6 +1921,7 @@ fn execute_equalizer_mutation(
                     schema: requested.schema,
                     applied_bands: &requested.bands,
                     active_profile_id: requested.active_profile_id.as_deref(),
+                    bypassed: requested.bypassed,
                     error: None,
                 };
                 println!(
@@ -1932,6 +1939,7 @@ fn execute_equalizer_mutation(
                     schema: previous.schema,
                     applied_bands: &previous.bands,
                     active_profile_id: previous.active_profile_id.as_deref(),
+                    bypassed: previous.bypassed,
                     error: Some(error),
                 };
                 println!(
@@ -2215,11 +2223,12 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
             // Selecting a factory preset updates only the active bands; the
             // persistent custom-profile library remains user-owned data.
-            let requested = if previous.custom_profiles.is_empty() {
+            let mut requested = if previous.custom_profiles.is_empty() {
                 equalizer::preset_profile(id)?
             } else {
                 equalizer::select_profile(&previous, id)?
             };
+            requested.bypassed = previous.bypassed;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         Some("profile") => equalizer_profile(args),
@@ -2230,11 +2239,26 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             }
             let mutation_lock = equalizer::mutation_lock()?;
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
-            let requested = if previous.custom_profiles.is_empty() {
+            let mut requested = if previous.custom_profiles.is_empty() {
                 equalizer::reset_profile()
             } else {
                 equalizer::select_profile(&previous, "flat")?
             };
+            requested.bypassed = previous.bypassed;
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        // "Som natural": every band at 0 dB, the saved bands kept for later.
+        Some("bypass") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            let bypassed = match values.as_slice() {
+                [value] if value == "on" => true,
+                [value] if value == "off" => false,
+                _ => return Err("equalizer bypass requires exactly `on` or `off`".into()),
+            };
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let mut requested = previous.clone();
+            requested.bypassed = bypassed;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         _ => Err("unknown equalizer command".into()),
@@ -2288,6 +2312,8 @@ struct SpatialStatusOutput {
     schema: u8,
     mode: spatial::SpatialMode,
     experimental: bool,
+    listening: spatial::ListeningMode,
+    sound: spatial::SoundSettings,
     #[serde(flatten)]
     health: pipewire::SpatialStatus,
     capability: spatial::CapabilityReport,
@@ -2304,6 +2330,8 @@ fn print_spatial_status(json: bool) -> Result<(), String> {
                 schema: profile.schema,
                 mode: profile.mode,
                 experimental: true,
+                listening: profile.listening,
+                sound: profile.sound,
                 health: health.clone(),
                 capability,
             })
@@ -2380,6 +2408,37 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             let mode = spatial::SpatialMode::parse(&value)?;
             let profile = spatial::set_mode(mode)?;
             print_spatial(&profile, false)?;
+            Ok(true)
+        }
+        // Listening modes and their fine controls, applied live.
+        Some("sound") => {
+            let profile = match (args.next().as_deref(), args.next(), args.next()) {
+                (Some("set"), Some(control), Some(value)) if args.next().is_none() => {
+                    let value = value
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .ok_or("the sound control value must be a number")?;
+                    spatial::set_sound_control(&control, value)?
+                }
+                (Some(mode), None, None) if mode != "set" => {
+                    spatial::set_listening_mode(spatial::ListeningMode::parse(mode)?)?
+                }
+                _ => {
+                    return Err("usage: soniccore spatial sound <game|cinema|music|custom> | \
+                         sound set <intensity|dialogue|bass|surround> <value>"
+                        .into());
+                }
+            };
+            apply_spatial_mix_best_effort(profile.enabled);
+            println!(
+                "listening mode: {} (intensity {:.2}, dialogue {:+.1} dB, bass {:+.1} dB, surround {:+.1} dB)",
+                profile.listening.as_str(),
+                profile.sound.intensity,
+                profile.sound.dialogue_db,
+                profile.sound.bass_db,
+                profile.sound.surround_db
+            );
             Ok(true)
         }
         Some("enable") if args.next().is_none() => {
@@ -2591,6 +2650,8 @@ mod tests {
             schema: spatial::SCHEMA,
             mode: spatial::SpatialMode::BinauralStereo,
             experimental: true,
+            listening: spatial::ListeningMode::Game,
+            sound: spatial::SoundSettings::default(),
             health: pipewire::SpatialStatus {
                 configured: true,
                 enabled: false,
@@ -2971,9 +3032,11 @@ mod tests {
             schema: profile.schema,
             applied_bands: &profile.bands,
             active_profile_id: profile.active_profile_id.as_deref(),
+            bypassed: profile.bypassed,
             error: Some("test error".into()),
         };
         let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["bypassed"], false);
         assert_eq!(json["schema"], equalizer::PROFILE_SCHEMA);
         assert_eq!(json["active_profile_id"], "flat");
         assert_eq!(json["applied_bands"].as_array().unwrap().len(), 10);

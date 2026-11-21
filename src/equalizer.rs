@@ -144,6 +144,25 @@ pub struct EqualizerProfile {
     pub active_profile_id: Option<String>,
     #[serde(default)]
     pub custom_profiles: Vec<CustomEqualizerProfile>,
+    /// "Som natural": the DSP runs every band at 0 dB while the bands above
+    /// stay saved, so switching back restores them. The graph stays in place
+    /// because the spatial output is linked into the equalizer input.
+    #[serde(default)]
+    pub bypassed: bool,
+}
+
+impl EqualizerProfile {
+    /// The gains the PipeWire DSP must run: the saved bands, or flat while
+    /// bypassed.
+    pub fn dsp_bands(&self) -> Vec<Band> {
+        self.bands
+            .iter()
+            .map(|band| Band {
+                frequency_hz: band.frequency_hz,
+                gain_db: if self.bypassed { 0.0 } else { band.gain_db },
+            })
+            .collect()
+    }
 }
 
 impl Default for EqualizerProfile {
@@ -159,6 +178,7 @@ impl Default for EqualizerProfile {
                 .collect(),
             active_profile_id: Some("flat".into()),
             custom_profiles: Vec::new(),
+            bypassed: false,
         }
     }
 }
@@ -315,6 +335,7 @@ fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile,
             bands: profile.bands,
             active_profile_id: Some(preset.id.to_owned()),
             custom_profiles: Vec::new(),
+            bypassed: false,
         },
         // Schema 1 had no named profiles, so bands that match no factory preset
         // become the one custom profile the migrated file selects.
@@ -329,6 +350,7 @@ fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile,
                     name: LEGACY_CUSTOM_PROFILE_NAME.to_owned(),
                     bands: profile.bands,
                 }],
+                bypassed: false,
             }
         }
     };
@@ -1296,5 +1318,19 @@ mod tests {
             bands: fps.bands.clone(),
         };
         assert_eq!(restore_remembered(&fps, &same), None);
+    }
+
+    #[test]
+    fn bypass_runs_flat_and_keeps_the_saved_bands() {
+        let mut profile = preset_profile("bass-boost").unwrap();
+        assert!(profile.dsp_bands().iter().any(|band| band.gain_db != 0.0));
+        profile.bypassed = true;
+        assert!(profile.dsp_bands().iter().all(|band| band.gain_db == 0.0));
+        assert!(profile.bands.iter().any(|band| band.gain_db != 0.0));
+        // Files written before the flag existed read as not bypassed.
+        let mut json = serde_json::to_value(&profile).unwrap();
+        json.as_object_mut().unwrap().remove("bypassed");
+        let old: EqualizerProfile = serde_json::from_value(json).unwrap();
+        assert!(!old.bypassed);
     }
 }

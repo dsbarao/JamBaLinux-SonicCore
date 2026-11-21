@@ -20,11 +20,11 @@ test("spatial polling timer runs only when popup is expanded and spatial section
 
     const timerBlock = spatialTimerMatch[0]
 
-    // Verify running property requires root.expanded && root.openSection === "spatial"
+    // Every section is on screen with the panel: poll only while it is shown
     assert.match(
         timerBlock,
-        /running:\s*root\.expanded\s*&&\s*root\.openSection\s*===\s*"spatial"/,
-        "spatial Timer running property must be 'root.expanded && root.openSection === \"spatial\"'"
+        /running:\s*root\.expanded\n/,
+        "spatial Timer running property must be 'root.expanded'"
     )
 
     // Verify triggeredOnStart is true

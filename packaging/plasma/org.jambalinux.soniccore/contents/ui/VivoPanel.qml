@@ -229,7 +229,8 @@ Item {
                         radiusX: ring.radius
                         radiusY: ring.radius
                         startAngle: -90
-                        sweepAngle: 360 * Math.max(0, panel.batteryPercent) / 100
+                        sweepAngle: panel.headsetConnected === false
+                            ? 0 : 360 * Math.max(0, panel.batteryPercent) / 100
                     }
                 }
             }
@@ -272,8 +273,12 @@ Item {
             Layout.alignment: Qt.AlignHCenter
             // The ring is always the headset's battery; say so when the
             // header shows another output.
-            text: (panel.outputIsQuantum ? "" : "Fone ") + (panel.batteryPercent >= 0
-                ? `${panel.batteryPercent}%${panel.charging ? " ⚡" : ""}` : "—")
+            // Off, the dongle only repeats the last reading, which goes stale
+            // while the headset charges: say what is known instead.
+            text: panel.headsetConnected === false
+                ? (panel.charging ? "Desligado · carregando ⚡" : "Desligado")
+                : (panel.outputIsQuantum ? "" : "Fone ") + (panel.batteryPercent >= 0
+                    ? `${panel.batteryPercent}%${panel.charging ? " ⚡" : ""}` : "—")
             color: panel.batteryColor
             font.bold: true
             font.pixelSize: Kirigami.Units.gridUnit * 1.1

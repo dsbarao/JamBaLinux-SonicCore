@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import QtQml.Models
 
@@ -15,6 +16,60 @@ import "palette.js" as Palette
 // `expanded`; it decides what a click on the compact view does.
 Item {
     id: root
+
+    // One section of the panel. Every card is always shown; when what it
+    // holds changes (lights switched off, a warning appears) it grows or
+    // shrinks smoothly, and it fades while its controls are unavailable.
+    component SectionCard: Rectangle {
+        id: card
+        property string title
+        property string subtitle
+        default property alias content: cardBody.data
+
+        Layout.fillWidth: true
+        implicitHeight: cardBody.implicitHeight + Kirigami.Units.largeSpacing * 2
+        radius: Kirigami.Units.cornerRadius * 2
+        color: Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,
+            Kirigami.Theme.backgroundColor.b, root.vivo ? 0.6 : 1)
+        border.width: 1
+        border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+            Kirigami.Theme.textColor.b, 0.15)
+        clip: true
+        opacity: enabled ? 1 : 0.45
+
+        Behavior on implicitHeight {
+            NumberAnimation { duration: Kirigami.Units.longDuration; easing.type: Easing.OutCubic }
+        }
+        Behavior on opacity {
+            NumberAnimation { duration: Kirigami.Units.longDuration }
+        }
+
+        ColumnLayout {
+            id: cardBody
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Kirigami.Units.largeSpacing
+            spacing: Kirigami.Units.smallSpacing
+
+            PlasmaComponents.Label {
+                Layout.alignment: Qt.AlignHCenter
+                visible: text.length > 0
+                text: card.title
+                font.bold: true
+            }
+
+            PlasmaComponents.Label {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumWidth: cardBody.width
+                visible: text.length > 0
+                text: card.subtitle
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                opacity: 0.7
+            }
+        }
+    }
 
     property var configuration: ({})
     property bool expanded: false
@@ -36,7 +91,6 @@ Item {
     property string errorMessage: ""
     property string actionMessage: ""
     property bool actionFailed: false
-    property string openSection: ""
     // "Vincular com OpenRGB": `soniccore openrgb` status, refreshed when the
     // lights section opens, and the result of the last link attempt.
     property var openRgbStatus: null
@@ -100,6 +154,11 @@ Item {
     property int equalizerVisualRevision: 0
     property bool equalizerPipeWireActive: false
     property var equalizerServiceActive: null
+    // "Som natural": the DSP runs flat; the saved bands stay as they are.
+    property bool equalizerBypassed: false
+    // Listening mode of the 3D sound and its fine controls (dB / share).
+    property string spatialListening: "game"
+    property var spatialSound: ({ "intensity": 1, "dialogue_db": 0, "bass_db": 0, "surround_db": 0 })
     property var equalizerTargetConnected: null
     property var equalizerDefaultSafe: null
     property string equalizerTarget: ""
@@ -295,11 +354,20 @@ Item {
         if (result && result.schema === 1) openRgbStatus = result
     }
 
-    onOpenSectionChanged: {
-        if (openSection === "lighting") {
-            if (!openRgbLinking) openRgbMessage = ""
-            refreshOpenRgb()
+    // Every section is on screen whenever the panel is: load what each
+    // one shows when it appears.
+    onExpandedChanged: {
+        if (!expanded) {
+            closeEqualizerProfileEditors()
+            return
         }
+        if (!openRgbLinking) openRgbMessage = ""
+        refreshOpenRgb()
+        loadPicker()
+        refreshEqualizer()
+        // The wallpaper can change at any time; look it up each time.
+        if (vivo && vivoBackground === "glass")
+            wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
     }
 
     function runLightingHold(held) {
@@ -361,24 +429,57 @@ Item {
         spatialControlExecutable.connectSource(enabled ? spatialEnableCommand : spatialDisableCommand)
     }
 
+    // Several CLI steps in one shell, stopping at the first failure.
+    function soniccoreSequence(steps) {
+        const program = steps.map(step => [soniccoreBinary].concat(step.map(shellQuote)).join(" ")).join(" && ")
+        return "/bin/sh -c " + shellQuote(program)
+    }
+
+    // Natural switches the 3D off; a named mode sets its levels and makes
+    // sure the 3D is on.
+    function selectListeningMode(mode) {
+        if (spatialBusy || spatialUpdating) return
+        if (mode === "natural") {
+            if (spatialEnabled) setSpatialEnabled(false)
+            return
+        }
+        if (!spatialEnabled && !spatialReady) return
+        spatialBusy = true
+        spatialActionMessage = "Aplicando o modo…"
+        const steps = [["spatial", "sound", mode]]
+        if (!spatialEnabled) steps.push(["spatial", "enable"])
+        spatialControlExecutable.connectSource(soniccoreSequence(steps))
+    }
+
+    function setSpatialSoundControl(control, value) {
+        if (spatialBusy) return
+        spatialBusy = true
+        spatialActionMessage = "Ajustando…"
+        spatialControlExecutable.connectSource(soniccoreCommand(
+            ["spatial", "sound", "set", control, String(Math.round(value * 100) / 100)]))
+    }
+
+    function listeningLabel(mode) {
+        if (mode === "game") return "Jogo"
+        if (mode === "cinema") return "Cinema"
+        if (mode === "music") return "Música"
+        return "Personalizado"
+    }
+
     function spatialStatusText() {
         if (root.spatialBusy)
             return root.spatialActionMessage
         if (!root.spatialDatasetValid)
-            return "Dataset HRIR ausente ou inválido"
-        if (!root.spatialEnabled && root.spatialActive && root.spatialProcessingMode === "bypass")
-            return "Desativado (bypass)"
-        if (!root.spatialEnabled && root.spatialActive)
-            return "Desativação pendente; aguardando confirmação do bypass"
+            return "Indisponível neste computador"
+        if (!root.spatialEnabled && root.spatialActive && root.spatialProcessingMode !== "bypass")
+            return "Desligando…"
         if (!root.spatialEnabled)
-            return "Desativado"
+            return "Desligado"
         if (root.spatialActive && root.spatialProcessingMode === "binaural")
-            return `Ativo · modo ${root.spatialMode}`
-        if (root.spatialActive)
-            return "Ativação pendente; aguardando o mix binaural"
+            return `Ligado · ${root.listeningLabel(root.spatialListening)}`
         if (root.spatialError.length > 0)
-            return "Erro · áudio espacial não está ativo"
-        return root.spatialServiceActive ? "Preparando o processamento espacial" : "Preparando o serviço espacial"
+            return "Não foi possível ligar"
+        return "Ligando…"
     }
 
     function setEqualizerBand(frequencyHz, gainDb) {
@@ -556,6 +657,8 @@ Item {
 
     function equalizerActionMessage(action) {
         if (action === "reset") return "Bandas zeradas"
+        if (action === "bypass-on") return "Som natural: equalizador desligado"
+        if (action === "bypass-off") return "Equalizador ligado"
         if (action === "preset" || action === "apply")
             return "Perfil de equalização aplicado"
         if (action === "create") return "Perfil personalizado criado"
@@ -589,6 +692,10 @@ Item {
 
     function resetEqualizer() {
         startEqualizerAction("reset", ["reset"])
+    }
+
+    function setEqualizerBypassed(bypassed) {
+        startEqualizerAction(bypassed ? "bypass-on" : "bypass-off", ["bypass", bypassed ? "on" : "off"])
     }
 
     function replaceEqualizerBands(bands) {
@@ -1003,10 +1110,10 @@ Item {
     }
 
     property Component fullRepresentation: Item {
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 19
-        Layout.minimumHeight: Kirigami.Units.gridUnit * expandedRepresentation.requiredGridHeight
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 21
-        Layout.preferredHeight: Kirigami.Units.gridUnit * expandedRepresentation.requiredGridHeight
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 21
+        Layout.minimumHeight: expandedRepresentation.implicitHeight + Kirigami.Units.largeSpacing * 2
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 66
+        Layout.preferredHeight: expandedRepresentation.implicitHeight + Kirigami.Units.largeSpacing * 2
 
         // Drawn behind every control; only with the Vivo theme.
         VivoBackground {
@@ -1023,16 +1130,31 @@ Item {
             wallpaper: root.wallpaperUrl
         }
 
-        ColumnLayout {
+        GridLayout {
             id: expandedRepresentation
+            // Fills the window: the columns stretch down to its bottom edge.
             anchors.fill: parent
-            readonly property int equalizerColumns: width >= Kirigami.Units.gridUnit * 20 ? 10 : 5
-            readonly property real requiredGridHeight: (root.openSection === "lighting"
-                ? 52 : root.openSection === "equalizer" ? 66 : root.openSection.length > 0 ? 32 : 25)
-                + (root.vivo ? 4 : 0)
+            anchors.margins: Kirigami.Units.largeSpacing
+            // Every section is shown at once: equalizer on the left, the headset
+            // in the middle, the lights on the right. Narrower windows stack the
+            // headset above the equalizer, then everything in one column.
+            columns: width >= Kirigami.Units.gridUnit * 54 ? 3 : width >= Kirigami.Units.gridUnit * 38 ? 2 : 1
+            columnSpacing: Kirigami.Units.largeSpacing
+            rowSpacing: Kirigami.Units.largeSpacing
+            readonly property real columnWidth: (width - columnSpacing * (columns - 1)) / columns
+            readonly property int equalizerColumns: columnWidth >= Kirigami.Units.gridUnit * 16 ? 10 : 5
 
-            spacing: Kirigami.Units.smallSpacing
+            ColumnLayout {
+                Layout.row: 0
+                Layout.column: expandedRepresentation.columns === 3 ? 1 : 0
+                Layout.alignment: Qt.AlignTop
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.preferredWidth: expandedRepresentation.columnWidth
+                spacing: Kirigami.Units.largeSpacing
 
+                // The headset overview, in a card like the other columns.
+                SectionCard {
             PlasmaComponents.Label {
                 Layout.alignment: Qt.AlignHCenter
                 Layout.maximumHeight: implicitHeight
@@ -1098,9 +1220,14 @@ Item {
 
             PlasmaComponents.Label {
                 visible: !root.vivo
-                Layout.alignment: Qt.AlignHCenter
+                Layout.fillWidth: true
                 Layout.maximumHeight: implicitHeight
-                text: root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "—"
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                // Off, the last reading goes stale while it charges.
+                text: root.headsetConnected === false
+                    ? (root.charging ? "Desligado · carregando" : "Desligado")
+                    : root.batteryPercent >= 0 ? `${root.batteryPercent}%` : "—"
                 color: root.batteryColor
                 font.pixelSize: Kirigami.Units.gridUnit * 1.7
                 font.bold: true
@@ -1222,118 +1349,100 @@ Item {
                 }
             }
 
-            RowLayout {
+
+
+            PlasmaComponents.Label {
                 Layout.alignment: Qt.AlignHCenter
-                Layout.maximumHeight: implicitHeight
-                spacing: Kirigami.Units.smallSpacing
-                    PlasmaComponents.Button {
-                        text: "Ambiente"
-                    icon.name: "audio-headphones-symbolic"
-                    enabled: root.deviceAvailable && !root.controlBusy
-                    checkable: true
-                    checked: root.openSection === "ambient"
-                    onClicked: root.openSection = checked ? "ambient" : ""
-                }
-
-                PlasmaComponents.Button {
-                    text: "Luzes"
-                    icon.source: Qt.resolvedUrl("../images/light-bulb.svg")
-                    enabled: root.deviceAvailable && !root.controlBusy
-                    checkable: true
-                    checked: root.openSection === "lighting"
-                    onClicked: {
-                        root.openSection = checked ? "lighting" : ""
-                        if (checked) root.loadPicker()
-                    }
-                }
-
-                PlasmaComponents.Button {
-                    text: "Retorno"
-                    icon.name: "microphone-sensitivity-high"
-                    enabled: root.deviceAvailable && !root.controlBusy
-                    checkable: true
-                    checked: root.openSection === "sidetone"
-                    onClicked: root.openSection = checked ? "sidetone" : ""
-                }
-
-                PlasmaComponents.Button {
-                    text: "Equalizador"
-                    icon.name: "view-filter"
-                    enabled: !root.equalizerBusy
-                    checkable: true
-                    checked: root.openSection === "equalizer"
-                    onClicked: {
-                        root.openSection = checked ? "equalizer" : ""
-                        // Never reopen the panel on a half-finished name entry or
-                        // on a deletion that was left awaiting confirmation.
-                        root.closeEqualizerProfileEditors()
-                        if (checked) root.refreshEqualizer()
-                    }
-                }
-
-                PlasmaComponents.Button {
-                    text: "Espacial"
-                    icon.name: "audio-speakers-symbolic"
-                    checkable: true
-                    checked: root.openSection === "spatial"
-                    onClicked: {
-                        root.openSection = checked ? "spatial" : ""
-                        if (checked) root.refreshSpatial()
-                    }
-                }
+                visible: root.charging
+                text: root.batteryPercent >= 100 ? "⚡ Carregado" : "⚡ Carregando"
+                color: "#f5c542"
+                font.bold: true
             }
 
-            Rectangle {
+            PlasmaComponents.Label {
                 Layout.fillWidth: true
-                implicitHeight: controlOptions.implicitHeight + Kirigami.Units.largeSpacing * 2
-                visible: root.openSection.length > 0
-                radius: Kirigami.Units.cornerRadius
-                color: Kirigami.Theme.backgroundColor
-                border.width: 1
-                border.color: Kirigami.Theme.disabledTextColor
+                visible: root.errorMessage.length > 0 || !root.daemonAvailable
+                horizontalAlignment: Text.AlignHCenter
+                text: root.errorMessage.length > 0
+                    ? root.errorMessage
+                    : "Monitor em tempo real inativo"
+                color: root.errorMessage.length > 0
+                    ? Kirigami.Theme.negativeTextColor
+                    : Kirigami.Theme.neutralTextColor
+                wrapMode: Text.Wrap
+                opacity: 0.85
+            }
+                }
 
-                ColumnLayout {
-                    id: controlOptions
-                    anchors.fill: parent
-                    anchors.margins: Kirigami.Units.largeSpacing
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Label {
-                        Layout.alignment: Qt.AlignHCenter
-                        text: root.openSection === "ambient"
-                            ? "Controle de som ambiente"
-                            : root.openSection === "lighting" ? "Iluminação"
-                            : root.openSection === "equalizer" ? "Equalizador de saída"
-                            : root.openSection === "spatial" ? "Áudio espacial / binaural (experimental)"
-                            : "Retorno do microfone"
-                        font.bold: true
-                    }
-
-                    PlasmaComponents.Label {
-                        Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection !== "equalizer"
-                        text: root.openSection === "ambient"
-                            ? `Atual: ${root.ambientLabel(root.ambientMode)}`
-                            : root.openSection === "lighting"
-                                ? root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
-                                : root.openSection === "spatial"
-                                    ? root.spatialStatusText()
-                                : `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
-                        opacity: 0.7
-                    }
+                SectionCard {
+                    title: "Som ambiente"
+                    subtitle: `Atual: ${root.ambientLabel(root.ambientMode)}`
+                    enabled: root.deviceAvailable
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "ambient"
                         enabled: root.deviceAvailable && !root.controlBusy
                         PlasmaComponents.Button { text: "Desligado"; checked: root.ambientMode === "off"; onClicked: root.runControl("ambient", "off") }
                         PlasmaComponents.Button { text: "ANC"; checked: root.ambientMode === "anc"; onClicked: root.runControl("ambient", "anc") }
                         PlasmaComponents.Button { text: "TalkThru"; checked: root.ambientMode === "talkthru"; onClicked: root.runControl("ambient", "talkthru") }
                     }
+                }
+
+                SectionCard {
+                    // The last card of each column stretches to the bottom,
+                    // so the three columns end level.
+                    Layout.fillHeight: true
+                    title: "Retorno do microfone"
+                    subtitle: `Atual: ${root.sidetoneLabel(root.sidetoneLevel)}`
+                    enabled: root.deviceAvailable
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        enabled: root.deviceAvailable && !root.controlBusy
+                        PlasmaComponents.Button { text: "Off"; checked: root.sidetoneLevel === "off"; onClicked: root.runControl("sidetone", "off") }
+                        PlasmaComponents.Button { text: "Baixo"; checked: root.sidetoneLevel === "low"; onClicked: root.runControl("sidetone", "low") }
+                        PlasmaComponents.Button { text: "Médio"; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
+                        PlasmaComponents.Button { text: "Alto"; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
+                    }
+                }
+            }
+
+            ColumnLayout {
+                Layout.row: expandedRepresentation.columns === 3 ? 0 : 1
+                Layout.column: 0
+                Layout.alignment: Qt.AlignTop
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.preferredWidth: expandedRepresentation.columnWidth
+                spacing: Kirigami.Units.largeSpacing
+
+                SectionCard {
+                    title: "Equalizador de saída"
+                    subtitle: root.equalizerBypassed
+                        ? "Desligado: som natural do sistema, sem equalização. Seus ajustes ficam guardados."
+                        : ""
+
+                    PlasmaComponents.Switch {
+                        id: equalizerToggle
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "Equalizador ligado"
+                        checked: !root.equalizerBypassed
+                        enabled: !root.equalizerBusy && !root.equalizerUpdating
+                        onClicked: {
+                            const on = checked
+                            checked = Qt.binding(function() { return !root.equalizerBypassed })
+                            root.setEqualizerBypassed(!on)
+                        }
+                    }
 
                     ColumnLayout {
                         Layout.fillWidth: true
-                        visible: root.openSection === "equalizer"
+                        id: equalizerBody
+                        // Off, the profiles and bands fold away (the card animates).
+                        visible: !root.equalizerBypassed
+                        // Narrow card: the profile actions show only their icons
+                        // (name in the tooltip) instead of pushing the card wider.
+                        readonly property bool compact: width < Kirigami.Units.gridUnit * 22
                         // Only profile actions below are blocked while one runs: the band sliders
                         // keep moving and queue their latest value (pendingEqualizerBands).
                         spacing: Kirigami.Units.smallSpacing
@@ -1386,9 +1495,14 @@ Item {
                         RowLayout {
                             enabled: !root.equalizerBusy && !root.equalizerUpdating
                             Layout.alignment: Qt.AlignHCenter
+                            Layout.maximumWidth: equalizerBody.width
 
                             PlasmaComponents.Button {
                                 text: "Criar perfil"
+                                display: equalizerBody.compact ? QQC2.AbstractButton.IconOnly : QQC2.AbstractButton.TextBesideIcon
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: equalizerBody.compact && hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                                 icon.name: "list-add"
                                 checkable: true
                                 checked: root.equalizerCreateVisible
@@ -1404,6 +1518,10 @@ Item {
                                 // actions exist only for user-owned profiles.
                                 visible: root.selectedEqualizerProfileIsCustom()
                                 text: "Atualizar"
+                                display: equalizerBody.compact ? QQC2.AbstractButton.IconOnly : QQC2.AbstractButton.TextBesideIcon
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: equalizerBody.compact && hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                                 icon.name: "document-save"
                                 onClicked: root.updateEqualizerProfile()
                             }
@@ -1411,6 +1529,10 @@ Item {
                             PlasmaComponents.Button {
                                 visible: root.selectedEqualizerProfileIsCustom()
                                 text: "Renomear"
+                                display: equalizerBody.compact ? QQC2.AbstractButton.IconOnly : QQC2.AbstractButton.TextBesideIcon
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: equalizerBody.compact && hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                                 icon.name: "edit-rename"
                                 checkable: true
                                 checked: root.equalizerRenameVisible
@@ -1429,6 +1551,12 @@ Item {
                                 text: root.equalizerDeleteConfirmation
                                     ? "Confirmar exclusão" : "Excluir"
                                 icon.name: "edit-delete"
+                                // The confirmation always says what it does.
+                                display: equalizerBody.compact && !root.equalizerDeleteConfirmation
+                                    ? QQC2.AbstractButton.IconOnly : QQC2.AbstractButton.TextBesideIcon
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: equalizerBody.compact && hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                                 onClicked: {
                                     if (root.equalizerDeleteConfirmation) {
                                         root.equalizerDeleteConfirmation = false
@@ -1621,10 +1749,169 @@ Item {
                             color: Kirigami.Theme.negativeTextColor
                         }
                     }
+                }
+
+                SectionCard {
+                    // The last card of each column stretches to the bottom,
+                    // so the three columns end level.
+                    Layout.fillHeight: true
+                    title: "Áudio espacial"
+                    subtitle: root.spatialStatusText()
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
+                        // Listening modes: Natural switches the 3D off. Narrow
+                        // cards wrap them into two rows instead of cutting one.
+                        GridLayout {
+                            id: listeningModes
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.maximumWidth: parent.width
+                            enabled: !root.spatialBusy && !root.spatialUpdating
+                                && (root.spatialEnabled || root.spatialReady)
+                            columns: parent.width >= Kirigami.Units.gridUnit * 22 ? 6 : 3
+                            columnSpacing: Kirigami.Units.smallSpacing
+                            rowSpacing: Kirigami.Units.smallSpacing
+                            uniformCellWidths: columns === 3
+
+                            Repeater {
+                                model: [
+                                    { "mode": "natural", "label": "Natural" },
+                                    { "mode": "game", "label": "Jogo" },
+                                    { "mode": "cinema", "label": "Cinema" },
+                                    { "mode": "music", "label": "Música" },
+                                    { "mode": "custom", "label": "Personalizado" }
+                                ]
+
+                                PlasmaComponents.Button {
+                                    required property var modelData
+                                    Layout.fillWidth: listeningModes.columns === 3
+                                    text: modelData.label
+                                    checked: modelData.mode === "natural"
+                                        ? !root.spatialEnabled
+                                        : root.spatialEnabled && root.spatialListening === modelData.mode
+                                    onClicked: root.selectListeningMode(modelData.mode)
+                                }
+                            }
+
+                            PlasmaComponents.BusyIndicator {
+                                running: root.spatialBusy || root.spatialUpdating
+                                visible: running
+                                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                            }
+                        }
+
+                        // Fine controls, shown while the 3D is on. Moving one
+                        // turns the mode into "Personalizado".
+                        GridLayout {
+                            Layout.fillWidth: true
+                            visible: root.spatialEnabled
+                            enabled: !root.spatialBusy
+                            columns: 3
+                            columnSpacing: Kirigami.Units.smallSpacing
+                            rowSpacing: 0
+
+                            Repeater {
+                                model: [
+                                    { "control": "intensity", "key": "intensity", "label": "Intensidade 3D", "from": 0.1, "to": 1, "step": 0.05, "percent": true },
+                                    { "control": "dialogue", "key": "dialogue_db", "label": "Diálogos", "from": -12, "to": 6, "step": 0.5, "percent": false },
+                                    { "control": "bass", "key": "bass_db", "label": "Graves", "from": -12, "to": 6, "step": 0.5, "percent": false },
+                                    { "control": "surround", "key": "surround_db", "label": "Surround", "from": -12, "to": 6, "step": 0.5, "percent": false }
+                                ]
+
+                                delegate: Item {
+                                    id: soundRow
+                                    required property var modelData
+                                    Layout.columnSpan: 3
+                                    Layout.fillWidth: true
+                                    implicitHeight: soundRowLayout.implicitHeight
+
+                                    RowLayout {
+                                        id: soundRowLayout
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+
+                                        PlasmaComponents.Label {
+                                            text: soundRow.modelData.label
+                                            Layout.preferredWidth: Kirigami.Units.gridUnit * 5.5
+                                            elide: Text.ElideRight
+                                        }
+
+                                        PlasmaComponents.Slider {
+                                            id: soundSlider
+                                            Layout.fillWidth: true
+                                            // Takes the room that is left; never pushes
+                                            // the value off the card.
+                                            Layout.preferredWidth: Kirigami.Units.gridUnit * 4
+                                            Layout.minimumWidth: Kirigami.Units.gridUnit * 3
+                                            from: soundRow.modelData.from
+                                            to: soundRow.modelData.to
+                                            stepSize: soundRow.modelData.step
+                                            value: Number(root.spatialSound[soundRow.modelData.key] ?? 0)
+                                            // Sent once, when the handle is let go.
+                                            onPressedChanged: {
+                                                if (pressed) return
+                                                root.setSpatialSoundControl(soundRow.modelData.control, value)
+                                                // Follow the confirmed value again after the drag.
+                                                value = Qt.binding(() => Number(root.spatialSound[soundRow.modelData.key] ?? 0))
+                                            }
+                                        }
+
+                                        PlasmaComponents.Label {
+                                            Layout.preferredWidth: Kirigami.Units.gridUnit * 3.5
+                                            horizontalAlignment: Text.AlignRight
+                                            text: soundRow.modelData.percent
+                                                ? `${Math.round(soundSlider.value * 100)}%`
+                                                : `${soundSlider.value > 0 ? "+" : ""}${soundSlider.value.toFixed(1)} dB`
+                                            opacity: 0.7
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            visible: !root.spatialActive && root.spatialError.length > 0
+                            text: root.spatialError
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            color: Kirigami.Theme.negativeTextColor
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            text: "Nos jogos, escolha a saída espacial JamBaLinux."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.6
+                        }
+                    }
+                }
+            }
+
+            ColumnLayout {
+                Layout.row: expandedRepresentation.columns === 1 ? 2 : 0
+                Layout.column: expandedRepresentation.columns - 1
+                Layout.alignment: Qt.AlignTop
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.preferredWidth: expandedRepresentation.columnWidth
+                spacing: Kirigami.Units.largeSpacing
+
+                SectionCard {
+                    // The last card of each column stretches to the bottom,
+                    // so the three columns end level.
+                    Layout.fillHeight: true
+                    title: "Iluminação"
+                    subtitle: root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
+                    enabled: root.deviceAvailable
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: root.openSection === "lighting" && root.openRgbControlsLighting
+                        visible: root.openRgbControlsLighting
                         text: "O OpenRGB está controlando as luzes agora. Mudanças feitas aqui seriam sobrescritas pelo próximo quadro dele."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
@@ -1633,7 +1920,7 @@ Item {
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: root.openSection === "lighting" && root.powerSaving.length > 0
+                        visible: root.powerSaving.length > 0
                         text: root.powerSaving === "low-battery"
                             ? "Luzes apagadas para economizar bateria (bateria baixa). Elas voltam ao carregar; ligar agora desativa a economia até lá."
                             : "Luzes apagadas para economizar bateria (sem som). Elas voltam quando o som voltar; ligar agora mantém acesas."
@@ -1644,7 +1931,7 @@ Item {
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: root.openSection === "lighting" && root.lightingHeld
+                        visible: root.lightingHeld
                         text: "Você assumiu as luzes; o OpenRGB está pausado."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
@@ -1653,7 +1940,6 @@ Item {
 
                     PlasmaComponents.Button {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                             && (root.openRgbControlsLighting || root.lightingHeld)
                         enabled: !root.controlBusy
                         text: root.lightingHeld ? "Devolver ao OpenRGB" : "Assumir controle"
@@ -1661,11 +1947,9 @@ Item {
                         onClicked: root.runLightingHold(!root.lightingHeld)
                     }
 
-                    // "Vincular com OpenRGB": installs the plugin that shows
-                    // the headset as an OpenRGB device.
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: root.openSection === "lighting" && text.length > 0
+                        visible: text.length > 0
                         text: root.openRgbSummary()
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
@@ -1674,7 +1958,6 @@ Item {
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                             && (root.openRgbLinking || root.openRgbCanLink())
 
                         PlasmaComponents.BusyIndicator {
@@ -1695,22 +1978,21 @@ Item {
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                         enabled: root.lightingWritable && !root.controlBusy
                         PlasmaComponents.Button { text: "Ligar"; icon.source: Qt.resolvedUrl("../images/light-on.svg"); checked: root.lightingEnabled === true; onClicked: root.runControl("lighting", "on") }
                         PlasmaComponents.Button { text: "Desligar"; icon.source: Qt.resolvedUrl("../images/light-off.svg"); checked: root.lightingEnabled === false; onClicked: root.runControl("lighting", "off") }
                     }
 
                     PlasmaComponents.Label {
+                        visible: root.lightingEnabled !== false
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                         text: "Cor sólida personalizada"
                         opacity: 0.7
                     }
 
                     PlasmaComponents.Label {
                         Layout.fillWidth: true
-                        visible: root.openSection === "lighting" && !root.lightingTargetProfileKnown()
+                        visible: root.lightingEnabled !== false && !root.lightingTargetProfileKnown()
                         text: "Perfil da zona desconhecido. Aplique uma cor sólida em Ambos para recuperar."
                         wrapMode: Text.Wrap
                         horizontalAlignment: Text.AlignHCenter
@@ -1718,8 +2000,8 @@ Item {
                     }
 
                     RowLayout {
+                        visible: root.lightingEnabled !== false
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                         enabled: root.lightingWritable && !root.controlBusy
 
                         PlasmaComponents.Button {
@@ -1756,14 +2038,14 @@ Item {
 
                     PlasmaComponents.Label {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
                         text: "Efeito"
                         opacity: 0.7
                     }
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
                         enabled: root.lightingWritable && !root.controlBusy && root.lightingTargetProfileKnown()
                         spacing: Kirigami.Units.smallSpacing
 
@@ -1775,14 +2057,14 @@ Item {
 
                     PlasmaComponents.Label {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
                         text: "Velocidade"
                         opacity: 0.7
                     }
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
                         enabled: root.lightingWritable && !root.controlBusy
                         spacing: Kirigami.Units.smallSpacing
 
@@ -1793,8 +2075,8 @@ Item {
                     }
 
                     PlasmaComponents.Label {
+                        visible: root.lightingEnabled !== false
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                         text: root.lightingSegment < 0
                             ? "Cor: todos os segmentos"
                             : `Cor: segmento ${root.lightingSegment + 1}`
@@ -1803,7 +2085,7 @@ Item {
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting" && root.lightingTargetProfileKnown()
+                        visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
                         enabled: root.lightingWritable && !root.controlBusy
                         spacing: Kirigami.Units.smallSpacing
 
@@ -1854,11 +2136,11 @@ Item {
                     }
 
                     Item {
+                        visible: root.lightingEnabled !== false
                         id: colorPicker
                         Layout.alignment: Qt.AlignHCenter
                         Layout.preferredWidth: 220
                         Layout.preferredHeight: 220
-                        visible: root.openSection === "lighting"
                         // Stays usable while a write runs: the latest color is
                         // queued and sent as soon as the headset is free.
                         enabled: root.lightingWritable && root.canApplyLightingColor()
@@ -1990,8 +2272,8 @@ Item {
                     }
 
                     RowLayout {
+                        visible: root.lightingEnabled !== false
                         Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "lighting"
                         enabled: root.lightingWritable && root.canApplyLightingColor()
                         spacing: Kirigami.Units.smallSpacing
 
@@ -2012,114 +2294,7 @@ Item {
                         }
 
                     }
-
-                    RowLayout {
-                        Layout.alignment: Qt.AlignHCenter
-                        visible: root.openSection === "sidetone"
-                        enabled: root.deviceAvailable && !root.controlBusy
-                        PlasmaComponents.Button { text: "Off"; checked: root.sidetoneLevel === "off"; onClicked: root.runControl("sidetone", "off") }
-                        PlasmaComponents.Button { text: "Baixo"; checked: root.sidetoneLevel === "low"; onClicked: root.runControl("sidetone", "low") }
-                        PlasmaComponents.Button { text: "Médio"; checked: root.sidetoneLevel === "medium"; onClicked: root.runControl("sidetone", "medium") }
-                        PlasmaComponents.Button { text: "Alto"; checked: root.sidetoneLevel === "high"; onClicked: root.runControl("sidetone", "high") }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: root.openSection === "spatial"
-                        spacing: Kirigami.Units.smallSpacing
-
-                        PlasmaComponents.Label {
-                            Layout.fillWidth: true
-                            text: "Recurso experimental. Ative somente após instalar manualmente um dataset HRIR válido; o widget nunca baixa arquivos."
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            opacity: 0.7
-                        }
-
-                        RowLayout {
-                            Layout.alignment: Qt.AlignHCenter
-
-                            PlasmaComponents.Switch {
-                                id: spatialToggle
-                                text: "Ativar áudio espacial"
-                                checked: root.spatialEnabled
-                                enabled: !root.spatialBusy && !root.spatialUpdating
-                                     && (root.spatialEnabled || root.spatialReady)
-                                onClicked: {
-                                    const nextState = checked
-                                    checked = Qt.binding(function() { return root.spatialEnabled })
-                                    root.setSpatialEnabled(nextState)
-                                }
-                            }
-
-                            PlasmaComponents.BusyIndicator {
-                                running: root.spatialBusy || root.spatialUpdating
-                                visible: running
-                            }
-                        }
-
-                        PlasmaComponents.Label {
-                            Layout.fillWidth: true
-                            text: !root.spatialDatasetValid
-                                ? "Dataset: ausente ou inválido — adicione-o manualmente em spatial/hrtf/"
-                                : root.spatialActive
-                                    ? root.spatialProcessingMode === "bypass"
-                                        ? "Estado: desativado (bypass) e saudável"
-                                        : root.spatialProcessingMode === "binaural"
-                                            ? "Estado: binaural ativo e saudável"
-                                            : "Estado: mix em transição ou ainda não confirmado"
-                                    : root.spatialEnabled
-                                        ? "Estado: preparando; aguardando um caminho saudável"
-                                        : "Estado: desativado"
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: root.spatialActive
-                                ? Kirigami.Theme.positiveTextColor
-                                : root.spatialError.length > 0
-                                    ? Kirigami.Theme.negativeTextColor
-                                    : Kirigami.Theme.neutralTextColor
-                        }
-
-                        PlasmaComponents.Label {
-                            Layout.fillWidth: true
-                            visible: !root.spatialActive && root.spatialError.length > 0
-                            text: root.spatialError
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: Kirigami.Theme.negativeTextColor
-                        }
-
-                        PlasmaComponents.Label {
-                            Layout.fillWidth: true
-                            text: "No jogo, selecione a saída espacial JamBaLinux. A saída de áudio padrão do sistema nunca é alterada."
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            opacity: 0.6
-                        }
-                    }
                 }
-            }
-
-            PlasmaComponents.Label {
-                Layout.alignment: Qt.AlignHCenter
-                visible: root.charging
-                text: root.batteryPercent >= 100 ? "⚡ Carregado" : "⚡ Carregando"
-                color: "#f5c542"
-                font.bold: true
-            }
-
-            PlasmaComponents.Label {
-                Layout.fillWidth: true
-                visible: root.errorMessage.length > 0 || !root.daemonAvailable
-                horizontalAlignment: Text.AlignHCenter
-                text: root.errorMessage.length > 0
-                    ? root.errorMessage
-                    : "Monitor em tempo real inativo"
-                color: root.errorMessage.length > 0
-                    ? Kirigami.Theme.negativeTextColor
-                    : Kirigami.Theme.neutralTextColor
-                wrapMode: Text.Wrap
-                opacity: 0.85
             }
         }
     }
@@ -2199,7 +2374,9 @@ Item {
                 try {
                     const profile = JSON.parse(stdout)
                     const pipewire = profile.pipewire ?? {}
-                    const appliedBands = pipewire.applied_bands
+                    root.equalizerBypassed = profile.bypassed === true
+                    // Bypassed, the live graph runs flat: show the saved bands.
+                    const appliedBands = (root.equalizerBypassed ? null : pipewire.applied_bands)
                         ?? profile.applied_bands ?? profile.bands ?? []
                     // A status read while a `set` is in flight can predate it;
                     // the set's own answer updates the handles instead.
@@ -2283,6 +2460,9 @@ Item {
                 const result = JSON.parse(stdout)
                 root.spatialEnabled = result.enabled === true
                 root.spatialMode = String(result.mode ?? "off")
+                root.spatialListening = String(result.listening ?? "game")
+                if (result.sound && typeof result.sound === "object")
+                    root.spatialSound = result.sound
                 root.spatialActive = result.active === true
                 root.spatialProcessingMode = String(result.processing_mode ?? (root.spatialEnabled ? "binaural" : "bypass"))
                 root.spatialServiceActive = result.service_active === true
@@ -2397,11 +2577,6 @@ Item {
         onTriggered: outputSource.connectSource(root.soniccoreCommand(["output", "--format", "json"]))
     }
 
-    // The wallpaper can change at any time; look it up each time it is shown.
-    onExpandedChanged: function() {
-        if (root.expanded && root.vivo && root.vivoBackground === "glass")
-            wallpaperSource.connectSource(root.soniccoreCommand(["wallpaper", "--format", "json"]))
-    }
 
     // Measured battery estimate, refreshed while the popup is open.
     Plasma5Support.DataSource {
@@ -2435,7 +2610,7 @@ Item {
     Timer {
         interval: 2000
         repeat: true
-        running: root.expanded && root.openSection === "lighting"
+        running: root.expanded
         triggeredOnStart: true
         onTriggered: {
             root.nowMs = Date.now()
@@ -2492,7 +2667,7 @@ Item {
     Timer {
         interval: (root.spatialEnabled && !root.spatialActive) || root.spatialMixPending ? 1000 : 15000
         repeat: true
-        running: root.expanded && root.openSection === "spatial"
+        running: root.expanded
         triggeredOnStart: true
         onTriggered: root.refreshSpatial()
     }

@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=JamBaLinux SonicCore
-Comment=Show the JBL Quantum 810 Wireless battery level
-Exec=/bin/sh -lc "exec ~/.cargo/bin/soniccore show"
+Comment=Battery, equalizer and lights of the JBL Quantum 810 Wireless
+Exec=/bin/sh -lc "exec ~/.local/share/jambalinux-soniccore/app/soniccore-app"
 Icon=audio-headphones
 Terminal=false
 StartupNotify=false
-Categories=Utility;
+Categories=AudioVideo;Audio;Utility;
 Keywords=JamBaLinux;SonicCore;JBL;Quantum;headset;battery;

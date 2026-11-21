@@ -25,6 +25,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::spatial::SoundSettings;
+
 /// Stable, vendor-neutral node name of the spatial capture sink (the 7.1 input
 /// applications select).
 pub const SPATIAL_SINK_NODE: &str = "jambalinux-soniccore-game-spatial";
@@ -182,10 +184,53 @@ pub const SPATIAL_DRY_CONTROLS: [&str; 2] = ["wetDryL:Gain 2", "wetDryR:Gain 2"]
 /// lifecycle supervisor and read-only status reporting use this one parser and
 /// tolerance, so the status cannot disagree with the controls the supervisor
 /// actually applies.
+/// Live controls the listening modes change, in [`SpatialMix::sound`] order:
+/// centre (dialogue) and LFE (bass) of both binaural mixers, their side and
+/// rear inputs (surround), and the centre of the plain-stereo downmix.
+pub const SOUND_CONTROLS: [&str; 16] = [
+    "mixL:Gain 4",
+    "mixR:Gain 4",
+    "mixL:Gain 8",
+    "mixR:Gain 8",
+    "mixL:Gain 2",
+    "mixL:Gain 3",
+    "mixL:Gain 6",
+    "mixL:Gain 7",
+    "mixR:Gain 2",
+    "mixR:Gain 3",
+    "mixR:Gain 6",
+    "mixR:Gain 7",
+    "dryL:Gain 2",
+    "dryR:Gain 2",
+    "bassL:Gain",
+    "bassR:Gain",
+];
+
+/// The ITU downmix weight of the centre channel in the plain-stereo path.
+const DRY_CENTRE: f32 = 0.707;
+
+/// The centre feeds its convolvers and the dry downmix through this high-pass:
+/// a stereo upmix puts every mono sound in the centre, bass included, so
+/// without it "Diálogos" lifted the bass. The bass still plays from the
+/// fronts and the LFE.
+pub const CENTRE_VOICE_FILTER: &str = "fcVoice";
+const CENTRE_VOICE_CUTOFF_HZ: f32 = 120.0;
+
+/// Low shelves on the final stereo pair: "Graves" acts on every source, also
+/// on stereo games whose LFE channel carries little.
+pub const BASS_SHELVES: [&str; 2] = ["bassL", "bassR"];
+const BASS_SHELF_HZ: f32 = 120.0;
+
+fn decibels(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SpatialMix {
     pub wet: [f32; 2],
     pub dry: [f32; 2],
+    /// Values for [`SOUND_CONTROLS`] (mixer factors; the shelves in dB).
+    pub sound: [f32; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,26 +241,74 @@ pub(crate) enum SpatialProcessingMode {
 }
 
 impl SpatialMix {
+    /// The gate alone, every channel at its built-in level.
     pub(crate) fn target(enabled: bool) -> Self {
-        let wet = if enabled { 1.0 } else { 0.0 };
+        Self::for_sound(enabled, &SoundSettings::NEUTRAL)
+    }
+
+    /// The gate plus a listening mode's levels. Disabled, the plain stereo
+    /// path plays alone, but the channel levels still follow the mode.
+    pub(crate) fn for_sound(enabled: bool, sound: &SoundSettings) -> Self {
+        let wet = if enabled { sound.intensity } else { 0.0 };
+        let centre = decibels(sound.dialogue_db);
+        let lfe = decibels(sound.bass_db);
+        let surround = decibels(sound.surround_db);
+        let dry_centre = DRY_CENTRE * centre;
         Self {
             wet: [wet; 2],
             dry: [1.0 - wet; 2],
+            sound: [
+                centre,
+                centre,
+                lfe,
+                lfe,
+                surround,
+                surround,
+                surround,
+                surround,
+                surround,
+                surround,
+                surround,
+                surround,
+                dry_centre,
+                dry_centre,
+                sound.bass_db,
+                sound.bass_db,
+            ],
         }
     }
 
-    pub(crate) fn matches(self, other: Self) -> bool {
-        self.wet
-            .into_iter()
-            .chain(self.dry)
-            .zip(other.wet.into_iter().chain(other.dry))
-            .all(|(actual, expected)| (actual - expected).abs() <= 0.05)
+    pub(crate) fn interpolate(from: Self, to: Self, alpha: f32) -> Self {
+        let step = |start: f32, end: f32| start + ((end - start) * alpha);
+        Self {
+            wet: std::array::from_fn(|index| step(from.wet[index], to.wet[index])),
+            dry: std::array::from_fn(|index| step(from.dry[index], to.dry[index])),
+            sound: std::array::from_fn(|index| step(from.sound[index], to.sound[index])),
+        }
     }
 
-    pub(crate) fn processing_mode(self) -> SpatialProcessingMode {
-        if self.matches(Self::target(true)) {
+    /// Every live control with its value, for one `pw-cli set-param`.
+    pub(crate) fn controls(self) -> Vec<(&'static str, f32)> {
+        SPATIAL_WET_CONTROLS
+            .into_iter()
+            .zip(self.wet)
+            .chain(SPATIAL_DRY_CONTROLS.into_iter().zip(self.dry))
+            .chain(SOUND_CONTROLS.into_iter().zip(self.sound))
+            .collect()
+    }
+
+    pub(crate) fn matches(self, other: Self) -> bool {
+        self.controls()
+            .into_iter()
+            .zip(other.controls())
+            .all(|((_, actual), (_, expected))| (actual - expected).abs() <= 0.05)
+    }
+
+    /// What the controls are doing for the saved levels `sound`.
+    pub(crate) fn processing_mode(self, sound: &SoundSettings) -> SpatialProcessingMode {
+        if self.matches(Self::for_sound(true, sound)) {
             SpatialProcessingMode::Binaural
-        } else if self.matches(Self::target(false)) {
+        } else if self.matches(Self::for_sound(false, sound)) {
             SpatialProcessingMode::Bypass
         } else {
             SpatialProcessingMode::Transitioning
@@ -260,6 +353,15 @@ pub(crate) fn spatial_mix(node: &Value) -> Result<SpatialMix, String> {
             .copied()
             .ok_or_else(|| format!("the spatial capture node does not expose `{name}`"))
     };
+    // Graphs from before the listening modes may not report these; their
+    // levels are then the built-in ones.
+    let neutral = SpatialMix::target(true).sound;
+    let sound = std::array::from_fn(|index| {
+        values
+            .get(SOUND_CONTROLS[index])
+            .copied()
+            .unwrap_or(neutral[index])
+    });
     Ok(SpatialMix {
         wet: [
             control(SPATIAL_WET_CONTROLS[0])?,
@@ -269,6 +371,7 @@ pub(crate) fn spatial_mix(node: &Value) -> Result<SpatialMix, String> {
             control(SPATIAL_DRY_CONTROLS[0])?,
             control(SPATIAL_DRY_CONTROLS[1])?,
         ],
+        sound,
     })
 }
 
@@ -369,6 +472,29 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> String {
 /// live supervisor still reconciles after spawning, but a graph must never
 /// begin wet while spatial processing is disabled.
 pub fn render_filter_chain_config(hrir_path: &Path, enabled: bool) -> Result<String, String> {
+    render_filter_chain_config_with_sound(hrir_path, enabled, &SoundSettings::NEUTRAL)
+}
+
+/// A gain as config text: one decimal when that is exact (the historic form),
+/// three otherwise.
+fn gain_text(value: f32) -> String {
+    let tenths = value * 10.0;
+    if (tenths - tenths.round()).abs() < 1e-4 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+/// Like [`render_filter_chain_config`], starting at a listening mode's levels
+/// so a fresh graph never plays a moment at the wrong ones.
+pub fn render_filter_chain_config_with_sound(
+    hrir_path: &Path,
+    enabled: bool,
+    sound: &SoundSettings,
+) -> Result<String, String> {
+    let mix = SpatialMix::for_sound(enabled, sound);
+    let neutral = SpatialMix::target(enabled);
     let hrir_text = hrir_path.to_str().ok_or_else(|| {
         format!(
             "the HRIR path {} is not valid UTF-8, so it cannot be written into a PipeWire \
@@ -393,27 +519,62 @@ pub fn render_filter_chain_config(hrir_path: &Path, enabled: bool) -> Result<Str
             convolver.name, convolver.channel
         ));
     }
-    nodes.push_str("                    { type = builtin label = mixer name = mixL }\n");
-    nodes.push_str("                    { type = builtin label = mixer name = mixR }\n");
+    nodes.push_str(&format!(
+        "                    {{ type = builtin label = bq_highpass name = {CENTRE_VOICE_FILTER} control = {{ \"Freq\" = {CENTRE_VOICE_CUTOFF_HZ:.1} \"Q\" = 0.707 }} }}\n"
+    ));
+    // Binaural mixers: built-in unity levels, or the listening mode's.
+    for (index, mixer) in ["mixL", "mixR"].into_iter().enumerate() {
+        if mix.sound == neutral.sound {
+            nodes.push_str(&format!(
+                "                    {{ type = builtin label = mixer name = {mixer} }}\n"
+            ));
+            continue;
+        }
+        let centre = gain_text(mix.sound[index]);
+        let lfe = gain_text(mix.sound[2 + index]);
+        let surround = gain_text(mix.sound[4 + index * 4]);
+        nodes.push_str(&format!(
+            "                    {{ type = builtin label = mixer name = {mixer} control = {{ \"Gain 2\" = {surround} \"Gain 3\" = {surround} \"Gain 4\" = {centre} \"Gain 6\" = {surround} \"Gain 7\" = {surround} \"Gain 8\" = {lfe} }} }}\n"
+        ));
+    }
     // The direct path follows the conventional ITU surround-to-stereo matrix:
     // main channel 1.0, centre/surround channels 0.707, and no LFE.
-    nodes.push_str(
-        "                    { type = builtin label = mixer name = dryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
-    );
-    nodes.push_str(
-        "                    { type = builtin label = mixer name = dryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.707 \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 } }\n",
-    );
-    let wet = if enabled { 1.0 } else { 0.0 };
-    let dry = 1.0 - wet;
+    for (index, mixer) in ["dryL", "dryR"].into_iter().enumerate() {
+        let centre = gain_text(mix.sound[12 + index]);
+        nodes.push_str(&format!(
+            "                    {{ type = builtin label = mixer name = {mixer} control = {{ \"Gain 1\" = 1.0 \"Gain 2\" = {centre} \"Gain 3\" = 0.707 \"Gain 4\" = 0.707 }} }}\n"
+        ));
+    }
+    let wet = gain_text(mix.wet[0]);
+    let dry = gain_text(mix.dry[0]);
     nodes.push_str(&format!(
-        "                    {{ type = builtin label = mixer name = wetDryL control = {{ \"Gain 1\" = {wet:.1} \"Gain 2\" = {dry:.1} }} }}\n",
+        "                    {{ type = builtin label = mixer name = wetDryL control = {{ \"Gain 1\" = {wet} \"Gain 2\" = {dry} }} }}\n",
     ));
     nodes.push_str(&format!(
-        "                    {{ type = builtin label = mixer name = wetDryR control = {{ \"Gain 1\" = {wet:.1} \"Gain 2\" = {dry:.1} }} }}\n",
+        "                    {{ type = builtin label = mixer name = wetDryR control = {{ \"Gain 1\" = {wet} \"Gain 2\" = {dry} }} }}\n",
     ));
+    let bass = gain_text(mix.sound[14]);
+    for shelf in BASS_SHELVES {
+        nodes.push_str(&format!(
+            "                    {{ type = builtin label = bq_lowshelf name = {shelf} control = {{ \"Freq\" = {BASS_SHELF_HZ:.1} \"Q\" = 0.707 \"Gain\" = {bass} }} }}\n"
+        ));
+    }
 
+    // The official tables stay as published; the centre's two consumers read
+    // it through the voice high-pass instead of the raw copy.
+    let centre = |output: &'static str| {
+        if output == "copyFC" {
+            CENTRE_VOICE_FILTER
+        } else {
+            output
+        }
+    };
     let mut links = String::new();
+    links.push_str(&format!(
+        "                    {{ output = \"copyFC:Out\" input = \"{CENTRE_VOICE_FILTER}:In\" }}\n"
+    ));
     for (output, input) in INPUT_LINKS {
+        let output = centre(output);
         links.push_str(&format!(
             "                    {{ output = \"{output}:Out\" input = \"{input}:In\" }}\n"
         ));
@@ -424,6 +585,7 @@ pub fn render_filter_chain_config(hrir_path: &Path, enabled: bool) -> Result<Str
         ));
     }
     for (output, mixer, index) in DRY_DOWNMIX_LINKS {
+        let output = centre(output);
         links.push_str(&format!(
             "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
         ));
@@ -431,6 +593,11 @@ pub fn render_filter_chain_config(hrir_path: &Path, enabled: bool) -> Result<Str
     for (output, mixer, index) in FINAL_MIX_LINKS {
         links.push_str(&format!(
             "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
+        ));
+    }
+    for (mixer, shelf) in WET_DRY_MIXERS.into_iter().zip(BASS_SHELVES) {
+        links.push_str(&format!(
+            "                    {{ output = \"{mixer}:Out\" input = \"{shelf}:In\" }}\n"
         ));
     }
 
@@ -480,7 +647,7 @@ context.modules = [
                 links = [
 {links}                ]
                 inputs = [ {inputs} ]
-                outputs = [ "wetDryL:Out" "wetDryR:Out" ]
+                outputs = [ "bassL:Out" "bassR:Out" ]
             }
             capture.props = {
                 node.name = "{sink}"
@@ -626,6 +793,7 @@ mod tests {
                 "                    {{ type = builtin label = convolver name = {name} config = {{ filename = \"{hrir}\" channel = {channel} }} }}\n"
             ));
         }
+        block.push_str("                    { type = builtin label = bq_highpass name = fcVoice control = { \"Freq\" = 120.0 \"Q\" = 0.707 } }\n");
         block.push_str("                    { type = builtin label = mixer name = mixL }\n");
         block.push_str("                    { type = builtin label = mixer name = mixR }\n");
         block.push_str(
@@ -640,13 +808,25 @@ mod tests {
         block.push_str(
             "                    { type = builtin label = mixer name = wetDryR control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.0 } }\n",
         );
+        for shelf in ["bassL", "bassR"] {
+            block.push_str(&format!(
+                "                    {{ type = builtin label = bq_lowshelf name = {shelf} control = {{ \"Freq\" = 120.0 \"Q\" = 0.707 \"Gain\" = 0.0 }} }}\n"
+            ));
+        }
         block
+    }
+
+    /// The centre's consumers read it through the voice high-pass.
+    fn rendered_source(output: &'static str) -> &'static str {
+        if output == "copyFC" { "fcVoice" } else { output }
     }
 
     /// The exact `links = [ ... ]` body the tables above imply.
     fn expected_links_block() -> String {
         let mut block = String::new();
+        block.push_str("                    { output = \"copyFC:Out\" input = \"fcVoice:In\" }\n");
         for (output, input) in EXPECTED_INPUT_LINKS {
+            let output = rendered_source(output);
             block.push_str(&format!(
                 "                    {{ output = \"{output}:Out\" input = \"{input}:In\" }}\n"
             ));
@@ -657,6 +837,7 @@ mod tests {
             ));
         }
         for (output, mixer, index) in EXPECTED_DRY_DOWNMIX_LINKS {
+            let output = rendered_source(output);
             block.push_str(&format!(
                 "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
             ));
@@ -666,6 +847,8 @@ mod tests {
                 "                    {{ output = \"{output}:Out\" input = \"{mixer}:In {index}\" }}\n"
             ));
         }
+        block.push_str("                    { output = \"wetDryL:Out\" input = \"bassL:In\" }\n");
+        block.push_str("                    { output = \"wetDryR:Out\" input = \"bassR:In\" }\n");
         block
     }
 
@@ -696,7 +879,7 @@ mod tests {
         assert!(config.contains("node.dont-fallback = true"));
         assert!(config.contains("audio.channels = 2"));
         assert!(config.contains("audio.position = [ FL FR ]"));
-        assert!(config.contains("outputs = [ \"wetDryL:Out\" \"wetDryR:Out\" ]"));
+        assert!(config.contains("outputs = [ \"bassL:Out\" \"bassR:Out\" ]"));
         assert!(config.contains(&format!("target.object = \"{TARGET_EQUALIZER_SINK}\"")));
         // Exactly one routing target, and it is the equalizer.
         assert_eq!(config.matches("target.object").count(), 1);
@@ -785,6 +968,7 @@ mod tests {
         let config = render();
 
         for (output, mixer, index) in EXPECTED_DRY_DOWNMIX_LINKS {
+            let output = rendered_source(output);
             assert!(config.contains(&format!(
                 "output = \"{output}:Out\" input = \"{mixer}:In {index}\""
             )));
@@ -977,5 +1161,52 @@ mod tests {
         for banned in ["dts", "dolby", "atmos", "quantum"] {
             assert!(!config.contains(banned), "config leaked `{banned}`");
         }
+    }
+
+    #[test]
+    fn listening_mode_levels_reach_the_controls_and_the_fresh_graph() {
+        let cinema = crate::spatial::ListeningMode::Cinema.settings().unwrap();
+        let mix = SpatialMix::for_sound(true, &cinema);
+        let lifted = 10f32.powf(3.0 / 20.0);
+        assert!((mix.sound[0] - lifted).abs() < 1e-3, "dialogue");
+        assert!((mix.sound[2] - lifted).abs() < 1e-3, "bass");
+        assert!((mix.sound[12] - 0.707 * lifted).abs() < 1e-3, "dry dialogue");
+        assert_eq!(mix.processing_mode(&cinema), SpatialProcessingMode::Binaural);
+        assert_eq!(
+            SpatialMix::for_sound(false, &cinema).processing_mode(&cinema),
+            SpatialProcessingMode::Bypass
+        );
+        // Music keeps most of the plain stereo: 40 % 3D.
+        let music = crate::spatial::ListeningMode::Music.settings().unwrap();
+        let music_mix = SpatialMix::for_sound(true, &music);
+        assert_eq!(music_mix.wet, [0.4; 2]);
+        assert!((music_mix.dry[0] - 0.6).abs() < 1e-6);
+
+        let config = render_filter_chain_config_with_sound(
+            Path::new(TEST_HRIR),
+            true,
+            &cinema,
+        )
+        .unwrap();
+        assert!(config.contains("name = mixL control = { \"Gain 2\" = 1.0 \"Gain 3\" = 1.0 \"Gain 4\" = 1.413"));
+        assert!(config.contains("\"Gain 8\" = 1.413"));
+        // "Graves" also drives the output shelves, in dB.
+        assert!(config.contains("name = bassL control = { \"Freq\" = 120.0 \"Q\" = 0.707 \"Gain\" = 3.0 }"));
+        assert_eq!(mix.sound[14], 3.0);
+        // The centre reaches its convolvers only through the voice high-pass.
+        assert!(config.contains("output = \"copyFC:Out\" input = \"fcVoice:In\""));
+        assert!(config.contains("output = \"fcVoice:Out\" input = \"convFC_L:In\""));
+        assert!(!config.contains("output = \"copyFC:Out\" input = \"convFC_L:In\""));
+        assert!(config.contains("name = dryL control = { \"Gain 1\" = 1.0 \"Gain 2\" = 0.999"));
+        // The built-in levels still render the historic text.
+        assert_eq!(
+            render_filter_chain_config_with_sound(
+                Path::new(TEST_HRIR),
+                true,
+                &crate::spatial::SoundSettings::NEUTRAL
+            )
+            .unwrap(),
+            render_filter_chain_config(Path::new(TEST_HRIR), true).unwrap()
+        );
     }
 }

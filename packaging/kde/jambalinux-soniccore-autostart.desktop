@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=JamBaLinux SonicCore
+Comment=Headset battery in the system tray
+Exec=/bin/sh -lc "exec ~/.local/share/jambalinux-soniccore/app/soniccore-app --tray"
+Icon=audio-headphones
+Terminal=false
+StartupNotify=false
+NoDisplay=true
+X-KDE-autostart-phase=2

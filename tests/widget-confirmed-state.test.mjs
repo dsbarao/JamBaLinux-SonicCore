@@ -8,31 +8,31 @@ const widgetSource = await readFile(widgetPath, "utf8")
 
 test("confirmed-state buttons do not use checkable", () => {
     // Ambient buttons
-    assert.doesNotMatch(widgetSource, /text:\s*"Desligado"[\s\S]*?checkable:\s*true[\s\S]*?root\.ambientMode/)
-    assert.doesNotMatch(widgetSource, /text:\s*"ANC"[\s\S]*?checkable:\s*true[\s\S]*?root\.ambientMode/)
-    assert.doesNotMatch(widgetSource, /text:\s*"TalkThru"[\s\S]*?checkable:\s*true[\s\S]*?root\.ambientMode/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Desligado"[^\n]*?checkable:\s*true[^\n]*?root\.ambientMode/)
+    assert.doesNotMatch(widgetSource, /text:\s*"ANC"[^\n]*?checkable:\s*true[^\n]*?root\.ambientMode/)
+    assert.doesNotMatch(widgetSource, /text:\s*"TalkThru"[^\n]*?checkable:\s*true[^\n]*?root\.ambientMode/)
 
     // Sidetone buttons
-    assert.doesNotMatch(widgetSource, /text:\s*"Off"[\s\S]*?checkable:\s*true[\s\S]*?root\.sidetoneLevel/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Baixo"[\s\S]*?checkable:\s*true[\s\S]*?root\.sidetoneLevel/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Médio"[\s\S]*?checkable:\s*true[\s\S]*?root\.sidetoneLevel/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Alto"[\s\S]*?checkable:\s*true[\s\S]*?root\.sidetoneLevel/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Off"[^\n]*?checkable:\s*true[^\n]*?root\.sidetoneLevel/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Baixo"[^\n]*?checkable:\s*true[^\n]*?root\.sidetoneLevel/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Médio"[^\n]*?checkable:\s*true[^\n]*?root\.sidetoneLevel/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Alto"[^\n]*?checkable:\s*true[^\n]*?root\.sidetoneLevel/)
 
     // Lighting On/Off buttons
-    assert.doesNotMatch(widgetSource, /text:\s*"Ligar"[\s\S]*?checkable:\s*true[\s\S]*?root\.lightingEnabled/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Desligar"[\s\S]*?checkable:\s*true[\s\S]*?root\.lightingEnabled/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Ligar"[^\n]*?checkable:\s*true[^\n]*?root\.lightingEnabled/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Desligar"[^\n]*?checkable:\s*true[^\n]*?root\.lightingEnabled/)
 
     // Lighting effect buttons
-    assert.doesNotMatch(widgetSource, /text:\s*"Respiração"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingEffect/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Sólido"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingEffect/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Onda"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingEffect/)
-    assert.doesNotMatch(widgetSource, /text:\s*"Falha"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingEffect/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Respiração"[^\n]*?checkable:\s*true[^\n]*?selectedLightingEffect/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Sólido"[^\n]*?checkable:\s*true[^\n]*?selectedLightingEffect/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Onda"[^\n]*?checkable:\s*true[^\n]*?selectedLightingEffect/)
+    assert.doesNotMatch(widgetSource, /text:\s*"Falha"[^\n]*?checkable:\s*true[^\n]*?selectedLightingEffect/)
 
     // Lighting speed buttons
-    assert.doesNotMatch(widgetSource, /text:\s*"0,5×"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingSpeed/)
-    assert.doesNotMatch(widgetSource, /text:\s*"1×"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingSpeed/)
-    assert.doesNotMatch(widgetSource, /text:\s*"1,5×"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingSpeed/)
-    assert.doesNotMatch(widgetSource, /text:\s*"2×"[\s\S]*?checkable:\s*true[\s\S]*?selectedLightingSpeed/)
+    assert.doesNotMatch(widgetSource, /text:\s*"0,5×"[^\n]*?checkable:\s*true[^\n]*?selectedLightingSpeed/)
+    assert.doesNotMatch(widgetSource, /text:\s*"1×"[^\n]*?checkable:\s*true[^\n]*?selectedLightingSpeed/)
+    assert.doesNotMatch(widgetSource, /text:\s*"1,5×"[^\n]*?checkable:\s*true[^\n]*?selectedLightingSpeed/)
+    assert.doesNotMatch(widgetSource, /text:\s*"2×"[^\n]*?checkable:\s*true[^\n]*?selectedLightingSpeed/)
 })
 
 test("confirmed-state buttons keep checked bound to root state", () => {
@@ -64,14 +64,23 @@ test("confirmed-state buttons keep checked bound to root state", () => {
     assert.match(widgetSource, /text:\s*"2×"[^}]*checked:\s*root\.selectedLightingSpeed\(\) === "2.0"/)
 })
 
-test("spatial switch reasserts checked binding on click and is not referenced outside Switch", () => {
-    // Switch block has id spatialToggle and reasserts checked binding on click
-    const switchMatch = widgetSource.match(/PlasmaComponents\.Switch\s*\{([\s\S]*?)\n\s*\}/)
-    assert.notEqual(switchMatch, null, "PlasmaComponents.Switch must exist")
-    assert.match(switchMatch[1], /id:\s*spatialToggle/)
-    assert.match(switchMatch[1], /checked\s*=\s*Qt\.binding\(function\(\)\s*\{\s*return\s+root\.spatialEnabled;?\s*\}\)/)
+test("listening modes: Natural turns the 3D off, a named mode sets its levels and turns it on", () => {
+    assert.match(widgetSource, /\{ "mode": "natural", "label": "Natural" \}/)
+    assert.match(widgetSource, /\{ "mode": "custom", "label": "Personalizado" \}/)
+    assert.match(widgetSource, /checked: modelData\.mode === "natural"\n\s+\? !root\.spatialEnabled\n\s+: root\.spatialEnabled && root\.spatialListening === modelData\.mode/)
+    assert.match(widgetSource, /if \(spatialEnabled\) setSpatialEnabled\(false\)/)
+    assert.match(widgetSource, /const steps = \[\["spatial", "sound", mode\]\]\n\s+if \(!spatialEnabled\) steps\.push\(\["spatial", "enable"\]\)/)
+    assert.match(widgetSource, /\["spatial", "sound", "set", control,/)
+    assert.doesNotMatch(widgetSource, /experimental|Recurso experimental|saudável/)
+})
 
-    // spatialToggle must only be referenced inside the Switch block
-    const nonSwitchSource = widgetSource.replace(switchMatch[0], "")
-    assert.doesNotMatch(nonSwitchSource, /\bspatialToggle\b/)
+test("equalizer switch shows the confirmed bypass state and folds the bands away", () => {
+    const switchMatch = widgetSource.match(/PlasmaComponents\.Switch\s*\{(\s*id:\s*equalizerToggle[\s\S]*?)\n\s*\}/)
+    assert.notEqual(switchMatch, null, "the equalizer card must have its on/off switch")
+    assert.match(switchMatch[1], /checked:\s*!root\.equalizerBypassed/)
+    assert.match(switchMatch[1], /checked\s*=\s*Qt\.binding\(function\(\)\s*\{\s*return\s+!root\.equalizerBypassed\s*\}\)/)
+    assert.match(switchMatch[1], /root\.setEqualizerBypassed\(!on\)/)
+    assert.match(widgetSource, /startEqualizerAction\(bypassed \? "bypass-on" : "bypass-off", \["bypass", bypassed \? "on" : "off"\]\)/)
+    assert.match(widgetSource, /visible: !root\.equalizerBypassed/)
+    assert.match(widgetSource, /root\.equalizerBypassed = profile\.bypassed === true/)
 })

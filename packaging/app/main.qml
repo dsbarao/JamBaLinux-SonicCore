@@ -12,16 +12,18 @@ import "../plasma/org.jambalinux.soniccore/contents/ui"
 // (SonicCore.qml) in its own window, with a tray icon showing the battery.
 // Closing the window keeps it in the tray; "Sair" quits.
 //
-// Sketch: run with `qml6 --apptype widget packaging/app/main.qml`.
+// Installed by tools/install-user.sh and started by soniccore-app; from the
+// repository: `qml6 --apptype widget packaging/app/main.qml [-- --tray]`.
 Kirigami.ApplicationWindow {
     id: window
 
     title: "JamBaLinux SonicCore"
-    width: Kirigami.Units.gridUnit * 28
-    height: Kirigami.Units.gridUnit * 44
+    width: Kirigami.Units.gridUnit * 68
+    height: Kirigami.Units.gridUnit * 46
     minimumWidth: Kirigami.Units.gridUnit * 25
     minimumHeight: Kirigami.Units.gridUnit * 24
-    visible: true
+    // At login (autostart passes --tray) only the tray icon appears.
+    visible: !Qt.application.arguments.includes("--tray")
 
     // The app's own settings, with the same names the widget uses.
     Settings {
@@ -35,6 +37,49 @@ Kirigami.ApplicationWindow {
         property bool backgroundReactive: true
     }
 
+    // The window's size as the user left it, kept across closing, logging
+    // out and rebooting. Wayland does not let an app choose its position;
+    // KWin places the window.
+    Settings {
+        id: windowState
+        location: settings.location
+        category: "Window"
+        property int width: 0
+        property int height: 0
+        property bool maximized: false
+    }
+
+    Component.onCompleted: {
+        if (windowState.width >= minimumWidth && windowState.height >= minimumHeight) {
+            width = windowState.width
+            height = windowState.height
+        }
+        if (visible && windowState.maximized)
+            showMaximized()
+    }
+
+    // Remember the normal (not maximized) size shortly after a resize stops,
+    // written to disk at once: a shutdown may never close the window.
+    function rememberSize() {
+        if (visibility === Window.Windowed) {
+            windowState.width = width
+            windowState.height = height
+        }
+        if (visibility === Window.Windowed || visibility === Window.Maximized)
+            windowState.maximized = visibility === Window.Maximized
+        windowState.sync()
+    }
+
+    Timer {
+        id: rememberSizeTimer
+        interval: 600
+        onTriggered: window.rememberSize()
+    }
+
+    onWidthChanged: rememberSizeTimer.restart()
+    onHeightChanged: rememberSizeTimer.restart()
+    onVisibilityChanged: rememberSizeTimer.restart()
+
     SonicCore {
         id: core
         configuration: settings
@@ -47,27 +92,41 @@ Kirigami.ApplicationWindow {
         if (window.visible && window.active) {
             window.hide()
         } else {
-            window.show()
+            if (windowState.maximized)
+                window.showMaximized()
+            else
+                window.show()
             window.raise()
             window.requestActivate()
         }
     }
 
     onClosing: function(close) {
+        window.rememberSize()
         if (tray.available) {
             close.accepted = false
             window.hide()
         }
     }
 
-    readonly property string batteryText: core.batteryPercent >= 0
-        ? `${core.batteryPercent}%${core.charging ? " (carregando)" : ""}`
-        : "fone desligado"
+    readonly property string batteryText: (core.headsetConnected !== false && core.batteryPercent >= 0
+        ? `${core.batteryPercent}%` : "fone desligado")
+        + (core.charging ? " (carregando)" : "")
+
+    // The widget's panel battery, pre-drawn per 5% step by
+    // tools/build-tray-icons.sh (a tray icon is a picture, not QML).
+    readonly property url trayIcon: {
+        // Off (or no reading) still shows the bolt while on the USB cable.
+        if (core.headsetConnected === false || core.batteryPercent < 0)
+            return Qt.resolvedUrl(`icons/battery-unknown${core.charging ? "-charging" : ""}.svg`)
+        const step = Math.min(100, Math.max(0, Math.round(core.batteryPercent / 5) * 5))
+        return Qt.resolvedUrl(`icons/battery-${step}${core.charging ? "-charging" : ""}.svg`)
+    }
 
     Platform.SystemTrayIcon {
         id: tray
         visible: true
-        icon.name: "audio-headphones"
+        icon.source: window.trayIcon
         tooltip: `JamBaLinux SonicCore — ${window.batteryText}`
         onActivated: function(reason) {
             if (reason === Platform.SystemTrayIcon.Trigger) window.toggle()
@@ -84,7 +143,10 @@ Kirigami.ApplicationWindow {
             Platform.MenuSeparator {}
             Platform.MenuItem {
                 text: "Sair"
-                onTriggered: Qt.quit()
+                onTriggered: {
+                    window.rememberSize()
+                    Qt.quit()
+                }
             }
         }
     }

@@ -23,7 +23,7 @@ test("o tempo restante aparece só fora do carregador e com estimativa", () => {
 
 test("o widget avisa quando a economia apagou as luzes", () => {
     assert.match(mainSource, /powerSaving = String\(result\.power_saving \?\? ""\)/)
-    assert.match(mainSource, /visible: root\.openSection === "lighting" && root\.powerSaving\.length > 0/)
+    assert.match(mainSource, /visible: root\.powerSaving\.length > 0/)
     assert.match(mainSource, /soniccoreCommand\(\["power", "--format", "json"\]\)/)
 })
 

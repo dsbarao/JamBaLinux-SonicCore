@@ -9,6 +9,8 @@ readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service
 readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
+readonly AUTOSTART_TARGET="$HOME/.config/autostart/jambalinux-soniccore.desktop"
+readonly APP_TARGET="$HOME/.local/share/jambalinux-soniccore/app"
 readonly CARGO_BINARY="${CARGO_HOME:-$HOME/.cargo}/bin/soniccore"
 readonly METER_SERVICE_TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.jambalinux.soniccore.Meter.service"
 readonly OPENRGB_PLUGIN="${XDG_CONFIG_HOME:-$HOME/.config}/OpenRGB/plugins/libJamBaLinuxSonicCorePlugin.so"
@@ -20,6 +22,8 @@ show_plan() {
     printf '  %s\n' "$EQUALIZER_SERVICE_TARGET"
     printf '  %s\n' "$SPATIAL_SERVICE_TARGET"
     printf '  %s\n' "$LAUNCHER_TARGET"
+    printf '  %s\n' "$AUTOSTART_TARGET"
+    printf '  %s\n' "$APP_TARGET"
     printf '  %s\n' "$CARGO_BINARY"
     printf '  %s\n' "$METER_SERVICE_TARGET"
     printf '  %s (plugin do OpenRGB, se instalado)\n' "$OPENRGB_PLUGIN"
@@ -49,7 +53,9 @@ if command -v kpackagetool6 >/dev/null 2>&1 && [[ -d "$PLASMOID_TARGET" ]]; then
     kpackagetool6 --type Plasma/Applet --remove "$PLASMOID_ID"
 fi
 
-rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET" "$METER_SERVICE_TARGET" "$OPENRGB_PLUGIN"
+rm -rf -- "$APP_TARGET"
+"$SCRIPT_DIR/kwin-window-rule.sh" --uninstall || true
+rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET" "$AUTOSTART_TARGET" "$METER_SERVICE_TARGET" "$OPENRGB_PLUGIN"
 # Files edited outside JamBaLinux are kept and reported; the rest still goes.
 overlay_kept=0
 "$ACP_OVERLAY" --uninstall || overlay_kept=1
@@ -59,7 +65,8 @@ if command -v cargo >/dev/null 2>&1 && [[ -x "$CARGO_BINARY" ]]; then
     cargo uninstall jambalinux-soniccore
 fi
 
-printf '%s\n' 'Reinicie o Plasma manualmente se o widget ainda aparecer no painel.'
+pkill -u "$(id -u)" -f -- "$APP_TARGET/main.qml" 2>/dev/null || true
+printf '%s\n' 'Reinicie o Plasma manualmente se o widget antigo ainda aparecer no painel.'
 if [[ "$overlay_kept" -ne 0 ]]; then
     printf '%s\n' 'Remoção parcial: arquivos do overlay ACP modificados fora do JamBaLinux foram mantidos (veja acima).' >&2
     exit 1
