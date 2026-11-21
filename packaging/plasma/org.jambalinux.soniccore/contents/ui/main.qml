@@ -148,6 +148,11 @@ PlasmoidItem {
     // "leve" keeps the original interface; "vivo" adds the live header.
     readonly property bool vivo: Plasmoid.configuration.theme === "vivo"
     readonly property string vivoBackground: Plasmoid.configuration.background || "aurora"
+    // Where the equalizer is playing now (it follows the system default in
+    // "auto"). Another output shows its own icon and name in the header.
+    property bool outputIsQuantum: true
+    property string outputIcon: "audio-headphones"
+    property string outputLabel: ""
     // The desktop wallpaper for the "glass" background, looked up on open.
     property url wallpaperUrl
     // The lights' own colors tint the Vivo theme; black or unknown zones
@@ -955,7 +960,9 @@ PlasmoidItem {
             PlasmaComponents.Label {
                 Layout.alignment: Qt.AlignHCenter
                 Layout.maximumHeight: implicitHeight
-                text: "JBL Quantum 810 Wireless"
+                text: root.outputIsQuantum ? "JBL Quantum 810 Wireless" : root.outputLabel
+                elide: Text.ElideRight
+                Layout.maximumWidth: parent.width
                 opacity: 0.7
             }
 
@@ -973,11 +980,23 @@ PlasmoidItem {
                 accentB: root.vivoAccentB
                 equipmentImage: root.equipmentImage
                 pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
+                outputIsQuantum: root.outputIsQuantum
+                outputIcon: root.outputIcon
                 hoursLeftText: root.hoursLeftText
             }
 
+            // The playing output when it is not the headset, with the icon
+            // Plasma's volume applet uses for it.
+            Kirigami.Icon {
+                visible: !root.vivo && !root.outputIsQuantum
+                source: root.outputIcon
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 6
+            }
+
             Image {
-                visible: !root.vivo
+                visible: !root.vivo && root.outputIsQuantum
                 source: root.equipmentImage
                 // Same as the Vivo header: downscale the 1254 px photo once.
                 sourceSize.width: Kirigami.Units.gridUnit * 16
@@ -1000,6 +1019,14 @@ PlasmoidItem {
                 color: root.batteryColor
                 font.pixelSize: Kirigami.Units.gridUnit * 1.7
                 font.bold: true
+            }
+
+            PlasmaComponents.Label {
+                visible: !root.vivo && !root.outputIsQuantum
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumHeight: implicitHeight
+                text: "bateria do JBL Quantum 810"
+                opacity: 0.6
             }
 
             PlasmaComponents.Label {
@@ -2217,10 +2244,37 @@ PlasmoidItem {
         }
     }
 
+    Plasma5Support.DataSource {
+        id: outputSource
+        engine: "executable"
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            if (Number(data["exit code"] ?? -1) !== 0) return
+            try {
+                const result = JSON.parse(String(data.stdout ?? ""))
+                const current = (result.outputs ?? []).find(output => output.name === result.effective)
+                root.outputIsQuantum = !current || current.quantum_game === true
+                root.outputIcon = current?.icon ?? "audio-headphones"
+                root.outputLabel = current?.description ?? ""
+            } catch (error) {
+                root.outputIsQuantum = true
+            }
+        }
+    }
+
+    // The output can change whenever the system default changes.
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.expanded
+        triggeredOnStart: true
+        onTriggered: outputSource.connectSource(root.soniccoreCommand(["output", "--format", "json"]))
+    }
+
     // The wallpaper can change at any time; look it up each time it is shown.
-    onExpandedChanged: {
-        if (expanded && vivo && vivoBackground === "glass")
-            wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
+    onExpandedChanged: function() {
+        if (root.expanded && root.vivo && root.vivoBackground === "glass")
+            wallpaperSource.connectSource(root.soniccoreCommand(["wallpaper", "--format", "json"]))
     }
 
     // Measured battery estimate, refreshed while the popup is open.

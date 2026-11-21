@@ -10,7 +10,8 @@
     <entry name="theme" type="String">
       <default>leve</default>
     </entry>
-    <!-- Vivo background: "aurora", "glass" (blurred wallpaper) or "none". -->
+    <!-- Vivo background: "aurora", "glass" (blurred wallpaper), "particles",
+         "waves" or "none". -->
     <entry name="background" type="String">
       <default>aurora</default>
     </entry>

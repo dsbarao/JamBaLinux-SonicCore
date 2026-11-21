@@ -34,3 +34,13 @@ test("a página Bateria aplica pela CLI só valores fixos e nunca o ANC", () => 
     assert.match(batteryPage, /run\(\["power", "set", setting, value\]\)/)
     assert.doesNotMatch(batteryPage, /ambient/)
 })
+
+test("a página Saída de som escolhe pela CLI, com aspas, e explica o que fica no fone", async () => {
+    const outputPage = await readFile(new URL("ui/configOutput.qml", base), "utf8")
+    assert.match(configModel, /source: "configOutput\.qml"/)
+    assert.match(outputPage, /run\(\["output", "set", target\]\)/)
+    assert.match(outputPage, /arguments\.map\(shellQuote\)/)
+    assert.match(outputPage, /target: output\.quantum_game \? "quantum-game" : output\.name/)
+    assert.match(outputPage, /canal de Chat do fone nunca é usado/)
+    assert.match(outputPage, /target: "auto",\n\s+label: "Automático — segue a saída padrão do sistema/)
+})

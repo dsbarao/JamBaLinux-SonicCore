@@ -27,7 +27,7 @@ test("o Vivo só substitui o topo e só roda com o painel aberto", () => {
     assert.match(mainSource, /VivoPanel \{\n\s+id: vivoPanel\n\s+visible: root\.vivo/)
     assert.match(mainSource, /running: root\.vivo && root\.expanded/)
     // The Leve header (image and big battery label) hides only in Vivo.
-    assert.match(mainSource, /Image \{\n\s+visible: !root\.vivo\n\s+source: root\.equipmentImage/)
+    assert.match(mainSource, /Image \{\n\s+visible: !root\.vivo && root\.outputIsQuantum\n\s+source: root\.equipmentImage/)
     assert.match(mainSource, /PlasmaComponents\.Label \{\n\s+visible: !root\.vivo/)
     // Polling stops with the popup closed or the Leve theme.
     assert.match(vivoSource, /interval: 40\n\s+repeat: true\n\s+running: panel\.running/)
@@ -93,5 +93,26 @@ test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros",
     assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && root\.vivoBackground !== "none"/)
     assert.match(mainSource, /running: root\.vivo && root\.expanded\n\s+bass: vivoPanel\.bass/)
     // The wallpaper is only looked up for the glass background.
-    assert.match(mainSource, /if \(expanded && vivo && vivoBackground === "glass"\)/)
+    assert.match(mainSource, /if \(root\.expanded && root\.vivo && root\.vivoBackground === "glass"\)/)
+})
+
+test("Partículas e Ondas usam os shaders compilados", async () => {
+    const background = await readFile(new URL("ui/VivoBackground.qml", base), "utf8")
+    assert.match(configPage, /readonly property var backgroundValues: \["aurora", "glass", "particles", "waves", "none"\]/)
+    assert.match(background, /fragmentShader: Qt\.resolvedUrl\("\.\.\/shaders\/particles\.frag\.qsb"\)/)
+    assert.match(background, /fragmentShader: Qt\.resolvedUrl\("\.\.\/shaders\/waves\.frag\.qsb"\)/)
+    for (const name of ["particles", "waves"])
+        await readFile(new URL(`shaders/${name}.frag.qsb`, base))
+})
+
+test("com outra saída tocando, o topo mostra o ícone e o nome dela", () => {
+    // Leve: the output's icon replaces the headset photo, its name the subtitle.
+    assert.match(mainSource, /Kirigami\.Icon \{\n\s+visible: !root\.vivo && !root\.outputIsQuantum\n\s+source: root\.outputIcon/)
+    assert.match(mainSource, /text: root\.outputIsQuantum \? "JBL Quantum 810 Wireless" : root\.outputLabel/)
+    assert.match(mainSource, /text: "bateria do JBL Quantum 810"/)
+    // Vivo: same in the ring, the path's last node, and the battery label.
+    assert.match(vivoSource, /visible: !panel\.outputIsQuantum\n\s+width: parent\.width \* 0\.5\n\s+height: width\n\s+source: panel\.outputIcon/)
+    assert.match(vivoSource, /panel\.outputIsQuantum \? "Fone" : "Saída"/)
+    assert.match(vivoSource, /\(panel\.outputIsQuantum \? "" : "Fone "\)/)
+    assert.match(mainSource, /soniccoreCommand\(\["output", "--format", "json"\]\)/)
 })

@@ -14,7 +14,7 @@ import org.kde.kirigami as Kirigami
 Item {
     id: background
 
-    property string style: "aurora"     // "aurora", "glass" or "none"
+    property string style: "aurora"     // "aurora", "glass", "particles", "waves" or "none"
     property int intensity: 1           // 0 subtle, 1 medium, 2 intense
     property bool reactive: true        // follow the bass
     property bool running: false
@@ -27,6 +27,10 @@ Item {
     readonly property real strength: [0.22, 0.38, 0.56][Math.max(0, Math.min(2, intensity))]
     property real t: 0
     property real pulse: 0
+    // Accumulated motion for the shader styles: sound speeds them up
+    // without making them jump.
+    property real travel: 0
+    property real phase: 0
 
     function tint(color, alpha) {
         return Qt.rgba(color.r, color.g, color.b, alpha)
@@ -51,6 +55,8 @@ Item {
             // Fast attack, slow release: beats punch, then fade.
             const rate = target > background.pulse ? 0.45 : 0.08
             background.pulse += (target - background.pulse) * rate
+            background.travel += 0.033 * (0.35 + 1.6 * background.pulse)
+            background.phase += 0.033 * (0.9 + 2.5 * background.pulse)
         }
     }
 
@@ -68,6 +74,32 @@ Item {
         layer.effect: MultiEffect {
             maskEnabled: true
             maskSource: roundedMask
+        }
+
+        // ---- Shader styles: drawn per pixel on the GPU, perfectly smooth ----
+        ShaderEffect {
+            visible: background.style === "particles"
+            anchors.fill: parent
+            blending: true
+            property real travel: background.travel
+            property real pulse: background.pulse
+            property real strength: background.strength
+            property real aspect: width / Math.max(1, height)
+            property color colorA: background.accentA
+            property color colorB: background.accentB
+            fragmentShader: Qt.resolvedUrl("../shaders/particles.frag.qsb")
+        }
+
+        ShaderEffect {
+            visible: background.style === "waves"
+            anchors.fill: parent
+            blending: true
+            property real phase: background.phase
+            property real pulse: background.pulse
+            property real strength: background.strength
+            property color colorA: background.accentA
+            property color colorB: background.accentB
+            fragmentShader: Qt.resolvedUrl("../shaders/waves.frag.qsb")
         }
 
         // ---- Glass: the wallpaper, blurred once and cached ----

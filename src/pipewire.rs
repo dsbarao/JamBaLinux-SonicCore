@@ -480,6 +480,116 @@ fn target_from_node(node: &Value) -> Option<Target> {
     })
 }
 
+/// Where the equalizer (and the spatial graph behind it) plays: the JBL
+/// Quantum 810's Game channel by default, or any other audio output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputTarget {
+    /// Follow the system's default output (the default setting).
+    Auto,
+    QuantumGame,
+    Sink(String),
+}
+
+pub const AUTO_TARGET: &str = "auto";
+pub const QUANTUM_GAME_TARGET: &str = "quantum-game";
+const OUTPUT_CONFIG_NAME: &str = "output.json";
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct OutputConfig {
+    #[serde(default)]
+    schema: u8,
+    #[serde(default)]
+    target: Option<String>,
+}
+
+impl OutputTarget {
+    pub fn from_setting(value: Option<&str>) -> Self {
+        match value {
+            None | Some("") | Some(AUTO_TARGET) => Self::Auto,
+            Some(QUANTUM_GAME_TARGET) => Self::QuantumGame,
+            Some(name) => Self::Sink(name.to_owned()),
+        }
+    }
+
+    pub fn setting(&self) -> &str {
+        match self {
+            Self::Auto => AUTO_TARGET,
+            Self::QuantumGame => QUANTUM_GAME_TARGET,
+            Self::Sink(name) => name,
+        }
+    }
+
+    fn unavailable(&self) -> String {
+        match self {
+            Self::Auto | Self::QuantumGame => "Quantum Game is unavailable; connect the JBL Quantum 810 and expose USB playback PCM 0, then the automatic equalizer service will retry".into(),
+            Self::Sink(name) => format!("the selected output `{name}` is unavailable; reconnect it or choose another one with `soniccore output set`"),
+        }
+    }
+}
+
+/// The system default output, seen through the equalizer: our own sinks
+/// stand for the output that was the default before them.
+fn system_default_output() -> Option<String> {
+    let default = pactl_default_sink().ok()?;
+    if is_managed_node_name(&default) {
+        read_state().ok().flatten()?.default_sink_before
+    } else {
+        Some(default)
+    }
+}
+
+/// What `Auto` means right now. `is_quantum` tells whether a sink belongs
+/// to the JBL Quantum 810: any of its outputs (Game or Chat) maps to its
+/// Game channel, because Chat stays isolated from the equalizer.
+fn auto_choice(default: Option<String>, is_quantum: impl Fn(&str) -> bool) -> OutputTarget {
+    match default {
+        Some(name) if !is_managed_node_name(&name) && !is_quantum(&name) => {
+            OutputTarget::Sink(name)
+        }
+        _ => OutputTarget::QuantumGame,
+    }
+}
+
+/// The configured output. Unit tests always see the Quantum Game default,
+/// whatever the developer's own configuration says.
+pub fn output_target() -> OutputTarget {
+    #[cfg(test)]
+    {
+        OutputTarget::QuantumGame
+    }
+    #[cfg(not(test))]
+    {
+        let config = path(OUTPUT_CONFIG_NAME)
+            .ok()
+            .and_then(|path| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<OutputConfig>(&bytes).ok())
+            .unwrap_or_default();
+        OutputTarget::from_setting(config.target.as_deref())
+    }
+}
+
+fn is_managed_node_name(name: &str) -> bool {
+    name.starts_with("jambalinux-soniccore-")
+}
+
+/// The configured output sink in a `pw-dump` snapshot.
+fn target_sink(node: &Value, target: &OutputTarget) -> Option<Target> {
+    match target {
+        OutputTarget::Auto | OutputTarget::QuantumGame => game_sink(node),
+        OutputTarget::Sink(name) => {
+            if node.get("type")?.as_str()? != "PipeWire:Interface:Node" {
+                return None;
+            }
+            let properties = props(node)?;
+            (properties.get("media.class")?.as_str()? == "Audio/Sink"
+                && properties.get("node.name")?.as_str()? == name
+                && !is_managed_node_name(name))
+            .then(|| target_from_node(node))
+            .flatten()
+        }
+    }
+}
+
 fn game_sink(node: &Value) -> Option<Target> {
     if node.get("type")?.as_str()? != "PipeWire:Interface:Node" {
         return None;
@@ -502,18 +612,207 @@ fn game_sink(node: &Value) -> Option<Target> {
     quantum_game_pcm.then(|| target_from_node(node)).flatten()
 }
 
-/// Node name of the exact Quantum Game sink in a `pw-dump` snapshot.
+/// Node name of the configured output sink in a `pw-dump` snapshot.
 pub(crate) fn game_sink_name(nodes: &[Value]) -> Result<String, String> {
     discover_game_sink(nodes).map(|target| target.node_name)
 }
 
 fn discover_game_sink(nodes: &[Value]) -> Result<Target, String> {
-    let matches = nodes.iter().filter_map(game_sink).collect::<Vec<_>>();
+    let target = match output_target() {
+        OutputTarget::Auto => auto_choice(system_default_output(), |name| {
+            nodes.iter().any(|node| {
+                props(node).is_some_and(|properties| {
+                    properties.get("node.name").and_then(Value::as_str) == Some(name)
+                        && properties.get("alsa.components").and_then(Value::as_str)
+                            == Some(QUANTUM_ALSA_COMPONENTS)
+                })
+            })
+        }),
+        target => target,
+    };
+    discover_target_sink(nodes, &target)
+}
+
+fn discover_target_sink(nodes: &[Value], target: &OutputTarget) -> Result<Target, String> {
+    let matches = nodes
+        .iter()
+        .filter_map(|node| target_sink(node, target))
+        .collect::<Vec<_>>();
     match matches.as_slice() {
-        [target] => Ok(target.clone()),
-        [] => Err("Quantum Game is unavailable; connect the JBL Quantum 810 and expose USB playback PCM 0, then the automatic equalizer service will retry".into()),
-        _ => Err("multiple PipeWire Game sinks were found; refusing to choose a route automatically".into()),
+        [found] => Ok(found.clone()),
+        [] => Err(target.unavailable()),
+        _ => Err("multiple PipeWire sinks match the selected output; refusing to choose a route automatically".into()),
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutputInfo {
+    pub name: String,
+    pub description: String,
+    pub quantum_game: bool,
+    /// Freedesktop icon name, chosen like Plasma's volume applet does: from
+    /// the type of the output's active port.
+    pub icon: String,
+}
+
+/// Icon for an output from its active port type (as `pactl` reports it)
+/// and, for Bluetooth devices, its form factor.
+fn output_icon(
+    port_type: Option<&str>,
+    form_factor: Option<&str>,
+    bus: Option<&str>,
+) -> &'static str {
+    match form_factor.map(str::to_ascii_lowercase).as_deref() {
+        Some("headset") => return "audio-headset",
+        Some("headphone") | Some("hands-free") => return "audio-headphones",
+        Some("speaker") => return "audio-speakers",
+        Some("tv") | Some("monitor") => return "video-display",
+        _ => {}
+    }
+    match port_type.map(str::to_ascii_lowercase).as_deref() {
+        Some("headphones") => "audio-headphones",
+        Some("headset") => "audio-headset",
+        Some("hdmi") | Some("displayport") => "video-display",
+        Some("speaker") | Some("line") => "audio-speakers",
+        Some("spdif") => "audio-card",
+        _ if bus == Some("bluetooth") => "audio-headphones",
+        _ => "audio-card",
+    }
+}
+
+/// `node name -> icon` for every PulseAudio sink.
+fn output_icons() -> HashMap<String, &'static str> {
+    let Ok(Value::Array(sinks)) = pactl_json(&["list", "sinks"]) else {
+        return HashMap::new();
+    };
+    sinks
+        .iter()
+        .filter_map(|sink| {
+            let name = sink.get("name")?.as_str()?.to_owned();
+            let active = sink.get("active_port").and_then(Value::as_str);
+            let port_type = sink
+                .get("ports")
+                .and_then(Value::as_array)
+                .and_then(|ports| {
+                    ports
+                        .iter()
+                        .find(|port| port.get("name").and_then(Value::as_str) == active)
+                })
+                .and_then(|port| port.get("type"))
+                .and_then(Value::as_str);
+            let properties = sink.get("properties");
+            let property = |key: &str| {
+                properties
+                    .and_then(|properties| properties.get(key))
+                    .and_then(Value::as_str)
+            };
+            Some((
+                name,
+                output_icon(
+                    port_type,
+                    property("device.form_factor"),
+                    property("device.bus"),
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// Every real audio output, for the widget's choice. The equalizer's and
+/// the spatial graph's own sinks are never offered.
+pub fn list_outputs() -> Result<Vec<OutputInfo>, String> {
+    let nodes = pw_dump()?;
+    let icons = output_icons();
+    Ok(nodes
+        .iter()
+        .filter_map(|node| {
+            if node.get("type")?.as_str()? != "PipeWire:Interface:Node" {
+                return None;
+            }
+            let properties = props(node)?;
+            if properties.get("media.class")?.as_str()? != "Audio/Sink" {
+                return None;
+            }
+            let name = properties.get("node.name")?.as_str()?;
+            // The Quantum's Chat channel stays isolated from the equalizer
+            // (the same rule the health check enforces), so it is not offered.
+            let quantum_non_game = properties.get("alsa.components").and_then(Value::as_str)
+                == Some(QUANTUM_ALSA_COMPONENTS)
+                && game_sink(node).is_none();
+            if is_managed_node_name(name) || quantum_non_game {
+                return None;
+            }
+            Some(OutputInfo {
+                name: name.to_owned(),
+                description: properties
+                    .get("node.description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(name)
+                    .to_owned(),
+                quantum_game: game_sink(node).is_some(),
+                icon: icons.get(name).copied().unwrap_or("audio-card").to_owned(),
+            })
+        })
+        .collect())
+}
+
+fn retarget_routes() -> Result<(), String> {
+    let _route_lock = route_lock()?;
+    let Some(state) = read_state()? else {
+        return Ok(());
+    };
+    let target = pulse_game_sink(&pactl_json(&["list", "sinks"])?)?;
+    write_state(&retarget_state(state, &target))
+}
+
+/// Points every routed stream's restore destination at `target`.
+fn retarget_state(mut state: BackendState, target: &PulseSink) -> BackendState {
+    for route in &mut state.routed_streams {
+        route.original_sink_name.clone_from(&target.name);
+        route.original_sink_serial = target.object_serial;
+    }
+    state
+}
+
+/// Chooses where the equalizer plays and restarts it so the filter is
+/// rebuilt for that output; the spatial graph relinks to it by itself.
+pub fn set_output(setting: &str) -> Result<OutputTarget, String> {
+    let target = OutputTarget::from_setting(Some(setting));
+    if let OutputTarget::Sink(name) = &target {
+        if is_managed_node_name(name) {
+            return Err("the equalizer cannot play into its own sinks".into());
+        }
+        if !list_outputs()?.iter().any(|output| &output.name == name) {
+            return Err(format!(
+                "no audio output named `{name}`; see `soniccore output --format json`"
+            ));
+        }
+    }
+    let config = OutputConfig {
+        schema: 1,
+        target: Some(target.setting().to_owned()),
+    };
+    write_atomic(
+        &path(OUTPUT_CONFIG_NAME)?,
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
+        ),
+    )?;
+    // Streams already going through the equalizer belong to the equalizer
+    // path, not to the old output: when the restart restores them, send them
+    // to the new output, where the router takes them in again. Without this
+    // they went back to the old output and went silent on the new one.
+    if let Err(error) = retarget_routes() {
+        eprintln!("could not move the equalizer's streams to the new output: {error}");
+    }
+    if service_active()? {
+        let restart = systemctl(&["restart", UNIT_NAME])?;
+        if !restart.status.success() {
+            return Err(command_failure("systemctl --user restart", &restart));
+        }
+    }
+    Ok(target)
 }
 
 fn named_node(nodes: &[Value], name: &str) -> Option<Target> {
@@ -1029,6 +1328,35 @@ fn pulse_inputs(value: &Value) -> Result<Vec<PulseInput>, String> {
 }
 
 fn pulse_game_sink(value: &Value) -> Result<PulseSink, String> {
+    let target = match output_target() {
+        OutputTarget::Auto => auto_choice(system_default_output(), |name| {
+            value.as_array().is_some_and(|sinks| {
+                sinks.iter().any(|sink| {
+                    sink.get("name").and_then(Value::as_str) == Some(name)
+                        && sink
+                            .get("properties")
+                            .and_then(|properties| properties.get("alsa.components"))
+                            .and_then(Value::as_str)
+                            == Some(QUANTUM_ALSA_COMPONENTS)
+                })
+            })
+        }),
+        target => target,
+    };
+    if let OutputTarget::Sink(name) = &target {
+        let sinks = pulse_sinks(value)?;
+        let matches = sinks
+            .iter()
+            .filter(|sink| &sink.name == name)
+            .collect::<Vec<_>>();
+        return match matches.as_slice() {
+            [sink] => Ok((*sink).clone()),
+            [] => Err(target.unavailable()),
+            _ => Err(format!(
+                "multiple PulseAudio sinks are named `{name}`; refusing automatic routing"
+            )),
+        };
+    }
     let array = value
         .as_array()
         .ok_or("pactl list sinks did not return an array")?;
@@ -1616,10 +1944,10 @@ fn status_error(health: &Health<'_>) -> Option<String> {
         ));
     }
     if health.game.is_none() {
-        return Some(
-            "Quantum Game is unavailable; reconnect the JBL Quantum 810 and the service will retry automatically"
-                .into(),
-        );
+        return Some(match output_target() {
+            OutputTarget::QuantumGame | OutputTarget::Auto => "Quantum Game is unavailable; reconnect the JBL Quantum 810 and the service will retry automatically".into(),
+            target => target.unavailable(),
+        });
     }
     if health.virtual_node.is_none() {
         return Some(format!(
@@ -1627,7 +1955,9 @@ fn status_error(health: &Health<'_>) -> Option<String> {
         ));
     }
     if !health.target_connected {
-        return Some("the equalizer output is not linked to both Quantum Game channels".into());
+        return Some(
+            "the equalizer output is not linked to both channels of the selected output".into(),
+        );
     }
     if !health.chat_isolated {
         return Some(
@@ -1802,6 +2132,31 @@ pub fn prepare(profile: &EqualizerProfile) -> Result<(), String> {
 /// replaced by a profile read before it, and a change cannot land between
 /// rendering the filter and starting it.
 pub fn run(load_profile: impl Fn() -> Result<EqualizerProfile, String>) -> Result<(), String> {
+    loop {
+        match run_filter(&load_profile)? {
+            FilterExit::Retarget(name) => {
+                eprintln!("the output changed to {name}; moving the equalizer there");
+                if let Err(error) = retarget_routes() {
+                    eprintln!("could not move the equalizer's streams to {name}: {error}");
+                }
+            }
+        }
+    }
+}
+
+enum FilterExit {
+    /// The output the equalizer should play into changed (for example the
+    /// user picked another default output in Plasma's volume applet).
+    Retarget(String),
+}
+
+/// How often the target output is re-checked (in routing passes).
+const TARGET_CHECK_PASSES: u32 = 4;
+
+/// Runs one filter process for the current output until it must move.
+fn run_filter(
+    load_profile: &impl Fn() -> Result<EqualizerProfile, String>,
+) -> Result<FilterExit, String> {
     let mutation_lock = loop {
         let mutation_lock = crate::equalizer::mutation_lock()?;
         match load_profile().and_then(|profile| prepare(&profile)) {
@@ -1816,9 +2171,25 @@ pub fn run(load_profile: impl Fn() -> Result<EqualizerProfile, String>) -> Resul
     let config = config_path()?;
     let mut child = spawn_pipewire(&config)?;
     drop(mutation_lock);
+    let playing_into = read_state()?.map(|state| state.target_node_name);
     let mut last_route_error = String::new();
     let mut filter_watch = FilterWatch::default();
+    let mut passes_since_target_check = 0_u32;
     loop {
+        passes_since_target_check += 1;
+        if passes_since_target_check >= TARGET_CHECK_PASSES {
+            passes_since_target_check = 0;
+            let wanted = pactl_json(&["list", "sinks"])
+                .and_then(|sinks| pulse_game_sink(&sinks))
+                .map(|sink| sink.name);
+            if let Ok(wanted) = wanted
+                && playing_into.as_deref() != Some(wanted.as_str())
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(FilterExit::Retarget(wanted));
+            }
+        }
         if let Some(status) = child
             .try_wait()
             .map_err(|error| format!("could not monitor the PipeWire equalizer: {error}"))?
@@ -3041,5 +3412,113 @@ mod tests {
         // The sink appeared: a slow start is not a stranded filter.
         assert!(!watch.observe(Some(true)));
         assert!(!watch.observe(Some(false)));
+    }
+
+    #[test]
+    fn a_chosen_output_is_matched_by_its_exact_name_and_never_our_own_sinks() {
+        let speakers = serde_json::json!({ "id": 61, "type": "PipeWire:Interface:Node",
+            "info": { "props": { "node.name": "alsa_output.pci.analog-stereo",
+                "media.class": "Audio/Sink", "object.serial": 610 } } });
+        let equalizer = serde_json::json!({ "id": 62, "type": "PipeWire:Interface:Node",
+            "info": { "props": { "node.name": VIRTUAL_SINK,
+                "media.class": "Audio/Sink", "object.serial": 620 } } });
+        let target = OutputTarget::Sink("alsa_output.pci.analog-stereo".into());
+        let found = discover_target_sink(&[speakers.clone(), equalizer.clone()], &target).unwrap();
+        assert_eq!(found.object_serial, 610);
+        // The Quantum default does not take an unrelated sink.
+        assert!(discover_target_sink(&[speakers], &OutputTarget::QuantumGame).is_err());
+        // Our own sinks are never a target.
+        let own = OutputTarget::Sink(VIRTUAL_SINK.into());
+        assert!(discover_target_sink(&[equalizer], &own).is_err());
+        let missing = discover_target_sink(&[], &target).unwrap_err();
+        assert!(missing.contains("alsa_output.pci.analog-stereo"));
+    }
+
+    #[test]
+    fn output_settings_round_trip() {
+        assert_eq!(OutputTarget::from_setting(None), OutputTarget::Auto);
+        assert_eq!(OutputTarget::from_setting(Some("auto")).setting(), "auto");
+        assert_eq!(
+            OutputTarget::from_setting(Some("quantum-game")),
+            OutputTarget::QuantumGame
+        );
+        assert_eq!(OutputTarget::from_setting(Some("hdmi")).setting(), "hdmi");
+    }
+
+    #[test]
+    fn changing_output_sends_routed_streams_to_the_new_output() {
+        let state = BackendState {
+            routed_streams: vec![RoutedStream {
+                object_serial: 14,
+                stream_key: "chrome".into(),
+                original_sink_name: "alsa_output.pci.analog-stereo".into(),
+                original_sink_serial: 73,
+            }],
+            ..BackendState::default()
+        };
+        let headset = PulseSink {
+            object_serial: 68,
+            name: "alsa_output.usb_quantum.game".into(),
+        };
+        let retargeted = retarget_state(state, &headset);
+        assert_eq!(
+            retargeted.routed_streams[0].original_sink_name,
+            headset.name
+        );
+        assert_eq!(retargeted.routed_streams[0].original_sink_serial, 68);
+        assert_eq!(retargeted.routed_streams[0].stream_key, "chrome");
+    }
+
+    #[test]
+    fn automatic_output_follows_the_system_default_but_never_chat() {
+        let quantum = |name: &str| name.contains("Quantum810");
+        assert_eq!(
+            auto_choice(Some("alsa_output.pci.analog-stereo".into()), quantum),
+            OutputTarget::Sink("alsa_output.pci.analog-stereo".into())
+        );
+        // Any Quantum output, Chat included, means its Game channel.
+        assert_eq!(
+            auto_choice(
+                Some("alsa_output.usb-Quantum810.stereo-chat-output".into()),
+                quantum
+            ),
+            OutputTarget::QuantumGame
+        );
+        assert_eq!(
+            auto_choice(
+                Some("alsa_output.usb-Quantum810.stereo-game-output".into()),
+                quantum
+            ),
+            OutputTarget::QuantumGame
+        );
+        // Our own sinks and an unknown default fall back to the headset.
+        assert_eq!(
+            auto_choice(Some(VIRTUAL_SINK.into()), quantum),
+            OutputTarget::QuantumGame
+        );
+        assert_eq!(auto_choice(None, quantum), OutputTarget::QuantumGame);
+    }
+
+    #[test]
+    fn output_icons_follow_the_active_port_like_plasma() {
+        assert_eq!(
+            output_icon(Some("HDMI"), None, Some("pci")),
+            "video-display"
+        );
+        assert_eq!(
+            output_icon(Some("Headphones"), None, Some("pci")),
+            "audio-headphones"
+        );
+        assert_eq!(output_icon(Some("Line"), None, None), "audio-speakers");
+        assert_eq!(output_icon(Some("Speaker"), None, None), "audio-speakers");
+        assert_eq!(
+            output_icon(None, Some("headset"), Some("bluetooth")),
+            "audio-headset"
+        );
+        assert_eq!(
+            output_icon(None, None, Some("bluetooth")),
+            "audio-headphones"
+        );
+        assert_eq!(output_icon(None, None, Some("pci")), "audio-card");
     }
 }

@@ -14,7 +14,7 @@ KCM.SimpleKCM {
     property bool cfg_backgroundReactive
     property bool cfg_backgroundReactiveDefault
 
-    readonly property var backgroundValues: ["aurora", "glass", "none"]
+    readonly property var backgroundValues: ["aurora", "glass", "particles", "waves", "none"]
 
     Kirigami.FormLayout {
         QQC2.RadioButton {
@@ -48,7 +48,8 @@ KCM.SimpleKCM {
         QQC2.ComboBox {
             Kirigami.FormData.label: "Fundo do tema Vivo:"
             enabled: cfg_theme === "vivo"
-            model: ["Aurora (luzes nas cores do fone)", "Vidro (papel de parede desfocado)", "Nenhum"]
+            model: ["Aurora (luzes nas cores do fone)", "Vidro (papel de parede desfocado)",
+                    "Partículas (pontos de luz subindo)", "Ondas (linhas que seguem o som)", "Nenhum"]
             currentIndex: Math.max(0, backgroundValues.indexOf(cfg_background))
             onActivated: cfg_background = backgroundValues[currentIndex]
         }

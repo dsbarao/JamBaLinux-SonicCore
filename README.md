@@ -431,16 +431,45 @@ economy keeps the lights off, OpenRGB writes are refused like under
 `lighting-hold`. Ambient (ANC/TalkThru) is never changed. The widget's
 **Configurar → Bateria** page sets the same options.
 
+### Other audio outputs
+
+The equalizer, and the spatial graph behind it, can play into any audio output
+of the PC, not only the Quantum 810's Game channel:
+
+```bash
+soniccore output --format json                 # setting, what it resolves to now, outputs
+soniccore output set auto                      # follow the system default output (default)
+soniccore output set alsa_output.pci-0000_0d_00.4.analog-stereo   # a fixed output
+soniccore output set quantum-game              # always the Quantum 810's Game channel
+```
+
+With `auto`, picking another default output in Plasma's volume applet moves
+the equalizer (and the spatial graph) there within about two seconds: the
+service rebuilds its filter for the new output and points the restored
+destinations of its streams at it. Any Quantum 810 output chosen as default,
+Chat included, means its Game channel.
+
+`output set` saves the choice in `output.json` and restarts the equalizer
+service, which rebuilds the filter for that output; the spatial graph relinks
+by itself, and the live meter and audio path follow it. Streams played on the
+chosen output are routed through the equalizer the same way Game streams are.
+The Quantum's Chat channel is never offered, keeping the microphone and calls
+isolated. Lighting, ANC, sidetone, and battery stay with the headset. The
+widget's **Configurar → Saída de som** page offers the same choice.
+
 ### Vivo theme backgrounds
 
 With the widget's **Vivo** theme, **Configurar → Aparência** also picks a
 background: **Aurora** (soft light in the headset lights' colors, drifting
 slowly), **Vidro** (the desktop wallpaper, blurred and dimmed, found with
-`soniccore wallpaper --format json`), or none; with an intensity and an
+`soniccore wallpaper --format json`), **Partículas** (glowing dots rising),
+**Ondas** (glowing lines following the sound), or none; with an intensity and an
 option to pulse with the bass from the live meter. Each light is drawn once
 into a cached texture and only moved, scaled, and faded; every moving part of
 the popup shares one 25 Hz beat instead of redrawing at the screen's refresh
-rate. Measured with sound playing, the whole open Vivo popup costs about 6% of
+rate. Particles and waves are fragment shaders (`contents/shaders/*.frag`,
+compiled to `.qsb` by `tools/build-shaders.sh`; a test checks they are up to
+date), drawn per pixel so they stay smooth at any size. Measured with sound playing, the whole open Vivo popup costs about 6% of
 one CPU core (Aurora adds under 1%); closed, nothing runs.
 
 ### Live meter and audio path

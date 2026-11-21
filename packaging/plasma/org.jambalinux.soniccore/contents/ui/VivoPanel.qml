@@ -26,6 +26,8 @@ Item {
     property url equipmentImage
     property string pathCommand: ""
     property string hoursLeftText: ""
+    property bool outputIsQuantum: true
+    property string outputIcon: "audio-headphones"
 
     // Plasma's "Animation speed: Instant" sets durations to zero.
     readonly property bool animate: Kirigami.Units.longDuration > 1
@@ -231,8 +233,17 @@ Item {
                     ? 0.65 + 0.35 * Math.sin(panel.chargePhase) : 0.9
             }
 
+            Kirigami.Icon {
+                anchors.centerIn: parent
+                visible: !panel.outputIsQuantum
+                width: parent.width * 0.5
+                height: width
+                source: panel.outputIcon
+            }
+
             Image {
                 anchors.centerIn: parent
+                visible: panel.outputIsQuantum
                 width: parent.width * 0.62
                 height: width
                 source: panel.equipmentImage
@@ -251,8 +262,10 @@ Item {
 
         PlasmaComponents.Label {
             Layout.alignment: Qt.AlignHCenter
-            text: panel.batteryPercent >= 0
-                ? `${panel.batteryPercent}%${panel.charging ? " ⚡" : ""}` : "—"
+            // The ring is always the headset's battery; say so when the
+            // header shows another output.
+            text: (panel.outputIsQuantum ? "" : "Fone ") + (panel.batteryPercent >= 0
+                ? `${panel.batteryPercent}%${panel.charging ? " ⚡" : ""}` : "—")
             color: panel.batteryColor
             font.bold: true
             font.pixelSize: Kirigami.Units.gridUnit * 1.1
@@ -272,9 +285,10 @@ Item {
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 3
             readonly property var states: panel.segmentStates()
-            readonly property var labels: ["Apps", "Espacial", "EQ", "Fone"]
+            readonly property var labels: ["Apps", "Espacial", "EQ",
+                                           panel.outputIsQuantum ? "Fone" : "Saída"]
             readonly property var icons: ["applications-multimedia", "audio-speakers-symbolic",
-                                          "view-media-equalizer", "audio-headphones"]
+                                          "view-media-equalizer", panel.outputIcon]
             readonly property real nodeSize: Kirigami.Units.gridUnit * 1.6
             readonly property real lineY: nodeSize / 2
 
