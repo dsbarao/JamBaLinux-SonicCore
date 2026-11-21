@@ -149,6 +149,14 @@ pub struct EqualizerProfile {
     /// because the spatial output is linked into the equalizer input.
     #[serde(default)]
     pub bypassed: bool,
+    /// "Ganho": the level going into the bands, in dB, like a mixing desk's
+    /// input gain. Lowering it gives boosted bands room before they clip.
+    #[serde(default)]
+    pub preamp_db: f32,
+    /// "Auto": the gain follows the bands, lowered by the largest boost so
+    /// the equalizer cannot push the signal past full scale.
+    #[serde(default)]
+    pub preamp_auto: bool,
 }
 
 impl EqualizerProfile {
@@ -163,6 +171,42 @@ impl EqualizerProfile {
             })
             .collect()
     }
+
+    /// The input gain the DSP must run: none while bypassed ("som natural"),
+    /// minus the largest boost in Auto, otherwise the manual setting.
+    pub fn dsp_preamp_db(&self) -> f32 {
+        if self.bypassed {
+            0.0
+        } else if self.preamp_auto {
+            auto_preamp_db(&self.bands)
+        } else {
+            self.preamp_db
+        }
+    }
+}
+
+/// The gain Auto picks for `bands`: the largest boost, as a cut.
+pub fn auto_preamp_db(bands: &[Band]) -> f32 {
+    let largest = bands.iter().map(|band| band.gain_db).fold(0.0_f32, f32::max);
+    if largest > 0.0 { -largest } else { 0.0 }
+}
+
+/// Builds a profile with a new input gain (manual or Auto) without
+/// persisting it; the bands and the selected profile stay as they are.
+pub fn with_preamp(
+    profile: &EqualizerProfile,
+    gain_db: Option<f32>,
+) -> Result<EqualizerProfile, String> {
+    let mut profile = validate(profile.clone())?;
+    match gain_db {
+        Some(gain_db) => {
+            profile.preamp_db = normalized_gain(gain_db)
+                .map_err(|_| format!("gain must be between {MIN_GAIN_DB:.0} and {MAX_GAIN_DB:.0} dB"))?;
+            profile.preamp_auto = false;
+        }
+        None => profile.preamp_auto = true,
+    }
+    Ok(profile)
 }
 
 impl Default for EqualizerProfile {
@@ -179,6 +223,8 @@ impl Default for EqualizerProfile {
             active_profile_id: Some("flat".into()),
             custom_profiles: Vec::new(),
             bypassed: false,
+            preamp_db: 0.0,
+            preamp_auto: false,
         }
     }
 }
@@ -336,6 +382,8 @@ fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile,
             active_profile_id: Some(preset.id.to_owned()),
             custom_profiles: Vec::new(),
             bypassed: false,
+            preamp_db: 0.0,
+            preamp_auto: false,
         },
         // Schema 1 had no named profiles, so bands that match no factory preset
         // become the one custom profile the migrated file selects.
@@ -351,6 +399,8 @@ fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile,
                     bands: profile.bands,
                 }],
                 bypassed: false,
+                preamp_db: 0.0,
+                preamp_auto: false,
             }
         }
     };
@@ -369,6 +419,7 @@ fn validate(profile: EqualizerProfile) -> Result<EqualizerProfile, String> {
 
     let mut normalized = profile;
     validate_bands(&mut normalized.bands)?;
+    normalized.preamp_db = normalized_gain(normalized.preamp_db)?;
     let mut names = std::collections::HashSet::new();
     let mut ids = std::collections::HashSet::new();
     for custom in &mut normalized.custom_profiles {
@@ -1332,5 +1383,35 @@ mod tests {
         json.as_object_mut().unwrap().remove("bypassed");
         let old: EqualizerProfile = serde_json::from_value(json).unwrap();
         assert!(!old.bypassed);
+    }
+
+    #[test]
+    fn the_input_gain_is_manual_auto_or_none_while_bypassed() {
+        let mut profile = preset_profile("bass-boost").unwrap();
+        let largest = profile.bands.iter().map(|band| band.gain_db).fold(0.0, f32::max);
+        assert_eq!(profile.dsp_preamp_db(), 0.0);
+
+        let manual = with_preamp(&profile, Some(-4.04)).unwrap();
+        assert_eq!((manual.preamp_db, manual.preamp_auto), (-4.0, false));
+        assert_eq!(manual.dsp_preamp_db(), -4.0);
+        assert_eq!(manual.active_profile_id, profile.active_profile_id);
+        assert!(with_preamp(&profile, Some(12.5)).is_err());
+
+        let auto = with_preamp(&manual, None).unwrap();
+        assert!(auto.preamp_auto);
+        assert_eq!(auto.dsp_preamp_db(), -largest);
+        // A profile that only cuts needs no headroom.
+        assert_eq!(auto_preamp_db(&reset_profile().bands), 0.0);
+
+        profile = auto;
+        profile.bypassed = true;
+        assert_eq!(profile.dsp_preamp_db(), 0.0);
+
+        // Files written before the gain existed read as 0 dB, manual.
+        let mut json = serde_json::to_value(&manual).unwrap();
+        json.as_object_mut().unwrap().remove("preamp_db");
+        json.as_object_mut().unwrap().remove("preamp_auto");
+        let old: EqualizerProfile = serde_json::from_value(json).unwrap();
+        assert_eq!((old.preamp_db, old.preamp_auto), (0.0, false));
     }
 }

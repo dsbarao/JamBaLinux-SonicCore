@@ -1778,7 +1778,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux Sonic Core — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>|gain <db|auto>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -1825,6 +1825,11 @@ fn print_equalizer(profile: &equalizer::EqualizerProfile, json: bool) -> Result<
         if profile.bypassed {
             println!("Bypassed: natural sound, every band runs at 0 dB");
         }
+        println!(
+            "Gain: {:+.1} dB{}",
+            profile.dsp_preamp_db(),
+            if profile.preamp_auto { " (auto)" } else { "" }
+        );
     }
     Ok(())
 }
@@ -1837,6 +1842,10 @@ struct EqualizerStatusOutput {
     custom_profiles: Vec<equalizer::CustomEqualizerProfile>,
     preset: Option<&'static str>,
     bypassed: bool,
+    preamp_db: f32,
+    preamp_auto: bool,
+    /// The input gain the DSP runs (Auto's value, 0 while bypassed).
+    dsp_preamp_db: f32,
     pipewire: pipewire::Status,
 }
 
@@ -1844,6 +1853,7 @@ fn print_equalizer_status(json: bool) -> Result<(), String> {
     let profile = equalizer::load()?;
     let pipewire = pipewire::status(&profile)?;
     let preset = equalizer::matching_preset(&profile).map(|preset| preset.id);
+    let dsp_preamp_db = profile.dsp_preamp_db();
     if json {
         println!(
             "{}",
@@ -1853,6 +1863,9 @@ fn print_equalizer_status(json: bool) -> Result<(), String> {
                 active_profile_id: profile.active_profile_id,
                 custom_profiles: profile.custom_profiles,
                 bypassed: profile.bypassed,
+                preamp_db: profile.preamp_db,
+                preamp_auto: profile.preamp_auto,
+                dsp_preamp_db,
                 preset,
                 pipewire,
             })
@@ -1906,6 +1919,9 @@ struct EqualizerMutationOutput<'a> {
     applied_bands: &'a [equalizer::Band],
     active_profile_id: Option<&'a str>,
     bypassed: bool,
+    preamp_db: f32,
+    preamp_auto: bool,
+    dsp_preamp_db: f32,
     error: Option<String>,
 }
 
@@ -1922,6 +1938,9 @@ fn execute_equalizer_mutation(
                     applied_bands: &requested.bands,
                     active_profile_id: requested.active_profile_id.as_deref(),
                     bypassed: requested.bypassed,
+                    preamp_db: requested.preamp_db,
+                    preamp_auto: requested.preamp_auto,
+                    dsp_preamp_db: requested.dsp_preamp_db(),
                     error: None,
                 };
                 println!(
@@ -1940,6 +1959,9 @@ fn execute_equalizer_mutation(
                     applied_bands: &previous.bands,
                     active_profile_id: previous.active_profile_id.as_deref(),
                     bypassed: previous.bypassed,
+                    preamp_db: previous.preamp_db,
+                    preamp_auto: previous.preamp_auto,
+                    dsp_preamp_db: previous.dsp_preamp_db(),
                     error: Some(error),
                 };
                 println!(
@@ -2229,6 +2251,8 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
                 equalizer::select_profile(&previous, id)?
             };
             requested.bypassed = previous.bypassed;
+            requested.preamp_db = previous.preamp_db;
+            requested.preamp_auto = previous.preamp_auto;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         Some("profile") => equalizer_profile(args),
@@ -2245,6 +2269,8 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
                 equalizer::select_profile(&previous, "flat")?
             };
             requested.bypassed = previous.bypassed;
+            requested.preamp_db = previous.preamp_db;
+            requested.preamp_auto = previous.preamp_auto;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         // "Som natural": every band at 0 dB, the saved bands kept for later.
@@ -2259,6 +2285,23 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let mut requested = previous.clone();
             requested.bypassed = bypassed;
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        // "Ganho": the level going into the bands, or `auto` to follow them.
+        Some("gain") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            let gain_db = match values.as_slice() {
+                [value] if value == "auto" => None,
+                [value] => Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|_| "equalizer gain requires a number in dB or `auto`")?,
+                ),
+                _ => return Err("equalizer gain requires a number in dB or `auto`".into()),
+            };
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let requested = equalizer::with_preamp(&previous, gain_db)?;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         _ => Err("unknown equalizer command".into()),
@@ -3040,6 +3083,9 @@ mod tests {
             applied_bands: &profile.bands,
             active_profile_id: profile.active_profile_id.as_deref(),
             bypassed: profile.bypassed,
+            preamp_db: profile.preamp_db,
+            preamp_auto: profile.preamp_auto,
+            dsp_preamp_db: profile.dsp_preamp_db(),
             error: Some("test error".into()),
         };
         let json = serde_json::to_value(output).unwrap();

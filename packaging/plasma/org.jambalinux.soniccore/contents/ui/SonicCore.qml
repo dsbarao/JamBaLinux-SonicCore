@@ -176,6 +176,13 @@ Item {
     // finishes: a change is replaced by a newer one for the same band, never
     // dropped.
     property var pendingEqualizerBands: ({})
+    // "Ganho": the level going into the bands (dB), or Auto, which lowers it
+    // by the largest boost. dspPreamp is what runs (Auto's value, 0 while off).
+    property real equalizerPreampDb: 0
+    property bool equalizerPreampAuto: false
+    property real equalizerDspPreampDb: 0
+    // Latest requested gain (dB or "auto") not sent yet, like the bands.
+    property var pendingEqualizerGain: null
     property string equalizerSetCommand: ""
     property string equalizerActiveProfileId: ""
     property int equalizerProfileRevision: 0
@@ -535,8 +542,31 @@ Item {
         sendNextEqualizerBand()
     }
 
+    function setEqualizerGain(gain) {
+        pendingEqualizerGain = gain === "auto" ? "auto" : Math.round(Number(gain) * 10) / 10
+        equalizerFullRefresh.stop()
+        sendNextEqualizerBand()
+    }
+
+    function showEqualizerGain(result) {
+        if (!result || result.dsp_preamp_db === undefined) return
+        equalizerPreampDb = Number(result.preamp_db ?? 0)
+        equalizerPreampAuto = result.preamp_auto === true
+        equalizerDspPreampDb = Number(result.dsp_preamp_db ?? 0)
+    }
+
     function sendNextEqualizerBand() {
         if (equalizerBusy) return
+        if (pendingEqualizerGain !== null) {
+            const gain = pendingEqualizerGain
+            pendingEqualizerGain = null
+            equalizerBusy = true
+            pendingEqualizerAction = "gain"
+            equalizerActionError = ""
+            equalizerSetCommand = equalizerCliCommand(["gain", "--format", "json", String(gain)])
+            equalizerExecutable.connectSource(equalizerSetCommand)
+            return
+        }
         const frequencies = Object.keys(pendingEqualizerBands)
         if (frequencies.length === 0) return
         const frequency = frequencies[0]
@@ -576,6 +606,8 @@ Item {
             result = null
         }
         const bands = result && Array.isArray(result.applied_bands) ? result.applied_bands : []
+        if (pendingEqualizerGain === null)
+            showEqualizerGain(result)
         if (bands.length === 10) {
             showConfirmedEqualizerBands(bands)
             equalizerActiveProfileId = result.active_profile_id === null
@@ -591,7 +623,7 @@ Item {
         } else {
             equalizerActionError = ""
         }
-        if (Object.keys(pendingEqualizerBands).length > 0) {
+        if (Object.keys(pendingEqualizerBands).length > 0 || pendingEqualizerGain !== null) {
             sendNextEqualizerBand()
         } else if (failed || bands.length !== 10) {
             refreshEqualizer()
@@ -1690,6 +1722,65 @@ Item {
                             color: Kirigami.Theme.negativeTextColor
                         }
 
+                        // "Ganho", like a mixing desk's input gain: lowering it
+                        // gives boosted bands room before they distort.
+                        RowLayout {
+                            id: equalizerGainRow
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+
+                            PlasmaComponents.Label {
+                                text: "Ganho"
+                            }
+
+                            PlasmaComponents.Slider {
+                                id: equalizerGainSlider
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: Kirigami.Units.gridUnit * 3
+                                from: -12
+                                to: 12
+                                stepSize: 0.5
+                                value: root.equalizerDspPreampDb
+                                // Sent while dragging, at most every 60 ms, and
+                                // once more on release with the final value.
+                                onMoved: if (!equalizerGainSend.running) equalizerGainSend.start()
+                                onPressedChanged: {
+                                    if (pressed) return
+                                    equalizerGainSend.stop()
+                                    root.setEqualizerGain(value)
+                                    value = Qt.binding(() => root.equalizerDspPreampDb)
+                                }
+
+                                Timer {
+                                    id: equalizerGainSend
+                                    interval: 60
+                                    onTriggered: root.setEqualizerGain(equalizerGainSlider.value)
+                                }
+                            }
+
+                            PlasmaComponents.Label {
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 3.5
+                                horizontalAlignment: Text.AlignRight
+                                text: `${equalizerGainSlider.value > 0 ? "+" : ""}${equalizerGainSlider.value.toFixed(1)} dB`
+                                opacity: 0.7
+                            }
+
+                            PlasmaComponents.Button {
+                                id: equalizerGainAuto
+                                text: "Auto"
+                                checkable: true
+                                checked: root.equalizerPreampAuto
+                                QQC2.ToolTip.text: "Baixa o ganho na medida do maior reforço das bandas, para o som não distorcer"
+                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                onClicked: {
+                                    const auto = checked
+                                    checked = Qt.binding(() => root.equalizerPreampAuto)
+                                    root.setEqualizerGain(auto ? "auto" : root.equalizerDspPreampDb)
+                                }
+                            }
+                        }
+
                         GridLayout {
                             Layout.fillWidth: true
                             Layout.preferredHeight: Kirigami.Units.gridUnit
@@ -2453,6 +2544,8 @@ Item {
                     const profile = JSON.parse(stdout)
                     const pipewire = profile.pipewire ?? {}
                     root.equalizerBypassed = profile.bypassed === true
+                    if (!root.equalizerBusy && root.pendingEqualizerGain === null)
+                        root.showEqualizerGain(profile)
                     // Bypassed, the live graph runs flat: show the saved bands.
                     const appliedBands = (root.equalizerBypassed ? null : pipewire.applied_bands)
                         ?? profile.applied_bands ?? profile.bands ?? []
@@ -2742,7 +2835,8 @@ Item {
         interval: 1000
         repeat: false
         onTriggered: {
-            if (!root.equalizerBusy && Object.keys(root.pendingEqualizerBands).length === 0)
+            if (!root.equalizerBusy && Object.keys(root.pendingEqualizerBands).length === 0
+                && root.pendingEqualizerGain === null)
                 root.refreshEqualizer()
         }
     }
