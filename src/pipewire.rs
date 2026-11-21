@@ -2144,6 +2144,37 @@ pub fn run(load_profile: impl Fn() -> Result<EqualizerProfile, String>) -> Resul
     }
 }
 
+/// Points the running filter at `target` without restarting it: moves its
+/// output stream, and records the new target in the configuration (for the
+/// next start) and in the routing state.
+fn move_equalizer_output(
+    target: &PulseSink,
+    load_profile: &impl Fn() -> Result<EqualizerProfile, String>,
+) -> Result<(), String> {
+    let _route_lock = route_lock()?;
+    let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
+    let outputs = inputs
+        .iter()
+        .filter(|input| is_equalizer_output(input))
+        .collect::<Vec<_>>();
+    let [output] = outputs.as_slice() else {
+        return Err(format!(
+            "expected one equalizer output stream, found {}",
+            outputs.len()
+        ));
+    };
+    pactl_success(&[
+        "move-sink-input",
+        &output.object_serial.to_string(),
+        &target.name,
+    ])?;
+    write_atomic(&config_path()?, &render(&load_profile()?, &target.name))?;
+    let mut state = read_state()?.unwrap_or_default();
+    state.target_node_name.clone_from(&target.name);
+    state.target_object_serial = Some(target.object_serial);
+    write_state(&state)
+}
+
 enum FilterExit {
     /// The output the equalizer should play into changed (for example the
     /// user picked another default output in Plasma's volume applet).
@@ -2171,7 +2202,7 @@ fn run_filter(
     let config = config_path()?;
     let mut child = spawn_pipewire(&config)?;
     drop(mutation_lock);
-    let playing_into = read_state()?.map(|state| state.target_node_name);
+    let mut playing_into = read_state()?.map(|state| state.target_node_name);
     let mut last_route_error = String::new();
     let mut filter_watch = FilterWatch::default();
     let mut passes_since_target_check = 0_u32;
@@ -2179,15 +2210,37 @@ fn run_filter(
         passes_since_target_check += 1;
         if passes_since_target_check >= TARGET_CHECK_PASSES {
             passes_since_target_check = 0;
-            let wanted = pactl_json(&["list", "sinks"])
-                .and_then(|sinks| pulse_game_sink(&sinks))
-                .map(|sink| sink.name);
+            let wanted = pactl_json(&["list", "sinks"]).and_then(|sinks| pulse_game_sink(&sinks));
             if let Ok(wanted) = wanted
-                && playing_into.as_deref() != Some(wanted.as_str())
+                && playing_into.as_deref() != Some(wanted.name.as_str())
             {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(FilterExit::Retarget(wanted));
+                // Move only the filter's output stream, like the volume
+                // applet moves a stream. Rebuilding the filter removed its
+                // sink for a moment, and players such as Chrome paused
+                // their video as if the audio device had been unplugged.
+                match move_equalizer_output(&wanted, load_profile) {
+                    Ok(()) => {
+                        eprintln!(
+                            "the output changed to {}; moved the equalizer there without restarting it",
+                            wanted.name
+                        );
+                        playing_into = Some(wanted.name.clone());
+                        if let Err(error) = retarget_routes() {
+                            eprintln!(
+                                "could not move the equalizer's streams to {}: {error}",
+                                wanted.name
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "could not move the equalizer output in place ({error}); rebuilding it"
+                        );
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Ok(FilterExit::Retarget(wanted.name));
+                    }
+                }
             }
         }
         if let Some(status) = child
