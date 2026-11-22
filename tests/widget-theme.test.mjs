@@ -25,7 +25,8 @@ test("o tema Leve é o padrão e a página de configuração oferece os dois", (
 })
 
 test("o Vivo só substitui o topo e só roda com o painel aberto", () => {
-    assert.match(mainSource, /VivoPanel \{\n\s+id: vivoPanel\n\s+visible: root\.vivo/)
+    assert.match(mainSource, /id: vfdWindow\n\s+visible: root\.vivo/)
+    assert.match(mainSource, /VivoPanel \{\n\s+id: vivoPanel\n/)
     assert.match(mainSource, /running: root\.vivo && root\.expanded/)
     // The Leve header (image and big battery label) hides only in Vivo.
     assert.match(mainSource, /Image \{\n\s+visible: !root\.vivo && root\.outputIsQuantum\n\s+source: root\.equipmentImage/)
@@ -105,12 +106,12 @@ test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros",
     assert.match(configXml, /<entry name="backgroundIntensity" type="Int">\s*<default>1<\/default>/)
     assert.match(configXml, /<entry name="backgroundReactive" type="Bool">\s*<default>true<\/default>/)
     // The background is the first child of the popup, behind the controls.
-    assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && root\.vivoBackground !== "none"/)
-    assert.match(mainSource, /running: root\.vivo && root\.expanded\n\s+bass: vivoPanel\.bass/)
+    assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,1600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && !root\.hifi && root\.vivoBackground !== "none"/)
+    assert.match(mainSource, /running: root\.vivo && !root\.hifi && root\.expanded\n\s+bass: vivoPanel\.bass/)
     // The wallpaper is only looked up for the glass background.
     assert.match(mainSource, /if \(vivo && \(vivoBackground === "glass" \|\| vivoBackground === "wallpaper"\)\)/)
     // The app's opacity fades the background layer and the cards, not the text.
-    assert.match(mainSource, /visible: root\.vivo && root\.vivoBackground !== "none"\n\s+opacity: root\.backgroundOpacity/)
+    assert.match(mainSource, /visible: root\.vivo && !root\.hifi && root\.vivoBackground !== "none"\n\s+opacity: root\.backgroundOpacity/)
     assert.match(mainSource, /\(root\.vivo \? 0\.6 : 1\) \* root\.backgroundOpacity/)
 })
 
@@ -157,6 +158,42 @@ test("a paleta do Vivo usa todas as cores das luzes, sem preto nem repetidas", a
     assert.deepEqual(Palette.at(["#ff0000", "#0000ff"], 0.5, null), { r: 0.5, g: 0, b: 0.5, a: 1 })
     assert.deepEqual(Palette.at(wave, 1, null).g, 0x9a / 255)
     // The header, the spectrum and the background all read the palette.
-    assert.match(mainSource, /lightPalette: root\.vivoPalette[\s\S]*lightPalette: root\.vivoPalette/)
+    assert.match(mainSource, /lightPalette: root\.vivoPalette[\s\S]*lightPalette: root\.hifi \? \[String\(root\.vfdColor\)\] : root\.vivoPalette/)
     assert.doesNotMatch(vivoSource, /mix\(panel\.accentA, panel\.accentB/)
+})
+
+test("o tema Hi-Fi é um rack: madeira, alumínio escovado com as luzes, display verde e faders", async () => {
+    const appSource = await readFile(new URL("../packaging/app/main.qml", import.meta.url), "utf8")
+    assert.match(appSource, /text: "Hi-Fi"[\s\S]{0,400}onTriggered: settings\.theme = "hifi"/)
+    assert.match(mainSource, /readonly property bool hifi: root\.configuration\.theme === "hifi"/)
+    // The Vivo features (spectrum, light palette) stay on under the skin.
+    assert.match(mainSource, /readonly property bool vivo: root\.configuration\.theme === "vivo" \|\| hifi/)
+    assert.match(mainSource, /fragmentShader: Qt\.resolvedUrl\("\.\.\/shaders\/brushed\.frag\.qsb"\)/)
+    assert.match(mainSource, /fragmentShader: Qt\.resolvedUrl\("\.\.\/shaders\/wood\.frag\.qsb"\)/)
+    // The metal's sheen follows the lights and the bass.
+    assert.match(mainSource, /property real pulse: root\.hifiPulse/)
+    assert.match(mainSource, /Palette\.at\(root\.vivoPalette, 0\.5, "white"\)/)
+    // Every slider (equalizer, 3D card, volume) becomes a fader.
+    assert.equal((mainSource.match(/HifiFader \{ slider: /g) || []).length, 4)
+    for (const name of ["brushed", "wood"])
+        await readFile(new URL(`shaders/${name}.frag.qsb`, base))
+})
+
+test("no Hi-Fi as teclas, chaves e o seletor ganham pele de metal e voltam ao normal fora dele", () => {
+    for (const skin of ["HifiKeySkin", "HifiSwitchSkin", "HifiComboSkin"])
+        assert.match(mainSource, new RegExp(`component ${skin}: Item \\{[\\s\\S]{0,400}visible: root\\.hifi`))
+    // The control's own look is hidden only while the theme is on.
+    assert.match(mainSource, /Binding \{ target: key\.control\.background; property: "opacity"; value: root\.hifi \? 0 : 1 \}/)
+    assert.match(mainSource, /restoreMode: Binding\.RestoreBindingOrValue/)
+    assert.match(mainSource, /running: root\.hifi && root\.expanded\n\s+onTriggered: root\.applyHifiSkins\(expandedRepresentation\)/)
+})
+
+test("Tocando agora controla o player do Plasma e o volume geral do PC", () => {
+    assert.match(mainSource, /import org\.kde\.plasma\.private\.mpris as Mpris/)
+    assert.match(mainSource, /readonly property var outputSink: Volume\.PreferredDevice\.sink/)
+    for (const call of ["Previous", "PlayPause", "Next"])
+        assert.match(mainSource, new RegExp(`onClicked: root\\.mediaPlayer\\.${call}\\(\\)`))
+    // 100% is PulseAudio's normal volume; never above it from here.
+    assert.match(mainSource, /readonly property int normalVolume: 65536/)
+    assert.match(mainSource, /Math\.max\(0, Math\.min\(100, percent\)\)/)
 })

@@ -181,10 +181,28 @@ Kirigami.ApplicationWindow {
 
         actions: [
             Kirigami.Action {
-                text: settings.theme === "vivo" ? "Vivo" : "Leve"
+                text: settings.theme === "hifi" ? "Hi-Fi" : settings.theme === "vivo" ? "Vivo" : "Leve"
                 icon.name: "color-management"
                 tooltip: "Trocar o tema"
-                onTriggered: settings.theme = settings.theme === "vivo" ? "leve" : "vivo"
+                Kirigami.Action {
+                    text: "Vivo"
+                    checkable: true
+                    checked: settings.theme === "vivo"
+                    onTriggered: settings.theme = "vivo"
+                }
+                Kirigami.Action {
+                    text: "Hi-Fi"
+                    tooltip: "Um rack de som dos anos 80: madeira, alumínio escovado e display verde"
+                    checkable: true
+                    checked: settings.theme === "hifi"
+                    onTriggered: settings.theme = "hifi"
+                }
+                Kirigami.Action {
+                    text: "Leve"
+                    checkable: true
+                    checked: settings.theme !== "vivo" && settings.theme !== "hifi"
+                    onTriggered: settings.theme = "leve"
+                }
             },
             Kirigami.Action {
                 text: "Fundo"

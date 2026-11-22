@@ -7,6 +7,8 @@ import QtQml.Models
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.plasma5support as Plasma5Support
+import org.kde.plasma.private.mpris as Mpris
+import org.kde.plasma.private.volume as Volume
 import org.kde.plasma.workspace.dbus as DBus
 
 import "palette.js" as Palette
@@ -29,14 +31,67 @@ Item {
 
         Layout.fillWidth: true
         implicitHeight: cardBody.implicitHeight + Kirigami.Units.largeSpacing * 2
-        radius: Kirigami.Units.cornerRadius * 2
-        color: Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,
+            + (root.hifi ? Kirigami.Units.smallSpacing * 2 : 0)
+        radius: root.hifi ? 3 : Kirigami.Units.cornerRadius * 2
+        color: root.hifi ? "#a9a9a4" : Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,
             Kirigami.Theme.backgroundColor.b, (root.vivo ? 0.6 : 1) * root.backgroundOpacity)
         border.width: 1
-        border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+        border.color: root.hifi ? "#5e5e5a" : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
             Kirigami.Theme.textColor.b, 0.15)
         clip: true
-        opacity: enabled ? 1 : 0.45
+        // Hi-Fi keeps the metal solid and fades only what is on it.
+        opacity: enabled || root.hifi ? 1 : 0.45
+        // Hi-Fi: dark engraving on the silver plate. Buttons keep their own
+        // colors; only text drawn on the plate follows these.
+        Kirigami.Theme.inherit: !root.hifi
+        Kirigami.Theme.textColor: root.hifi ? "#1f1f1d" : root.defaultTextColor
+        Kirigami.Theme.disabledTextColor: root.hifi ? "#5a5a56" : root.defaultDisabledTextColor
+        Kirigami.Theme.positiveTextColor: root.hifi ? "#1d7a3e" : root.defaultPositiveTextColor
+        Kirigami.Theme.negativeTextColor: root.hifi ? "#b3261e" : root.defaultNegativeTextColor
+
+        // Hi-Fi faceplate: brushed aluminium with the lights' colors passing
+        // over it, and a screw in each corner.
+        ShaderEffect {
+            anchors.fill: parent
+            visible: root.hifi
+            property real travel: root.hifiTravel
+            property real pulse: root.hifiPulse
+            property real tint: root.vivoPalette.length > 0 ? 1 : 0
+            property size size: Qt.size(width, height)
+            property color color0: root.vivoPalette.length > 0 ? Palette.at(root.vivoPalette, 0, "white") : "white"
+            property color color1: root.vivoPalette.length > 0 ? Palette.at(root.vivoPalette, 0.25, "white") : "white"
+            property color color2: root.vivoPalette.length > 0 ? Palette.at(root.vivoPalette, 0.5, "white") : "white"
+            property color color3: root.vivoPalette.length > 0 ? Palette.at(root.vivoPalette, 0.75, "white") : "white"
+            property color color4: root.vivoPalette.length > 0 ? Palette.at(root.vivoPalette, 1, "white") : "white"
+            fragmentShader: Qt.resolvedUrl("../shaders/brushed.frag.qsb")
+        }
+
+        Repeater {
+            model: root.hifi ? 4 : 0
+            delegate: Rectangle {
+                required property int index
+                readonly property real inset: Kirigami.Units.smallSpacing + 1
+                width: Kirigami.Units.gridUnit * 0.55
+                height: width
+                radius: width / 2
+                x: index % 2 === 0 ? inset : card.width - inset - width
+                y: index < 2 ? inset : card.height - inset - height
+                border.width: 1
+                border.color: "#55554f"
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#f2f2ee" }
+                    GradientStop { position: 1.0; color: "#8a8a84" }
+                }
+                // The screw's slot, each one turned a little differently.
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.width * 0.72
+                    height: 1.5
+                    color: "#4a4a45"
+                    rotation: 25 + index * 52
+                }
+            }
+        }
 
         Behavior on implicitHeight {
             NumberAnimation { duration: Kirigami.Units.longDuration; easing.type: Easing.OutCubic }
@@ -51,13 +106,23 @@ Item {
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.margins: Kirigami.Units.largeSpacing
+            anchors.topMargin: Kirigami.Units.largeSpacing + (root.hifi ? Kirigami.Units.smallSpacing : 0)
             spacing: Kirigami.Units.smallSpacing
+            opacity: card.enabled || !root.hifi ? 1 : 0.45
+            Behavior on opacity {
+                NumberAnimation { duration: Kirigami.Units.longDuration }
+            }
 
             PlasmaComponents.Label {
                 Layout.alignment: Qt.AlignHCenter
                 visible: text.length > 0
-                text: card.title
+                text: root.hifi ? card.title.toUpperCase() : card.title
                 font.bold: true
+                font.letterSpacing: root.hifi ? 2 : 0
+                font.pointSize: root.hifi ? Kirigami.Theme.smallFont.pointSize : Kirigami.Theme.defaultFont.pointSize
+                // Engraved: a light edge under the dark letters.
+                style: root.hifi ? Text.Raised : Text.Normal
+                styleColor: "#f4f4f0"
             }
 
             PlasmaComponents.Label {
@@ -70,6 +135,291 @@ Item {
                 opacity: 0.7
             }
         }
+    }
+
+    // Hi-Fi: a slider drawn as a mixing-desk fader (a dark slot and a
+    // chrome cap). The slider keeps working underneath; only its look is
+    // replaced while the theme is on.
+    component HifiFader: Item {
+        id: fader
+        property Item slider
+        anchors.fill: parent
+        visible: root.hifi
+        readonly property bool vertical: slider.orientation === Qt.Vertical
+        readonly property real capAlong: Kirigami.Units.gridUnit * (vertical ? 0.8 : 0.95)
+        readonly property real capAcross: Kirigami.Units.gridUnit * (vertical ? 1.35 : 1.2)
+
+        Binding { target: fader.slider.handle; property: "opacity"; value: root.hifi ? 0 : 1 }
+        Binding { target: fader.slider.background; property: "opacity"; value: root.hifi ? 0 : 1 }
+
+        // Scale marks beside a vertical slot, as on a graphic equalizer.
+        Repeater {
+            model: fader.vertical ? 13 : 0
+            delegate: Rectangle {
+                required property int index
+                readonly property bool major: index % 3 === 0
+                width: major ? fader.capAcross * 0.95 : fader.capAcross * 0.6
+                height: 1
+                x: (fader.width - width) / 2
+                y: fader.slider.topPadding + fader.capAlong / 2
+                    + index / 12 * (fader.slider.availableHeight - fader.capAlong)
+                color: Qt.rgba(0.12, 0.12, 0.11, major ? 0.55 : 0.3)
+            }
+        }
+
+        Rectangle {
+            x: fader.vertical ? (fader.width - width) / 2 : fader.slider.leftPadding
+            y: fader.vertical ? fader.slider.topPadding : (fader.height - height) / 2
+            width: fader.vertical ? 5 : fader.slider.availableWidth
+            height: fader.vertical ? fader.slider.availableHeight : 5
+            radius: 2.5
+            color: "#141413"
+            border.width: 1
+            border.color: "#6c6c67"
+        }
+
+        // The chrome cap: bright top edge, dark bottom, a grip line across.
+        Rectangle {
+            width: fader.vertical ? fader.capAcross : fader.capAlong
+            height: fader.vertical ? fader.capAlong : fader.capAcross
+            x: fader.vertical ? (fader.width - width) / 2
+                : fader.slider.leftPadding + fader.slider.visualPosition * (fader.slider.availableWidth - width)
+            y: fader.vertical
+                ? fader.slider.topPadding + fader.slider.visualPosition * (fader.slider.availableHeight - height)
+                : (fader.height - height) / 2
+            radius: 2
+            border.width: 1
+            border.color: "#3c3c38"
+            gradient: Gradient {
+                orientation: fader.vertical ? Gradient.Vertical : Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#fbfbf8" }
+                GradientStop { position: 0.45; color: "#d6d6d1" }
+                GradientStop { position: 0.55; color: "#a9a9a4" }
+                GradientStop { position: 1.0; color: "#6f6f6a" }
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: fader.vertical ? parent.width - 4 : 2
+                height: fader.vertical ? 2 : parent.height - 4
+                color: "#2c2c29"
+            }
+        }
+    }
+
+    // Hi-Fi skins for the Plasma controls, attached at run time by
+    // applyHifiSkins(): each draws over the control's own background while
+    // the theme is on and gives everything back when it is switched off.
+    readonly property color hifiInk: "#1f1f1d"
+    readonly property color hifiLedOn: "#ffb12e"
+
+    // Dark engraving for a label inside a control (restored afterwards).
+    component HifiInk: Binding {
+        property: "color"
+        value: root.hifiInk
+        when: root.hifi
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+
+    // A push key of the rack: brushed silver, pressed in while held, with a
+    // small amber LED when it is the chosen one.
+    component HifiKeySkin: Item {
+        id: key
+        property Item control
+        anchors.fill: parent
+        z: -0.5
+        visible: root.hifi
+        readonly property bool down: control.down || control.pressed === true
+        readonly property bool lit: control.checked === true || control.highlighted === true
+
+        Binding { target: key.control.background; property: "opacity"; value: root.hifi ? 0 : 1 }
+        // Monochrome icons engraved dark like the labels (colored ones keep
+        // their colors).
+        Binding {
+            target: key.control
+            property: "icon.color"
+            value: root.hifiInk
+            when: root.hifi
+            restoreMode: Binding.RestoreBindingOrValue
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            radius: 2
+            border.width: 1
+            border.color: key.control.visualFocus ? "#2f6fb0" : "#4b4b46"
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: key.down ? "#a9a9a4" : "#f6f6f2" }
+                GradientStop { position: 0.5; color: key.down ? "#c4c4bf" : "#d9d9d4" }
+                GradientStop { position: 1.0; color: key.down ? "#dcdcd7" : "#a3a39e" }
+            }
+            // The light catches the top edge of a raised key.
+            Rectangle {
+                visible: !key.down
+                x: 2; y: 1
+                width: parent.width - 4
+                height: 1
+                color: Qt.rgba(1, 1, 1, 0.85)
+            }
+        }
+
+        // The LED, in the top right corner.
+        Rectangle {
+            visible: key.control.checkable || key.lit
+            width: Math.max(5, Kirigami.Units.gridUnit * 0.32)
+            height: width
+            radius: width / 2
+            x: parent.width - width - 4
+            y: 4
+            color: key.lit ? root.hifiLedOn : "#5b5248"
+            border.width: 1
+            border.color: key.lit ? "#c27a10" : "#3c3630"
+            Behavior on color { ColorAnimation { duration: Kirigami.Units.shortDuration } }
+        }
+    }
+
+    // A switch as a small rocker in a slot, with a green LED when on.
+    component HifiSwitchSkin: Item {
+        id: rocker
+        property Item control
+        readonly property Item indicator: control.indicator
+        x: indicator.x
+        y: indicator.y
+        width: indicator.width
+        height: indicator.height
+        visible: root.hifi
+
+        Binding { target: rocker.indicator; property: "opacity"; value: root.hifi ? 0 : 1 }
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.topMargin: parent.height * 0.12
+            anchors.bottomMargin: parent.height * 0.12
+            radius: 3
+            color: "#1a1a18"
+            border.width: 1
+            border.color: "#6c6c67"
+
+            Rectangle {
+                width: parent.width * 0.55
+                height: parent.height - 4
+                y: 2
+                x: rocker.control.checked ? parent.width - width - 2 : 2
+                radius: 2
+                border.width: 1
+                border.color: "#3c3c38"
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#fbfbf8" }
+                    GradientStop { position: 0.5; color: "#cfcfca" }
+                    GradientStop { position: 1.0; color: "#8a8a85" }
+                }
+                Behavior on x { NumberAnimation { duration: Kirigami.Units.shortDuration } }
+            }
+        }
+
+        Rectangle {
+            width: Math.max(5, Kirigami.Units.gridUnit * 0.32)
+            height: width
+            radius: width / 2
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.left
+            anchors.rightMargin: 3
+            color: rocker.control.checked ? "#5cf58f" : "#3d4a40"
+            border.width: 1
+            border.color: rocker.control.checked ? "#1f9a4a" : "#2a312b"
+        }
+    }
+
+    // A selector as a silver key with a dark window for the choice.
+    component HifiComboSkin: Item {
+        id: combo
+        property Item control
+        anchors.fill: parent
+        z: -0.5
+        visible: root.hifi
+
+        Binding { target: combo.control.background; property: "opacity"; value: root.hifi ? 0 : 1 }
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            radius: 2
+            border.width: 1
+            border.color: "#4b4b46"
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#f2f2ee" }
+                GradientStop { position: 1.0; color: "#b4b4af" }
+            }
+        }
+    }
+
+    readonly property Component hifiKeySkin: Component { HifiKeySkin {} }
+    readonly property Component hifiSwitchSkin: Component { HifiSwitchSkin {} }
+    readonly property Component hifiComboSkin: Component { HifiComboSkin {} }
+    readonly property Component hifiInkBinding: Component { HifiInk {} }
+    property var hifiSkinned: new Map()
+
+    function hifiInkLabels(item, owner, depth) {
+        if (!item || depth > 4) return
+        if (item.text !== undefined && item.color !== undefined && item.font !== undefined)
+            hifiInkBinding.createObject(owner, { "target": item })
+        const children = item.children || []
+        for (let index = 0; index < children.length; ++index)
+            hifiInkLabels(children[index], owner, depth + 1)
+    }
+
+    // Dresses every key, switch and selector below `item` once. Repeaters
+    // add controls later, so this runs again while the theme is on.
+    function applyHifiSkins(item) {
+        if (!item) return
+        if (!hifiSkinned.has(item)) {
+            let skin = null
+            if (item instanceof PlasmaComponents.Switch) {
+                skin = hifiSwitchSkin.createObject(item, { "control": item })
+            } else if (item instanceof PlasmaComponents.ComboBox) {
+                skin = hifiComboSkin.createObject(item, { "control": item })
+                hifiInkLabels(item.contentItem, skin, 0)
+            } else if (item instanceof PlasmaComponents.Button) {
+                skin = hifiKeySkin.createObject(item, { "control": item })
+                hifiInkLabels(item.contentItem, skin, 0)
+            }
+            if (skin) {
+                hifiSkinned.set(item, skin)
+                return
+            }
+        }
+        const children = item.children || []
+        for (let index = 0; index < children.length; ++index)
+            applyHifiSkins(children[index])
+    }
+
+    // "Tocando agora": the player Plasma's media controls follow (YouTube in
+    // a browser, Spotify, VLC…) and the computer's output volume, through
+    // the same modules as Plasma's own media and volume applets.
+    Mpris.Mpris2Model { id: mediaModel }
+    // Creating a model starts the volume connection PreferredDevice reads.
+    Volume.SinkModel { id: volumeSinks }
+    readonly property var mediaPlayer: mediaModel.currentPlayer ?? null
+    readonly property bool mediaPlaying: mediaPlayer !== null
+        && mediaPlayer.playbackStatus === Mpris.PlaybackStatus.Playing
+    readonly property var outputSink: Volume.PreferredDevice.sink ?? null
+    // PulseAudio's 100% (PA_VOLUME_NORM).
+    readonly property int normalVolume: 65536
+    readonly property int outputVolumePercent: outputSink
+        ? Math.round(outputSink.volume / normalVolume * 100) : 0
+
+    function setOutputVolume(percent) {
+        if (!outputSink) return
+        outputSink.muted = false
+        outputSink.volume = Math.round(Math.max(0, Math.min(100, percent)) / 100 * normalVolume)
+    }
+
+    function outputVolumeIcon() {
+        if (!outputSink || outputSink.muted || outputVolumePercent === 0) return "audio-volume-muted"
+        if (outputVolumePercent < 34) return "audio-volume-low"
+        if (outputVolumePercent < 67) return "audio-volume-medium"
+        return "audio-volume-high"
     }
 
     property var configuration: ({})
@@ -245,7 +595,19 @@ Item {
     // A headset reported off keeps its last battery reading on screen (in
     // grey), but nothing can be written to it.
     // "leve" keeps the original interface; "vivo" adds the live header.
-    readonly property bool vivo: root.configuration.theme === "vivo"
+    // "hifi": the Vivo panel dressed as an 80s hi-fi rack (wood cabinet,
+    // brushed-aluminium faceplates, a green fluorescent display).
+    readonly property bool hifi: root.configuration.theme === "hifi"
+    readonly property bool vivo: root.configuration.theme === "vivo" || hifi
+    readonly property color defaultTextColor: Kirigami.Theme.textColor
+    readonly property color defaultDisabledTextColor: Kirigami.Theme.disabledTextColor
+    readonly property color defaultPositiveTextColor: Kirigami.Theme.positiveTextColor
+    readonly property color defaultNegativeTextColor: Kirigami.Theme.negativeTextColor
+    // The metal's light sheen drifts with time, faster with the bass.
+    property real hifiTravel: 0
+    property real hifiPulse: 0
+    // A fluorescent display is one color, like the real ones.
+    readonly property color vfdColor: "#62f5b0"
     readonly property string vivoBackground: root.configuration.background || "aurora"
     // Where the equalizer is playing now (it follows the system default in
     // "auto"). Another output shows its own icon and name in the header.
@@ -1268,15 +1630,44 @@ Item {
         Layout.preferredWidth: Kirigami.Units.gridUnit * 66
         Layout.preferredHeight: expandedRepresentation.implicitHeight + Kirigami.Units.largeSpacing * 2
 
+        // Hi-Fi: the rack's wood cabinet behind the faceplates.
+        ShaderEffect {
+            anchors.fill: parent
+            visible: root.hifi
+            opacity: root.backgroundOpacity
+            property size size: Qt.size(width, height)
+            fragmentShader: Qt.resolvedUrl("../shaders/wood.frag.qsb")
+        }
+
+        // New keys appear with Repeaters and state changes: dress them too.
+        Timer {
+            interval: 1200
+            repeat: true
+            triggeredOnStart: true
+            running: root.hifi && root.expanded
+            onTriggered: root.applyHifiSkins(expandedRepresentation)
+        }
+
+        Timer {
+            interval: 33
+            repeat: true
+            running: root.hifi && root.expanded && Kirigami.Units.longDuration > 1
+            onTriggered: {
+                const target = root.configuration.backgroundReactive === false ? 0 : vivoPanel.bass
+                root.hifiPulse += (target - root.hifiPulse) * (target > root.hifiPulse ? 0.45 : 0.08)
+                root.hifiTravel += 0.033 * (0.35 + 1.6 * root.hifiPulse)
+            }
+        }
+
         // Drawn behind every control; only with the Vivo theme.
         VivoBackground {
             anchors.fill: parent
-            visible: root.vivo && root.vivoBackground !== "none"
+            visible: root.vivo && !root.hifi && root.vivoBackground !== "none"
             opacity: root.backgroundOpacity
             style: root.vivoBackground
             intensity: root.configuration.backgroundIntensity
             reactive: root.configuration.backgroundReactive
-            running: root.vivo && root.expanded
+            running: root.vivo && !root.hifi && root.expanded
             bass: vivoPanel.bass
             accentA: root.vivoAccentA
             accentB: root.vivoAccentB
@@ -1331,30 +1722,61 @@ Item {
                 opacity: 0.7
             }
 
-            VivoPanel {
-                id: vivoPanel
+            // Hi-Fi: the panel sits behind the dark glass of a fluorescent
+            // display, in its single green, like the rack's own displays.
+            Rectangle {
+                id: vfdWindow
                 visible: root.vivo
-                onPeakChanged: {
-                    if (peak >= 0.999) {
-                        root.equalizerClipping = true
-                        clipHold.restart()
+                readonly property real padding: root.hifi ? Kirigami.Units.largeSpacing : 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: vivoPanel.implicitHeight + padding * 2
+                radius: root.hifi ? 4 : 0
+                color: root.hifi ? "#060a08" : "transparent"
+                border.width: root.hifi ? 2 : 0
+                border.color: "#3a3a36"
+                Kirigami.Theme.inherit: !root.hifi
+                Kirigami.Theme.textColor: root.hifi ? root.vfdColor : root.defaultTextColor
+                Kirigami.Theme.disabledTextColor: root.hifi ? Qt.darker(root.vfdColor, 2.2) : root.defaultDisabledTextColor
+
+                VivoPanel {
+                    id: vivoPanel
+                    onPeakChanged: {
+                        if (peak >= 0.999) {
+                            root.equalizerClipping = true
+                            clipHold.restart()
+                        }
+                    }
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: vfdWindow.padding
+                    running: root.vivo && root.expanded
+                    batteryPercent: root.batteryPercent
+                    charging: root.charging
+                    headsetConnected: root.headsetConnected
+                    batteryColor: root.batteryColor
+                    accentA: root.hifi ? root.vfdColor : root.vivoAccentA
+                    accentB: root.hifi ? root.vfdColor : root.vivoAccentB
+                    lightPalette: root.hifi ? [String(root.vfdColor)] : root.vivoPalette
+                    equipmentImage: root.equipmentImage
+                    pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
+                    outputIsQuantum: root.outputIsQuantum
+                    outputIcon: root.outputIcon
+                    hoursLeftText: root.hoursLeftText
+                }
+
+                // The glass: a faint reflection across the top.
+                Rectangle {
+                    visible: root.hifi
+                    anchors.fill: parent
+                    anchors.margins: 2
+                    radius: 3
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.10) }
+                        GradientStop { position: 0.35; color: Qt.rgba(1, 1, 1, 0.02) }
+                        GradientStop { position: 1.0; color: "transparent" }
                     }
                 }
-                Layout.fillWidth: true
-                Layout.preferredHeight: implicitHeight
-                running: root.vivo && root.expanded
-                batteryPercent: root.batteryPercent
-                charging: root.charging
-                headsetConnected: root.headsetConnected
-                batteryColor: root.batteryColor
-                accentA: root.vivoAccentA
-                accentB: root.vivoAccentB
-                lightPalette: root.vivoPalette
-                equipmentImage: root.equipmentImage
-                pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
-                outputIsQuantum: root.outputIsQuantum
-                outputIcon: root.outputIcon
-                hoursLeftText: root.hoursLeftText
             }
 
             // The playing output when it is not the headset, with the icon
@@ -1537,6 +1959,179 @@ Item {
                 wrapMode: Text.Wrap
                 opacity: 0.85
             }
+                }
+
+                SectionCard {
+                    id: nowPlayingCard
+                    title: "Tocando agora"
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+
+                        // The cover, framed like a display window in Hi-Fi.
+                        Rectangle {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 3.6
+                            Layout.preferredHeight: Layout.preferredWidth
+                            radius: 4
+                            clip: true
+                            color: root.hifi ? "#060a08" : Qt.rgba(Kirigami.Theme.textColor.r,
+                                Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.08)
+                            border.width: root.hifi ? 2 : 0
+                            border.color: "#3a3a36"
+
+                            Image {
+                                id: mediaCover
+                                anchors.fill: parent
+                                anchors.margins: root.hifi ? 2 : 0
+                                source: root.mediaPlayer && root.mediaPlayer.artUrl ? root.mediaPlayer.artUrl : ""
+                                sourceSize.width: 160
+                                sourceSize.height: 160
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                smooth: true
+                            }
+
+                            Kirigami.Icon {
+                                anchors.centerIn: parent
+                                visible: mediaCover.status !== Image.Ready
+                                width: Kirigami.Units.iconSizes.medium
+                                height: width
+                                source: root.mediaPlayer && root.mediaPlayer.iconName
+                                    ? root.mediaPlayer.iconName : "media-default-album"
+                                opacity: 0.7
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 0
+
+                            PlasmaComponents.Label {
+                                Layout.fillWidth: true
+                                text: root.mediaPlayer
+                                    ? (root.mediaPlayer.track || root.mediaPlayer.identity)
+                                    : "Nada tocando agora"
+                                font.bold: true
+                                elide: Text.ElideRight
+                                maximumLineCount: 1
+                            }
+
+                            PlasmaComponents.Label {
+                                Layout.fillWidth: true
+                                text: root.mediaPlayer
+                                    ? (root.mediaPlayer.artist || "")
+                                    : "Toque algo no YouTube, no Spotify ou em outro player."
+                                elide: Text.ElideRight
+                                wrapMode: root.mediaPlayer ? Text.NoWrap : Text.Wrap
+                                maximumLineCount: 2
+                                opacity: 0.75
+                            }
+
+                            PlasmaComponents.Label {
+                                Layout.fillWidth: true
+                                visible: root.mediaPlayer !== null
+                                text: root.mediaPlayer ? root.mediaPlayer.identity : ""
+                                elide: Text.ElideRight
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                opacity: 0.55
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents.Button {
+                            icon.name: "media-skip-backward"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: "Anterior"
+                            enabled: root.mediaPlayer !== null && root.mediaPlayer.canGoPrevious
+                            onClicked: root.mediaPlayer.Previous()
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+
+                        PlasmaComponents.Button {
+                            icon.name: root.mediaPlaying ? "media-playback-pause" : "media-playback-start"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: root.mediaPlaying ? "Pausar" : "Tocar"
+                            enabled: root.mediaPlayer !== null
+                                && (root.mediaPlaying ? root.mediaPlayer.canPause : root.mediaPlayer.canPlay)
+                            onClicked: root.mediaPlayer.PlayPause()
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+
+                        PlasmaComponents.Button {
+                            icon.name: "media-skip-forward"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: "Próxima"
+                            enabled: root.mediaPlayer !== null && root.mediaPlayer.canGoNext
+                            onClicked: root.mediaPlayer.Next()
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
+
+                    // The computer's volume (the default output), like the
+                    // volume applet in the panel.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        enabled: root.outputSink !== null
+
+                        PlasmaComponents.Button {
+                            icon.name: root.outputVolumeIcon()
+                            display: QQC2.AbstractButton.IconOnly
+                            text: root.outputSink && root.outputSink.muted ? "Tirar do mudo" : "Silenciar"
+                            checkable: true
+                            checked: root.outputSink !== null && root.outputSink.muted
+                            onClicked: {
+                                const muted = checked
+                                checked = Qt.binding(() => root.outputSink !== null && root.outputSink.muted)
+                                root.outputSink.muted = muted
+                            }
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+
+                        PlasmaComponents.Slider {
+                            id: outputVolumeSlider
+                            Layout.fillWidth: true
+                            from: 0
+                            to: 100
+                            stepSize: 1
+                            value: root.outputVolumePercent
+                            onMoved: root.setOutputVolume(value)
+                            onPressedChanged: if (!pressed) value = Qt.binding(() => root.outputVolumePercent)
+
+                            HifiFader { slider: outputVolumeSlider }
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                            horizontalAlignment: Text.AlignRight
+                            text: root.outputSink && root.outputSink.muted
+                                ? "mudo" : `${Math.round(outputVolumeSlider.value)}%`
+                            opacity: 0.7
+                        }
+                    }
+
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        visible: root.outputSink !== null
+                        text: `Volume de: ${root.outputSink ? root.outputSink.description : ""}`
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignHCenter
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        opacity: 0.55
+                    }
                 }
 
                 SectionCard {
@@ -1851,6 +2446,8 @@ Item {
                                     value = Qt.binding(() => root.equalizerDspPreampDb)
                                 }
 
+                                HifiFader { slider: equalizerGainSlider }
+
                                 Timer {
                                     id: equalizerGainSend
                                     interval: 60
@@ -1982,6 +2579,8 @@ Item {
                                                 root.setEqualizerBand(equalizerBand.frequencyHz, value)
                                             }
                                         }
+
+                                        HifiFader { slider: equalizerSlider }
                                     }
 
                                     PlasmaComponents.Label {
@@ -2058,8 +2657,11 @@ Item {
                                 }
                             }
 
+                            // Only for a change the user asked for: the routine
+                            // status read every few seconds must not pop a cell
+                            // into the grid (the buttons jumped, a "blink").
                             PlasmaComponents.BusyIndicator {
-                                running: root.spatialBusy || root.spatialUpdating
+                                running: root.spatialBusy
                                 visible: running
                                 Layout.preferredWidth: Kirigami.Units.iconSizes.small
                                 Layout.preferredHeight: Kirigami.Units.iconSizes.small
@@ -2141,6 +2743,8 @@ Item {
                                                 root.setSpatialSoundControl(soundRow.modelData.control, value)
                                                 value = Qt.binding(() => Number(root.spatialSound[soundRow.modelData.key] ?? 0))
                                             }
+
+                                            HifiFader { slider: soundSlider }
 
                                             Timer {
                                                 id: soundSend
