@@ -12,6 +12,7 @@
 #include <QDBusMessage>
 #include <QHash>
 #include <QObject>
+#include <QTimer>
 #include <QVariantMap>
 
 class MediaController : public QObject
@@ -28,6 +29,11 @@ class MediaController : public QObject
     Q_PROPERTY(bool canGoPrevious READ canGoPrevious NOTIFY changed)
     Q_PROPERTY(bool canPlay READ canPlay NOTIFY changed)
     Q_PROPERTY(bool canPause READ canPause NOTIFY changed)
+    /* Where the track is and how long it is, in milliseconds (0 when the
+       player does not say); canSeek when it can be moved. */
+    Q_PROPERTY(double position READ position NOTIFY positionChanged)
+    Q_PROPERTY(double length READ length NOTIFY changed)
+    Q_PROPERTY(bool canSeek READ canSeek NOTIFY changed)
 
 public:
     explicit MediaController(QObject* parent = nullptr);
@@ -43,10 +49,15 @@ public:
     bool canGoPrevious() const;
     bool canPlay() const;
     bool canPause() const;
+    double position() const;
+    double length() const;
+    bool canSeek() const;
 
     Q_INVOKABLE void previous();
     Q_INVOKABLE void playPause();
     Q_INVOKABLE void next();
+    /* Moves the track to `milliseconds` from its start. */
+    Q_INVOKABLE void setPosition(double milliseconds);
 
     struct Player
     {
@@ -59,6 +70,8 @@ public:
         bool        canGoPrevious = false;
         bool        canPlay = false;
         bool        canPause = false;
+        bool        canSeek = false;
+        qint64      position = 0;    /* microseconds, as MPRIS counts */
         qint64      activeSince = 0; /* when it last started playing */
     };
 
@@ -68,10 +81,12 @@ public:
 
 Q_SIGNALS:
     void changed();
+    void positionChanged();
 
 private Q_SLOTS:
     void nameOwnerChanged(const QString& name, const QString& oldOwner, const QString& newOwner);
     void propertiesChanged(const QDBusMessage& message);
+    void seeked(const QDBusMessage& message);
 
 private:
     void addPlayer(const QString& service, const QString& owner);
@@ -79,7 +94,12 @@ private:
     void apply(Player& player, const QVariantMap& properties);
     void call(const QString& method);
     void update();
+    void fetchPosition();
 
     QHash<QString, Player> players;
     QString current;
+    /* The position is not announced while it advances: read it once a
+       second while a track plays (a tiny D-Bus call). */
+    QTimer positionPoll;
+    QString shownTrack;
 };

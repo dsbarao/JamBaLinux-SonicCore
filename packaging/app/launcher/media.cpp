@@ -3,7 +3,9 @@
 
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
+#include <QDBusVariant>
 #include <QDateTime>
 
 static const QString MPRIS_PREFIX = QStringLiteral("org.mpris.MediaPlayer2.");
@@ -21,6 +23,10 @@ MediaController::MediaController(QObject* parent)
                 this, SLOT(nameOwnerChanged(QString,QString,QString)));
     bus.connect(QString(), MPRIS_PATH, PROPERTIES_IFACE, QStringLiteral("PropertiesChanged"),
                 this, SLOT(propertiesChanged(QDBusMessage)));
+    bus.connect(QString(), MPRIS_PATH, PLAYER_IFACE, QStringLiteral("Seeked"),
+                this, SLOT(seeked(QDBusMessage)));
+    positionPoll.setInterval(1000);
+    connect(&positionPoll, &QTimer::timeout, this, &MediaController::fetchPosition);
     if(QDBusConnectionInterface* names = bus.interface())
     {
         for(const QString& name : names->registeredServiceNames().value())
@@ -103,6 +109,14 @@ void MediaController::apply(Player& player, const QVariantMap& properties)
         else if(key == QLatin1String("CanPause"))
         {
             player.canPause = value.toBool();
+        }
+        else if(key == QLatin1String("CanSeek"))
+        {
+            player.canSeek = value.toBool();
+        }
+        else if(key == QLatin1String("Position"))
+        {
+            player.position = value.toLongLong();
         }
     }
 }
@@ -188,6 +202,99 @@ void MediaController::update()
 {
     current = choose(players, current);
     Q_EMIT changed();
+    Q_EMIT positionChanged();
+    if(playing())
+    {
+        if(!positionPoll.isActive())
+        {
+            positionPoll.start();
+        }
+    }
+    else
+    {
+        positionPoll.stop();
+    }
+    /* Another player or another track: where it is now. */
+    const QString shown = current + QLatin1Char('\n') + track();
+    if(hasPlayer() && shown != shownTrack)
+    {
+        fetchPosition();
+    }
+    shownTrack = shown;
+}
+
+void MediaController::fetchPosition()
+{
+    if(!hasPlayer())
+    {
+        return;
+    }
+    const QString service = current;
+    QDBusMessage message = QDBusMessage::createMethodCall(service, MPRIS_PATH, PROPERTIES_IFACE,
+                                                          QStringLiteral("Get"));
+    message.setArguments({ PLAYER_IFACE, QStringLiteral("Position") });
+    auto* watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 1000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, service]() {
+        watcher->deleteLater();
+        const QDBusMessage reply = watcher->reply();
+        auto found = players.find(service);
+        if(found == players.end() || reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        {
+            return;
+        }
+        found->position = plainDBusValue(reply.arguments().first()).toLongLong();
+        if(service == current)
+        {
+            Q_EMIT positionChanged();
+        }
+    });
+}
+
+void MediaController::seeked(const QDBusMessage& message)
+{
+    if(message.arguments().isEmpty())
+    {
+        return;
+    }
+    for(auto player = players.begin(); player != players.end(); ++player)
+    {
+        if(player->owner == message.service())
+        {
+            player->position = plainDBusValue(message.arguments().first()).toLongLong();
+            if(player.key() == current)
+            {
+                Q_EMIT positionChanged();
+            }
+            return;
+        }
+    }
+}
+
+void MediaController::setPosition(double milliseconds)
+{
+    if(!canSeek())
+    {
+        return;
+    }
+    Player& player = players[current];
+    const qint64 target = qBound<qint64>(0, qint64(milliseconds * 1000.0),
+                                         qMax<qint64>(0, qint64(length() * 1000.0)));
+    const QString trackId = player.metadata.value(QStringLiteral("mpris:trackid")).toString();
+    QDBusMessage message;
+    if(!trackId.isEmpty())
+    {
+        message = QDBusMessage::createMethodCall(current, MPRIS_PATH, PLAYER_IFACE, QStringLiteral("SetPosition"));
+        message.setArguments({ QVariant::fromValue(QDBusObjectPath(trackId)), QVariant::fromValue(target) });
+    }
+    else
+    {
+        message = QDBusMessage::createMethodCall(current, MPRIS_PATH, PLAYER_IFACE, QStringLiteral("Seek"));
+        message.setArguments({ QVariant::fromValue(target - player.position) });
+    }
+    QDBusConnection::sessionBus().asyncCall(message, 2000);
+    /* Shown at once; the player's Seeked signal confirms it. */
+    player.position = target;
+    Q_EMIT positionChanged();
 }
 
 void MediaController::call(const QString& method)
@@ -248,3 +355,15 @@ bool MediaController::canGoNext() const { return hasPlayer() && players.value(cu
 bool MediaController::canGoPrevious() const { return hasPlayer() && players.value(current).canGoPrevious; }
 bool MediaController::canPlay() const { return hasPlayer() && players.value(current).canPlay; }
 bool MediaController::canPause() const { return hasPlayer() && players.value(current).canPause; }
+bool MediaController::canSeek() const { return hasPlayer() && players.value(current).canSeek && length() > 0; }
+
+double MediaController::position() const
+{
+    return hasPlayer() ? players.value(current).position / 1000.0 : 0.0;
+}
+
+double MediaController::length() const
+{
+    return hasPlayer()
+        ? players.value(current).metadata.value(QStringLiteral("mpris:length")).toLongLong() / 1000.0 : 0.0;
+}

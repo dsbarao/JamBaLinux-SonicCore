@@ -174,7 +174,7 @@ test("o tema Hi-Fi é um rack: madeira, alumínio escovado com as luzes, display
     assert.match(mainSource, /property real pulse: root\.hifiPulse/)
     assert.match(mainSource, /Palette\.at\(root\.vivoPalette, 0\.5, "white"\)/)
     // Every slider (equalizer, 3D card, volume) becomes a fader.
-    assert.equal((mainSource.match(/HifiFader \{ slider: /g) || []).length, 4)
+    assert.equal((mainSource.match(/HifiFader \{ slider: /g) || []).length, 5)
     for (const name of ["brushed", "wood"])
         await readFile(new URL(`shaders/${name}.frag.qsb`, base))
 })
@@ -201,4 +201,28 @@ test("Tocando agora usa o MPRIS e o volume do PipeWire, em qualquer ambiente", a
         assert.doesNotMatch(source, /import org\.kde\.(plasma|kcmutils)/, name)
     }
     assert.doesNotMatch(appMain, /import org\.kde\.(plasma|kcmutils)/)
+})
+
+test("o equalizador tem escala de nível ao lado das faixas em todos os temas", () => {
+    // Plasma's controls get the marks drawn by the app; Hi-Fi has its own
+    // fader scale and Qt's desktop style its tick marks.
+    assert.match(mainSource, /model: !root\.hifi && Sonic\.App\.controls === "plasma" \? 9 : 0/)
+    assert.match(mainSource, /index \/ 8 \* \(equalizerSlider\.availableHeight - handleSize\)/)
+    assert.match(mainSource, /width: zero \? 6 : 4/)
+})
+
+test("o volume fica acima do Ganho e o Tocando agora tem a barra de tempo", () => {
+    // Volume, then the equalizer body that starts with "Ganho".
+    const volume = mainSource.indexOf("id: outputVolumeRow")
+    const body = mainSource.indexOf("id: equalizerBody")
+    const gain = mainSource.indexOf("id: equalizerGainRow")
+    const profile = mainSource.indexOf("id: equalizerProfileSelector")
+    assert.ok(volume > 0 && volume < body && body < gain && gain < profile)
+    // The seek bar moves the track only on release.
+    assert.match(mainSource, /if \(pressed\) return\n\s+media\.setPosition\(value\)/)
+    const mediaTime = new Function("milliseconds",
+        mainSource.match(/function mediaTime\(milliseconds\) \{([\s\S]*?)\n    \}/)[1])
+    assert.equal(mediaTime(83000), "1:23")
+    assert.equal(mediaTime(3723000), "1:02:03")
+    assert.equal(mediaTime(-5), "0:00")
 })

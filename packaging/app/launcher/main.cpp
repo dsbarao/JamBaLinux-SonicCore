@@ -102,8 +102,14 @@ int main(int argc, char** argv)
     }
     app.setWindowIcon(QIcon(appDir + QStringLiteral("/jambalinux-soniccore.svg")));
 
-    /* One copy per user: a second launch shows the running window. */
-    const QString socketName = QStringLiteral("jambalinux-soniccore-app-%1").arg(getuid());
+    /* One copy per user: a second launch shows the running window.
+       SONICCORE_INSTANCE names a separate copy (development, tests). */
+    QString socketName = QStringLiteral("jambalinux-soniccore-app-%1").arg(getuid());
+    const QString instance = qEnvironmentVariable("SONICCORE_INSTANCE");
+    if(!instance.isEmpty())
+    {
+        socketName += QLatin1Char('-') + instance;
+    }
     {
         QLocalSocket probe;
         probe.connectToServer(socketName);

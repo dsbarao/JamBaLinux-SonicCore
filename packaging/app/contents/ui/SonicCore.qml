@@ -452,6 +452,44 @@ Item {
     readonly property bool mediaPlaying: media.playing
     readonly property int outputVolumePercent: outputVolume.percent
 
+    // "Volume" and "Ganho" share a label width so their sliders line up.
+    readonly property real mixLabelWidth: Kirigami.Units.gridUnit * 3.2
+
+    // The track position advances between the player's answers (once a
+    // second): shown smoothly from the last one while it plays.
+    property real mediaPositionStamp: Date.now()
+    property real mediaClock: Date.now()
+    readonly property real mediaPositionShown: media.length > 0
+        ? Math.min(media.length, media.position
+            + (media.playing ? Math.max(0, mediaClock - mediaPositionStamp) : 0))
+        : 0
+
+    Connections {
+        target: media
+        function onPositionChanged() {
+            root.mediaPositionStamp = Date.now()
+            root.mediaClock = root.mediaPositionStamp
+        }
+    }
+
+    Timer {
+        interval: 250
+        repeat: true
+        running: root.expanded && media.playing && media.length > 0
+        onTriggered: root.mediaClock = Date.now()
+    }
+
+    // 83 000 ms → "1:23"; an hour or more → "1:02:03".
+    function mediaTime(milliseconds) {
+        const total = Math.max(0, Math.floor(Number(milliseconds) / 1000))
+        const hours = Math.floor(total / 3600)
+        const minutes = Math.floor(total % 3600 / 60)
+        const seconds = String(total % 60).padStart(2, "0")
+        return hours > 0
+            ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`
+            : `${minutes}:${seconds}`
+    }
+
     function setOutputVolume(percent) {
         outputVolume.setPercent(Math.round(Math.max(0, Math.min(100, percent))))
     }
@@ -2156,59 +2194,45 @@ Item {
                         }
                     }
 
-                    // The computer's volume (the default output), like the
-                    // volume applet in the panel.
+                    // Where the track is: drag to move it back or forward.
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: Kirigami.Units.smallSpacing
-                        enabled: outputVolume.available
-
-                        SonicControls.Button {
-                            icon.name: root.outputVolumeIcon()
-                            display: QQC2.AbstractButton.IconOnly
-                            text: outputVolume.muted ? "Tirar do mudo" : "Silenciar"
-                            checkable: true
-                            checked: outputVolume.muted
-                            onClicked: {
-                                const muted = checked
-                                checked = Qt.binding(() => outputVolume.muted)
-                                outputVolume.setMuted(muted)
-                            }
-                            QQC2.ToolTip.text: text
-                            QQC2.ToolTip.visible: hovered
-                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                        }
-
-                        SonicControls.Slider {
-                            id: outputVolumeSlider
-                            Layout.fillWidth: true
-                            from: 0
-                            to: 100
-                            stepSize: 1
-                            value: root.outputVolumePercent
-                            onMoved: root.setOutputVolume(value)
-                            onPressedChanged: if (!pressed) value = Qt.binding(() => root.outputVolumePercent)
-
-                            HifiFader { slider: outputVolumeSlider }
-                        }
+                        visible: media.hasPlayer && media.length > 0
+                        enabled: media.canSeek
 
                         SonicControls.Label {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                             horizontalAlignment: Text.AlignRight
-                            text: outputVolume.muted
-                                ? "mudo" : `${Math.round(outputVolumeSlider.value)}%`
-                            opacity: 0.7
+                            text: root.mediaTime(mediaPositionSlider.pressed
+                                ? mediaPositionSlider.value : root.mediaPositionShown)
+                            font.family: "monospace"
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.75
                         }
-                    }
 
-                    SonicControls.Label {
-                        Layout.fillWidth: true
-                        visible: outputVolume.available && outputVolume.description.length > 0
-                        text: `Volume de: ${outputVolume.description}`
-                        elide: Text.ElideRight
-                        horizontalAlignment: Text.AlignHCenter
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        opacity: 0.55
+                        SonicControls.Slider {
+                            id: mediaPositionSlider
+                            Layout.fillWidth: true
+                            from: 0
+                            to: Math.max(1, media.length)
+                            value: root.mediaPositionShown
+                            onPressedChanged: {
+                                if (pressed) return
+                                media.setPosition(value)
+                                value = Qt.binding(() => root.mediaPositionShown)
+                            }
+
+                            HifiFader { slider: mediaPositionSlider }
+                        }
+
+                        SonicControls.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                            text: root.mediaTime(media.length)
+                            font.family: "monospace"
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.75
+                        }
                     }
                 }
 
@@ -2290,6 +2314,64 @@ Item {
                         }
                     }
 
+                    // The computer's volume (the default output), like the volume
+                    // applet in the panel; above "Ganho" and shown even with the
+                    // equalizer off.
+                    RowLayout {
+                        id: outputVolumeRow
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        enabled: outputVolume.available
+
+                        SonicControls.Label {
+                            Layout.preferredWidth: root.mixLabelWidth
+                            text: "Volume"
+                            QQC2.ToolTip.text: outputVolume.description.length > 0
+                                ? `Volume de: ${outputVolume.description}` : "Volume do computador"
+                            QQC2.ToolTip.visible: volumeLabelHover.hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                            HoverHandler { id: volumeLabelHover }
+                        }
+
+                        SonicControls.Slider {
+                            id: outputVolumeSlider
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: Kirigami.Units.gridUnit * 3
+                            from: 0
+                            to: 100
+                            stepSize: 1
+                            value: root.outputVolumePercent
+                            onMoved: root.setOutputVolume(value)
+                            onPressedChanged: if (!pressed) value = Qt.binding(() => root.outputVolumePercent)
+
+                            HifiFader { slider: outputVolumeSlider }
+                        }
+
+                        SonicControls.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 3.5
+                            horizontalAlignment: Text.AlignRight
+                            text: outputVolume.muted
+                                ? "mudo" : `${Math.round(outputVolumeSlider.value)}%`
+                            opacity: 0.7
+                        }
+
+                        SonicControls.Button {
+                            icon.name: root.outputVolumeIcon()
+                            display: QQC2.AbstractButton.IconOnly
+                            text: outputVolume.muted ? "Tirar do mudo" : "Silenciar"
+                            checkable: true
+                            checked: outputVolume.muted
+                            onClicked: {
+                                const muted = checked
+                                checked = Qt.binding(() => outputVolume.muted)
+                                outputVolume.setMuted(muted)
+                            }
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
+
                     ColumnLayout {
                         Layout.fillWidth: true
                         id: equalizerBody
@@ -2301,6 +2383,90 @@ Item {
                         // Only profile actions below are blocked while one runs: the band sliders
                         // keep moving and queue their latest value (pendingEqualizerBands).
                         spacing: Kirigami.Units.smallSpacing
+
+                        // "Ganho", like a mixing desk's input gain: lowering it
+                        // gives boosted bands room before they distort.
+                        RowLayout {
+                            id: equalizerGainRow
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+
+                            SonicControls.Label {
+                                Layout.preferredWidth: root.mixLabelWidth
+                                text: "Ganho"
+                            }
+
+                            SonicControls.Slider {
+                                id: equalizerGainSlider
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: Kirigami.Units.gridUnit * 3
+                                from: -12
+                                to: 12
+                                stepSize: 0.5
+                                value: root.equalizerDspPreampDb
+                                // Sent while dragging, at most every 60 ms, and
+                                // once more on release with the final value.
+                                onMoved: if (!equalizerGainSend.running) equalizerGainSend.start()
+                                onPressedChanged: {
+                                    if (pressed) return
+                                    equalizerGainSend.stop()
+                                    root.setEqualizerGain(value)
+                                    value = Qt.binding(() => root.equalizerDspPreampDb)
+                                }
+
+                                HifiFader { slider: equalizerGainSlider }
+
+                                Timer {
+                                    id: equalizerGainSend
+                                    interval: 60
+                                    onTriggered: root.setEqualizerGain(equalizerGainSlider.value)
+                                }
+                            }
+
+                            SonicControls.Label {
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 3.5
+                                horizontalAlignment: Text.AlignRight
+                                text: `${equalizerGainSlider.value > 0 ? "+" : ""}${equalizerGainSlider.value.toFixed(1)} dB`
+                                opacity: 0.7
+                            }
+
+                            // "Pico": lights red when the sound reaches full
+                            // scale, held long enough to be seen.
+                            Rectangle {
+                                id: equalizerClipLight
+                                visible: root.vivo
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 0.6
+                                Layout.preferredHeight: Layout.preferredWidth
+                                radius: width / 2
+                                color: root.equalizerClipping
+                                    ? Kirigami.Theme.negativeTextColor
+                                    : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                        Kirigami.Theme.textColor.b, 0.18)
+                                Behavior on color { ColorAnimation { duration: Kirigami.Units.shortDuration } }
+
+                                HoverHandler { id: clipHover }
+                                QQC2.ToolTip.text: root.equalizerClipping
+                                    ? "Distorcendo: o som passou do limite. Baixe o Ganho ou use o Auto."
+                                    : "Pico: acende em vermelho quando o som passa do limite e distorce."
+                                QQC2.ToolTip.visible: clipHover.hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                            }
+
+                            SonicControls.Button {
+                                id: equalizerGainAuto
+                                text: "Auto"
+                                checkable: true
+                                checked: root.equalizerPreampAuto
+                                QQC2.ToolTip.text: "Baixa o ganho na medida do maior reforço das bandas, para o som não distorcer"
+                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                onClicked: {
+                                    const auto = checked
+                                    checked = Qt.binding(() => root.equalizerPreampAuto)
+                                    root.setEqualizerGain(auto ? "auto" : root.equalizerDspPreampDb)
+                                }
+                            }
+                        }
 
                         SonicControls.ComboBox {
                             id: equalizerProfileSelector
@@ -2495,88 +2661,6 @@ Item {
                             color: Kirigami.Theme.negativeTextColor
                         }
 
-                        // "Ganho", like a mixing desk's input gain: lowering it
-                        // gives boosted bands room before they distort.
-                        RowLayout {
-                            id: equalizerGainRow
-                            Layout.fillWidth: true
-                            spacing: Kirigami.Units.smallSpacing
-
-                            SonicControls.Label {
-                                text: "Ganho"
-                            }
-
-                            SonicControls.Slider {
-                                id: equalizerGainSlider
-                                Layout.fillWidth: true
-                                Layout.minimumWidth: Kirigami.Units.gridUnit * 3
-                                from: -12
-                                to: 12
-                                stepSize: 0.5
-                                value: root.equalizerDspPreampDb
-                                // Sent while dragging, at most every 60 ms, and
-                                // once more on release with the final value.
-                                onMoved: if (!equalizerGainSend.running) equalizerGainSend.start()
-                                onPressedChanged: {
-                                    if (pressed) return
-                                    equalizerGainSend.stop()
-                                    root.setEqualizerGain(value)
-                                    value = Qt.binding(() => root.equalizerDspPreampDb)
-                                }
-
-                                HifiFader { slider: equalizerGainSlider }
-
-                                Timer {
-                                    id: equalizerGainSend
-                                    interval: 60
-                                    onTriggered: root.setEqualizerGain(equalizerGainSlider.value)
-                                }
-                            }
-
-                            SonicControls.Label {
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 3.5
-                                horizontalAlignment: Text.AlignRight
-                                text: `${equalizerGainSlider.value > 0 ? "+" : ""}${equalizerGainSlider.value.toFixed(1)} dB`
-                                opacity: 0.7
-                            }
-
-                            // "Pico": lights red when the sound reaches full
-                            // scale, held long enough to be seen.
-                            Rectangle {
-                                id: equalizerClipLight
-                                visible: root.vivo
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 0.6
-                                Layout.preferredHeight: Layout.preferredWidth
-                                radius: width / 2
-                                color: root.equalizerClipping
-                                    ? Kirigami.Theme.negativeTextColor
-                                    : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                        Kirigami.Theme.textColor.b, 0.18)
-                                Behavior on color { ColorAnimation { duration: Kirigami.Units.shortDuration } }
-
-                                HoverHandler { id: clipHover }
-                                QQC2.ToolTip.text: root.equalizerClipping
-                                    ? "Distorcendo: o som passou do limite. Baixe o Ganho ou use o Auto."
-                                    : "Pico: acende em vermelho quando o som passa do limite e distorce."
-                                QQC2.ToolTip.visible: clipHover.hovered
-                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                            }
-
-                            SonicControls.Button {
-                                id: equalizerGainAuto
-                                text: "Auto"
-                                checkable: true
-                                checked: root.equalizerPreampAuto
-                                QQC2.ToolTip.text: "Baixa o ganho na medida do maior reforço das bandas, para o som não distorcer"
-                                QQC2.ToolTip.visible: hovered
-                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                                onClicked: {
-                                    const auto = checked
-                                    checked = Qt.binding(() => root.equalizerPreampAuto)
-                                    root.setEqualizerGain(auto ? "auto" : root.equalizerDspPreampDb)
-                                }
-                            }
-                        }
 
                         GridLayout {
                             Layout.fillWidth: true
@@ -2659,6 +2743,26 @@ Item {
                                         }
 
                                         HifiFader { slider: equalizerSlider }
+
+                                        // Level marks beside the slider, every 3 dB, the 0 dB one
+                                        // longer, like a mixing desk's scale. Hi-Fi draws its own and
+                                        // Qt's desktop style already shows tick marks.
+                                        Repeater {
+                                            model: !root.hifi && Sonic.App.controls === "plasma" ? 9 : 0
+                                            delegate: Rectangle {
+                                                required property int index
+                                                readonly property bool zero: index === 4
+                                                readonly property real handleSize: equalizerSlider.handle
+                                                    ? equalizerSlider.handle.height : Kirigami.Units.gridUnit
+                                                x: equalizerSlider.width / 2 + equalizerSlider.handle.width / 2 + 1
+                                                y: equalizerSlider.topPadding + handleSize / 2
+                                                    + index / 8 * (equalizerSlider.availableHeight - handleSize)
+                                                width: zero ? 6 : 4
+                                                height: 1
+                                                color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                                    Kirigami.Theme.textColor.b, zero ? 0.75 : 0.42)
+                                            }
+                                        }
                                     }
 
                                     SonicControls.Label {
