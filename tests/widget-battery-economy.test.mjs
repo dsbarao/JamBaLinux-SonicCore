@@ -23,6 +23,28 @@ test("o tempo restante aparece só fora do carregador e com estimativa", () => {
     assert.equal(hoursLeftText(-1, false), "")
 })
 
+test("carregando, aparece quanto falta para encher", () => {
+    const toFull = mainSource.match(/readonly property string hoursToFullText: ([\s\S]*?)\n\s+: ""/)
+    const duration = mainSource.match(/function durationText\(hours\) \{([\s\S]*?)\n    \}/)
+    assert.notEqual(toFull, null)
+    assert.notEqual(duration, null)
+    const durationText = new Function("hours", duration[1])
+    const text = (hoursToFull, charging, batteryPercent) => new Function(
+        "hoursToFull", "charging", "batteryPercent", "durationText",
+        `return ${toFull[1]}\n: ""`)(hoursToFull, charging, batteryPercent, durationText)
+    assert.equal(text(4.47, true, 45), "~4 h 30 min para carregar")
+    assert.equal(text(2, true, 70), "~2 h para carregar")
+    assert.equal(text(0.6, true, 90), "~40 min para carregar")
+    assert.equal(text(0.05, true, 95), "~10 min para carregar")
+    assert.equal(text(4.47, false, 45), "", "only while charging")
+    assert.equal(text(4.47, true, 100), "", "full")
+    assert.equal(text(-1, true, 45), "", "no measured speed yet")
+    // The same line shows one or the other.
+    assert.match(mainSource, /readonly property string batteryTimeText: charging \? hoursToFullText : hoursLeftText/)
+    assert.match(mainSource, /hoursLeftText: root\.batteryTimeText/)
+    assert.match(mainSource, /root\.hoursToFull = Number\.isFinite\(toFull\) \? toFull : -1/)
+})
+
 test("o widget avisa quando a economia apagou as luzes", () => {
     assert.match(mainSource, /powerSaving = String\(result\.power_saving \?\? ""\)/)
     assert.match(mainSource, /visible: root\.powerSaving\.length > 0/)

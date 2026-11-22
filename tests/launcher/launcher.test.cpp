@@ -2,11 +2,16 @@
 // output volume is read, and how commands report back.
 
 #include "executable.h"
+#include "imagepalette.h"
 #include "media.h"
+#include "playervolume.h"
 #include "radio.h"
 #include "volume.h"
 
+#include <QColor>
 #include <QCoreApplication>
+#include <QImage>
+#include <QPainter>
 #include <QEventLoop>
 #include <QTimer>
 #include <iostream>
@@ -165,6 +170,67 @@ static void TestRadioTitle()
     CHECK(RadioTitle::parse("StreamUrl='x';").isEmpty());
 }
 
+// The palette of a picture: its vivid hues, strongest first, near hues
+// merged; a gray picture gives its average tone; nothing gives nothing.
+static void TestImagePalette()
+{
+    QImage picture(40, 40, QImage::Format_ARGB32);
+    picture.fill(QColor(20, 20, 20));
+    QPainter painter(&picture);
+    painter.fillRect(0, 0, 40, 20, QColor(255, 0, 40));    // red: half
+    painter.fillRect(0, 20, 30, 20, QColor(0, 90, 255));   // blue
+    painter.fillRect(30, 20, 10, 20, QColor(10, 100, 255)); // the same blue
+    painter.end();
+    const QStringList colors = ImagePalette::extract(picture);
+    CHECK(colors.size() == 2);
+    CHECK(!colors.isEmpty() && QColor(colors[0]).red() > 200);
+    CHECK(colors.size() > 1 && QColor(colors[1]).blue() > 200);
+
+    QImage gray(8, 8, QImage::Format_ARGB32);
+    gray.fill(QColor(128, 128, 128));
+    CHECK(ImagePalette::extract(gray) == QStringList{ QStringLiteral("#808080") });
+    CHECK(ImagePalette::extract(QImage()).isEmpty());
+}
+
+// The player's own audio streams: by its process or a child of it (a
+// browser plays from a child process), else by name; never PipeWire's own
+// filters (the equalizer's output).
+static void TestPlayerVolume()
+{
+    const QByteArray json = R"json([
+      {"index": 41, "mute": false, "volume": {"front-left": {"value": 32768}, "front-right": {"value": 32768}},
+       "properties": {"application.name": "Google Chrome", "application.process.id": "5001", "application.process.binary": "chrome"}},
+      {"index": 42, "mute": true, "volume": {"mono": {"value": 65536}},
+       "properties": {"application.name": "Spotify", "application.process.id": "7000", "application.process.binary": "spotify"}},
+      {"index": 43, "mute": false, "volume": {"mono": {"value": 65536}},
+       "properties": {"application.name": "PipeWire", "application.process.id": "900", "application.process.binary": "pipewire"}}
+    ])json";
+    QList<PlayerVolume::Stream> streams = PlayerVolume::parse(json);
+    CHECK(streams.size() == 3);
+    CHECK(streams.value(0).percent == 50);
+    CHECK(streams.value(1).muted);
+    // Chrome's audio process (5001) is a child of the browser (4000).
+    streams[0].ancestors = { 4500, 4000, 1200 };
+    CHECK(PlayerVolume::match(streams, 4000, {}) == QList<int>{ 0 });
+    CHECK(PlayerVolume::match(streams, 7000, { QStringLiteral("google-chrome") }) == QList<int>{ 1 });
+    // No process known (a Flatpak cannot see the host's): by name.
+    CHECK(PlayerVolume::match(streams, 0, { QStringLiteral("google-chrome"), QStringLiteral("Google Chrome") }) == QList<int>{ 0 });
+    CHECK(PlayerVolume::match(streams, 0, { QStringLiteral("spotify") }) == QList<int>{ 1 });
+    CHECK(PlayerVolume::match(streams, 0, { QStringLiteral("pipewire") }).isEmpty());
+    CHECK(PlayerVolume::match(streams, 0, { QStringLiteral("vlc") }).isEmpty());
+
+    // A native PipeWire stream (pw-cat, mpv) names its process only on its
+    // client.
+    const QByteArray native = R"json([{"index": 50, "client": "77", "mute": false,
+       "volume": {"mono": {"value": 65536}}, "properties": {"application.name": "pw-cat"}}])json";
+    const QByteArray clients = R"json([{"index": 77, "properties": {"application.process.id": "8123",
+       "application.process.binary": "pw-cat"}}])json";
+    const QList<PlayerVolume::Stream> nativeStreams = PlayerVolume::parse(native, clients);
+    CHECK(nativeStreams.size() == 1 && nativeStreams.value(0).pid == 8123);
+    CHECK(nativeStreams.value(0).binary == QStringLiteral("pw-cat"));
+    CHECK(PlayerVolume::parse(native).value(0).pid == 0);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -173,6 +239,8 @@ int main(int argc, char** argv)
     TestExecutable();
     TestRadioRanking();
     TestRadioTitle();
+    TestImagePalette();
+    TestPlayerVolume();
     if(failures > 0)
     {
         std::cerr << failures << " check(s) failed\n";

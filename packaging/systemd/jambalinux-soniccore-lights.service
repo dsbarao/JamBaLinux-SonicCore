@@ -1,0 +1,15 @@
+[Unit]
+Description=JamBaLinux Sonic Core PC lights (through OpenRGB's SDK server)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/soniccore lights run
+# Idle while OpenRGB is in charge; while Sonic Core is, it draws the lights'
+# frames, which must never compete with what the user is doing.
+Nice=5
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

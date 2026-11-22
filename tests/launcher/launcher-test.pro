@@ -2,12 +2,12 @@
 # tests/launcher_logic.rs. No window, player or PipeWire is needed.
 TEMPLATE = app
 TARGET = launcher-test
-QT += core qml dbus network
+QT += core gui qml dbus network
 CONFIG += c++17 console warn_on
 CONFIG -= app_bundle
 QMAKE_CXXFLAGS += -Werror
 LAUNCHER = $$PWD/../../packaging/app/launcher
 INCLUDEPATH += $$LAUNCHER
-HEADERS += $$LAUNCHER/dbushelpers.h $$LAUNCHER/executable.h $$LAUNCHER/media.h $$LAUNCHER/radio.h $$LAUNCHER/volume.h
-SOURCES += launcher.test.cpp $$LAUNCHER/dbushelpers.cpp $$LAUNCHER/executable.cpp \
-    $$LAUNCHER/media.cpp $$LAUNCHER/radio.cpp $$LAUNCHER/volume.cpp
+HEADERS += $$LAUNCHER/dbushelpers.h $$LAUNCHER/executable.h $$LAUNCHER/imagepalette.h $$LAUNCHER/media.h $$LAUNCHER/playervolume.h $$LAUNCHER/radio.h $$LAUNCHER/volume.h
+SOURCES += launcher.test.cpp $$LAUNCHER/dbushelpers.cpp $$LAUNCHER/executable.cpp $$LAUNCHER/imagepalette.cpp \
+    $$LAUNCHER/media.cpp $$LAUNCHER/playervolume.cpp $$LAUNCHER/radio.cpp $$LAUNCHER/volume.cpp

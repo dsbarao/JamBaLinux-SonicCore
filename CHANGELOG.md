@@ -27,7 +27,29 @@
   Hi-Fi theme, and the radio published as an MPRIS player so media keys and
   the desktop's controls drive it;
 - the system volume moves above "Ganho"; *Tocando agora* gets a seek bar;
-  level marks beside the equalizer bands with Plasma's controls.
+  level marks beside the equalizer bands with Plasma's controls;
+- the radio follows the chosen output (headset or speakers) when it changes
+  while playing, and its sound is named "JamBaLinux Sonic Core";
+- **Opacidade** works with every background, "Nenhum" included (the window's
+  color is premultiplied and the window always has an alpha channel), and
+  **Vidro** is real frosted glass on KWin;
+- the lighting card is centered and the five segments sit in one row;
+- **Luzes do PC**: Sonic Core in charge of every OpenRGB device through
+  OpenRGB's SDK server — themes (our own and the Catppuccin, Dracula, Nord,
+  Tokyo Night and Gruvbox palettes, the wallpaper's and the cover's colors),
+  effects that follow the music (Música, VU), automatic themes for games and
+  per application, the headset following the theme, flashes for a muted
+  microphone and a low battery, and OpenRGB's profiles one click away
+  (`soniccore lights`, `jambalinux-soniccore-lights.service`); taking the
+  lights pauses the OpenRGB Effects plugin's effects and handing them back
+  restores each device's mode and colors and those effects;
+- *Tocando agora* gets the player's own volume (a browser's video, Spotify,
+  the radio), upright on its right;
+- the per-application 3D switch also moves streams WirePlumber put straight
+  on the 3D sink;
+- a charger on the headset shows sooner: after the headset re-sends its
+  battery level unchanged, one rise is enough; while charging, the app
+  shows the time to full at the measured charging speed.
 
 ## 0.2.0 — unreleased
 

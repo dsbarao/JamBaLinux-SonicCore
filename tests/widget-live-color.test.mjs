@@ -19,7 +19,7 @@ const flushLightingColor = extract("flushLightingColor")
 
 function createWidgetDouble() {
     const widget = {
-        lightingWritable: true,
+        lightingColorsWritable: true,
         controlBusy: false,
         pendingLightingFeature: "",
         pendingLightingColor: "",
@@ -77,16 +77,16 @@ test("a mesma cor não é enviada duas vezes seguidas", () => {
     assert.equal(widget.sent.length, 1)
 })
 
-test("sem headset disponível, ou com o OpenRGB no controle, nada é enviado", () => {
+test("sem headset disponível, com o OpenRGB no controle ou com o fone seguindo o tema, nada é enviado", () => {
     const widget = createWidgetDouble()
-    widget.lightingWritable = false
+    widget.lightingColorsWritable = false
     widget.queueLightingColor()
     assert.equal(widget.sent.length, 0)
 })
 
 test("o seletor continua ativo enquanto um comando roda", () => {
     assert.match(widgetSource,
-        /id: colorPicker[\s\S]{0,600}enabled: root\.lightingWritable && root\.canApplyLightingColor\(\)/)
+        /id: colorPicker[\s\S]{0,600}enabled: root\.lightingColorsWritable && root\.canApplyLightingColor\(\)/)
 })
 
 test("escolher um matiz partindo do preto gera uma cor visível", () => {

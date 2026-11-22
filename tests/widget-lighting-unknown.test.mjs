@@ -83,5 +83,5 @@ test("segment swatches guard null profiles and the effect row follows its headin
     assert.match(widgetSource,
         /color: Array\.isArray\(colors\) \? colors\[index\] \?\? "transparent" : "transparent"/)
     assert.match(widgetSource,
-        /visible: root\.lightingEnabled !== false && root\.lightingTargetProfileKnown\(\)\n\s+enabled: root\.lightingWritable && !root\.controlBusy && root\.lightingTargetProfileKnown\(\)/)
+        /visible: root\.lightingEnabled !== false && root\.lightingTargetProfileKnown\(\)\n\s+enabled: root\.lightingColorsWritable && !root\.controlBusy && root\.lightingTargetProfileKnown\(\)/)
 })

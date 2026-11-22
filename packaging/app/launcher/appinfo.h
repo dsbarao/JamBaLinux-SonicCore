@@ -4,13 +4,17 @@
 |   What the interface needs to know about where it runs:   |
 |   the desktop, whether a tray exists, which set of        |
 |   controls it was given (Plasma's or Qt's), and a second  |
-|   launch asking the running window to show itself.        |
+|   launch asking the running window to show itself, and    |
+|   the compositor's blur behind the window.                |
 \*---------------------------------------------------------*/
 
 #pragma once
 
 #include <QObject>
 #include <QString>
+#include <QWindow>
+
+#include "windoweffects.h"
 
 class AppInfo : public QObject
 {
@@ -35,6 +39,13 @@ public:
             tray = available;
             Q_EMIT trayAvailableChanged();
         }
+    }
+
+    /* "Vidro": the compositor blurs what is behind the window (KWin). */
+    Q_INVOKABLE bool blurAvailable() const { return WindowEffects::blurAvailable(); }
+    Q_INVOKABLE bool setBlurBehind(QObject* window, bool enabled)
+    {
+        return WindowEffects::setBlurBehind(qobject_cast<QWindow*>(window), enabled);
     }
 
     QString desktop;

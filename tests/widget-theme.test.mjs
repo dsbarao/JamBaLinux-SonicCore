@@ -90,10 +90,10 @@ test("cores pretas ou luzes apagadas usam a cor de destaque do sistema", () => {
 test("com o fone desligado, os efeitos seguem as cores que o OpenRGB pede", () => {
     // The theme reads the headset's colors, or the OpenRGB plugin's file
     // while the headset is not connected.
-    assert.match(mainSource, /readonly property bool usePcLighting: headsetConnected !== true && pcLighting !== null/)
-    assert.match(mainSource, /pcColors: usePcLighting \? pcLighting\.colors\.map\(Palette\.fullBrightness\)/)
-    assert.match(mainSource, /themeLogoColors: usePcLighting \? pcColors\.slice\(0, 5\)/)
-    assert.match(mainSource, /themeRingColors: usePcLighting \? pcColors\.slice\(5, 10\)/)
+    assert.match(mainSource, /readonly property bool usePcLighting: !useEngineColors && headsetConnected !== true && pcLighting !== null/)
+    assert.match(mainSource, /: usePcLighting \? pcLighting\.colors\.map\(Palette\.fullBrightness\)/)
+    assert.match(mainSource, /themeLogoColors: useComputerColors \? pcColors\.slice\(0, 5\)/)
+    assert.match(mainSource, /themeRingColors: useComputerColors \? pcColors\.slice\(5, 10\)/)
     assert.match(mainSource, /vivoPalette: Palette\.build\(themeLightingEnabled, themeLogoColors,/)
     assert.match(mainSource, /"\/jambalinux-soniccore-openrgb\.json"/)
     const launcher = readFileSync(new URL("../packaging/app/launcher/main.cpp", import.meta.url), "utf8")
@@ -107,8 +107,9 @@ test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros",
     // The background is the first child of the popup, behind the controls.
     assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,1600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && !root\.hifi && root\.vivoBackground !== "none"/)
     assert.match(mainSource, /running: root\.vivo && !root\.hifi && root\.expanded\n\s+bass: vivoPanel\.bass/)
-    // The wallpaper is only looked up for the glass background.
-    assert.match(mainSource, /if \(vivo && \(vivoBackground === "glass" \|\| vivoBackground === "wallpaper"\)\)/)
+    // The wallpaper is only looked up for the backgrounds that show it, or
+    // for the PC lights' "Papel de parede" theme.
+    assert.match(mainSource, /if \(\(vivo && \(vivoBackground === "glass" \|\| vivoBackground === "wallpaper"\)\)\n\s+\|\| pcLightsUses\("wallpaper"\)\)/)
     // The app's opacity fades the background layer and the cards, not the text.
     assert.match(mainSource, /visible: root\.vivo && !root\.hifi && root\.vivoBackground !== "none"\n\s+opacity: root\.backgroundOpacity/)
     assert.match(mainSource, /\(root\.vivo \? 0\.6 : 1\) \* root\.backgroundOpacity/)
@@ -173,8 +174,9 @@ test("o tema Hi-Fi é um rack: madeira, alumínio escovado com as luzes, display
     // The metal's sheen follows the lights and the bass.
     assert.match(mainSource, /property real pulse: root\.hifiPulse/)
     assert.match(mainSource, /Palette\.at\(root\.vivoPalette, 0\.5, "white"\)/)
-    // Every slider (equalizer, 3D card, volume) becomes a fader.
-    assert.equal((mainSource.match(/HifiFader \{ slider: /g) || []).length, 5)
+    // Every slider (equalizer, 3D card, volume, the player's volume, the
+    // PC lights' speed and brightness) becomes a fader.
+    assert.equal((mainSource.match(/HifiFader \{ slider: /g) || []).length, 8)
     for (const name of ["brushed", "wood"])
         await readFile(new URL(`shaders/${name}.frag.qsb`, base))
 })
@@ -225,4 +227,59 @@ test("o volume fica acima do Ganho e o Tocando agora tem a barra de tempo", () =
     assert.equal(mediaTime(83000), "1:23")
     assert.equal(mediaTime(3723000), "1:02:03")
     assert.equal(mediaTime(-5), "0:00")
+})
+
+test("a Iluminação fica centrada e os segmentos 1 a 5 ficam lado a lado", () => {
+    // An alignment is never joined to a condition: `Qt.AlignHCenter && x`
+    // turns into true (= Qt.AlignLeft) and shows the control on the left.
+    for (const source of [mainSource, vivoSource, appMain])
+        assert.doesNotMatch(source, /Layout\.alignment: [^\n]*\n\s*(&&|\|\|)/)
+    assert.match(mainSource,
+        /Layout\.alignment: Qt\.AlignHCenter\n\s+visible: root\.openRgbControlsLighting \|\| root\.lightingHeld\n/)
+    assert.match(mainSource,
+        /Layout\.alignment: Qt\.AlignHCenter\n\s+visible: root\.openRgbLinking \|\| root\.openRgbCanLink\(\)\n/)
+    // A key row counts only children with a width of their own: the five
+    // segments have one, as tall as "Todos".
+    const segments = mainSource.match(/id: allSegmentsKey[\s\S]*?Repeater \{\n\s+model: 5\n([\s\S]*?)MouseArea/)
+    assert.notEqual(segments, null, "the segment keys must follow \"Todos\"")
+    assert.match(segments[1], /implicitWidth: \d+/)
+    assert.match(segments[1], /implicitHeight: allSegmentsKey\.implicitHeight/)
+})
+
+test("a Opacidade deixa ver o desktop com qualquer fundo, e o Vidro desfoca o que está atrás", async () => {
+    // The window's color goes to the compositor premultiplied by the
+    // opacity; a plain color would be added in full over what is behind.
+    assert.match(appMain, /color: Qt\.rgba\(Kirigami\.Theme\.backgroundColor\.r \* clearOpacity,\n\s+Kirigami\.Theme\.backgroundColor\.g \* clearOpacity,\n\s+Kirigami\.Theme\.backgroundColor\.b \* clearOpacity, clearOpacity\)/)
+    // "Vidro" and "Papel de parede" draw their own picture, faded as one
+    // layer: the window under them stays clear, or the two would add up.
+    assert.match(appMain, /readonly property real clearOpacity: pictureBackground \? 0 : settings\.windowOpacity/)
+    assert.match(appMain, /readonly property bool pictureBackground: settings\.theme === "vivo"\n\s+&& \(settings\.background === "glass" \|\| settings\.background === "wallpaper"\)/)
+    const background = await readFile(new URL("ui/VivoBackground.qml", base), "utf8")
+    assert.match(background, /id: canvas\n\s+anchors\.fill: parent\n\s+layer\.enabled: background\.style !== "none"/)
+    assert.match(background, /Rectangle \{\n\s+visible: background\.style === "glass" \|\| background\.style === "wallpaper"\n\s+anchors\.fill: parent\n\s+color: Kirigami\.Theme\.backgroundColor\n\s+\}\n\n\s+Image \{/)
+    // Below 100%, "Vidro" asks the compositor to blur what is behind.
+    assert.match(appMain, /readonly property bool wantsBlur: visible && settings\.theme === "vivo"\n\s+&& settings\.background === "glass" && settings\.windowOpacity < 0\.999/)
+    assert.match(appMain, /blurred = Sonic\.App\.setBlurBehind\(window, wantsBlur\)/)
+    // And the window has an alpha channel on every desktop (X11 included).
+    const launcher = await readFile(new URL("../launcher/main.cpp", base), "utf8")
+    assert.match(launcher, /QQuickWindow::setDefaultAlphaBuffer\(true\);[\s\S]*QApplication app\(/)
+})
+
+test("Tocando agora tem o volume do próprio player, em pé à direita", () => {
+    assert.match(mainSource, /Sonic\.PlayerVolume \{\n\s+id: playerVolume\n\s+pid: media\.pid\n\s+names: media\.hasPlayer \? \[media\.iconName, media\.identity\] : \[\]/)
+    const card = mainSource.slice(mainSource.indexOf('title: "Tocando agora"'), mainSource.indexOf("// ---- Rádio ----"))
+    // The player's column first, the volume column after it (on the right).
+    assert.ok(card.indexOf("id: mediaPositionSlider") < card.indexOf("id: playerVolumeColumn"))
+    assert.match(card, /visible: media\.hasPlayer && playerVolume\.available/)
+    assert.match(card, /orientation: Qt\.Vertical\n[\s\S]{0,300}onMoved: playerVolume\.setPercent\(Math\.round\(value\)\)/)
+    assert.match(card, /onTapped: playerVolume\.setMuted\(!playerVolume\.muted\)/)
+})
+
+test("com o Sonic Core no comando das luzes do PC, os efeitos seguem as cores que ele desenha", () => {
+    // Its engine publishes ten colors of the effect it draws; they lead,
+    // headset on or off, while it is in charge.
+    assert.match(mainSource, /readonly property bool useEngineColors: pcLightsActive && pcLightsStatus\?\.in_charge === true\n\s+&& pcLightsFrame !== null/)
+    assert.match(mainSource, /pcColors: useEngineColors \? pcLightsFrame\.colors\.map\(Palette\.fullBrightness\)/)
+    assert.match(mainSource, /"\/jambalinux-soniccore-pc-lights-frame\.json"/)
+    assert.match(mainSource, /running: root\.expanded && root\.vivo && root\.pcLightsActive\n\s+onTriggered: root\.readPcLightsFrame\(\)/)
 })

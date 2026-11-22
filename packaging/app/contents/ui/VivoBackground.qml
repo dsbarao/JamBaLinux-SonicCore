@@ -77,17 +77,16 @@ Item {
 
     onRunningChanged: if (!running) pulse = 0
 
-    // Everything is clipped to the popup's rounded shape.
+    // Drawn as one layer, so the opacity fades it as a whole (overlapping
+    // parts would otherwise add up). Square like the app's window: the
+    // window behind "Vidro" is clear, so rounded corners would show
+    // through.
     Item {
         id: canvas
         anchors.fill: parent
         layer.enabled: background.style !== "none"
         layer.format: background.layerFormat
         layer.smooth: true
-        layer.effect: MultiEffect {
-            maskEnabled: true
-            maskSource: roundedMask
-        }
 
         // ---- Shader styles: drawn per pixel on the GPU, perfectly smooth ----
         ShaderEffect {
@@ -122,6 +121,14 @@ Item {
         }
 
         // ---- Glass: the wallpaper, blurred once and cached ----
+        // Under the picture, so the background stays whole while it loads or
+        // when there is no wallpaper to show (the window behind is clear).
+        Rectangle {
+            visible: background.style === "glass" || background.style === "wallpaper"
+            anchors.fill: parent
+            color: Kirigami.Theme.backgroundColor
+        }
+
         Image {
             id: wallpaperImage
             // Glass blurs the wallpaper; "wallpaper" shows it as it is.
@@ -229,11 +236,4 @@ Item {
         }
     }
 
-    Rectangle {
-        id: roundedMask
-        anchors.fill: parent
-        radius: Kirigami.Units.cornerRadius * 2
-        visible: false
-        layer.enabled: true
-    }
 }

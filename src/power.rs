@@ -237,6 +237,10 @@ pub struct Summary {
     pub recent: Option<DrainRate>,
     /// Estimated hours left at the recent (or overall) drain rate.
     pub hours_left: Option<f64>,
+    /// Measured charging speed (percentage points per hour).
+    pub charge: Option<DrainRate>,
+    /// While charging: estimated hours until full at that speed.
+    pub hours_to_full: Option<f64>,
 }
 
 /// Rates need at least this much measured discharge to be shown.
@@ -248,6 +252,39 @@ const RECENT_MS: u128 = 6 * 3_600_000;
 fn rate(drop: f64, hours: f64) -> Option<DrainRate> {
     (drop >= MIN_DROP && hours >= MIN_HOURS).then(|| DrainRate {
         percent_per_hour: drop / hours,
+        hours_measured: hours,
+    })
+}
+
+/// The longest a 5% charging step takes (a slow charger, the last steps).
+const MAX_CHARGE_STEP_HOURS: f64 = 0.75;
+
+/// Measured charging speed. The headset reports its level in steps, so the
+/// time from one rise to the next is one whole step charged; the first rise
+/// after plugging in is not (it includes the time before the charger).
+/// One step is enough to estimate.
+pub fn charge_rate(samples: &[Sample]) -> Option<DrainRate> {
+    let mut levels: Vec<(u128, u8)> = Vec::new();
+    for sample in samples {
+        if levels.last().is_none_or(|&(_, battery)| battery != sample.battery) {
+            levels.push((sample.at_ms, sample.battery));
+        }
+    }
+    let (mut gain, mut hours) = (0.0_f64, 0.0_f64);
+    for step in levels.windows(3) {
+        let ((_, first), (rose_at, middle), (next_at, last)) = (step[0], step[1], step[2]);
+        if middle <= first || last <= middle {
+            continue;
+        }
+        let interval = next_at.saturating_sub(rose_at) as f64 / 3_600_000.0;
+        if interval <= 0.0 || interval > MAX_CHARGE_STEP_HOURS {
+            continue;
+        }
+        gain += f64::from(last - middle);
+        hours += interval;
+    }
+    (gain > 0.0 && hours > 0.0).then(|| DrainRate {
+        percent_per_hour: gain / hours,
         hours_measured: hours,
     })
 }
@@ -291,12 +328,22 @@ pub fn summarize(samples: &[Sample], now: u128) -> Summary {
                 .or(overall.as_ref())
                 .map(|rate| f64::from(sample.battery) / rate.percent_per_hour)
         });
+    let charge = charge_rate(samples);
+    let hours_to_full = latest
+        .filter(|sample| sample.charging == Some(true) && sample.battery < 100)
+        .and_then(|sample| {
+            charge
+                .as_ref()
+                .map(|rate| f64::from(100 - sample.battery) / rate.percent_per_hour)
+        });
     Summary {
         samples: samples.len(),
         lights_on,
         lights_off,
         recent,
         hours_left,
+        charge,
+        hours_to_full,
     }
 }
 
@@ -554,6 +601,10 @@ pub fn print_status(json: bool) -> Result<(), String> {
         Some(hours) => println!("estimated time left: {hours:.1} h"),
         None => println!("estimated time left: not enough data yet"),
     }
+    show("charging speed", &history.charge);
+    if let Some(hours) = history.hours_to_full {
+        println!("estimated time to full: {hours:.1} h");
+    }
     Ok(())
 }
 
@@ -602,6 +653,32 @@ mod tests {
             ambient: Some("anc".into()),
             saving: None,
         }
+    }
+
+    #[test]
+    fn charging_speed_comes_from_whole_steps_and_estimates_the_time_to_full() {
+        // As on 2026-11-22: 35% for a while, plugged in, 40% (the first rise
+        // includes the time before the charger), then 45% 17 minutes later.
+        let samples = [
+            sample(0, 35, false, true),
+            sample(70, 35, false, false),
+            sample(86, 40, false, true),
+            sample(103, 45, true, true),
+        ];
+        let rate = charge_rate(&samples).unwrap();
+        assert!((rate.percent_per_hour - 5.0 / (17.0 / 60.0)).abs() < 0.01);
+        let summary = summarize(&samples, 103 * 60_000);
+        let expected = 55.0 / rate.percent_per_hour;
+        assert!((summary.hours_to_full.unwrap() - expected).abs() < 0.01);
+        assert_eq!(summary.hours_left, None, "no time left while charging");
+
+        // One rise only (or rises far apart): not enough to tell.
+        assert!(charge_rate(&samples[..3]).is_none());
+        let apart = [sample(0, 50, true, true), sample(10, 55, true, true), sample(120, 60, true, true)];
+        assert!(charge_rate(&apart).is_none());
+        // Full: nothing left to charge.
+        let full = [sample(0, 90, true, true), sample(15, 95, true, true), sample(30, 100, true, true)];
+        assert_eq!(summarize(&full, 30 * 60_000).hours_to_full, None);
     }
 
     #[test]

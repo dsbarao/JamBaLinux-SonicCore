@@ -13,7 +13,9 @@
 #include "appinfo.h"
 #include "dbushelpers.h"
 #include "executable.h"
+#include "imagepalette.h"
 #include "media.h"
+#include "playervolume.h"
 #include "radio.h"
 #include "radiompris.h"
 #include "volume.h"
@@ -26,6 +28,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QQmlApplicationEngine>
+#include <QQuickWindow>
 #include <QQuickStyle>
 #include <QSystemTrayIcon>
 #include <QTimer>
@@ -87,19 +90,23 @@ int main(int argc, char** argv)
     qputenv("QML_XHR_ALLOW_FILE_READ", "1");
     /* The radio plays through PipeWire's PulseAudio layer, like most apps:
        Qt's native PipeWire output pins the stream to one device, so it
-       could not be moved through the equalizer and the 3D sound. Its
-       streams are named after the app in the desktop's lists. */
+       could not be moved through the equalizer and the 3D sound. */
     if(qEnvironmentVariableIsEmpty("QT_AUDIO_BACKEND"))
     {
         qputenv("QT_AUDIO_BACKEND", "pulseaudio");
     }
-    if(qEnvironmentVariableIsEmpty("PULSE_PROP"))
-    {
-        qputenv("PULSE_PROP", "application.name='JamBaLinux Sonic Core' application.icon_name='jambalinux-soniccore'");
-    }
+
+    /* A window with an alpha channel, so "Opacidade" lets the desktop show
+       through (the window's color has that alpha), whatever the background
+       (as `qml6 --transparent` did for the earlier launcher). */
+    QQuickWindow::setDefaultAlphaBuffer(true);
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("jambalinux-soniccore"));
+    /* The name the radio's sound goes by in the desktop's volume lists and
+       in "3D por aplicativo" (the same as the window title, so titles are
+       not suffixed with it). */
+    app.setApplicationDisplayName(QStringLiteral("JamBaLinux Sonic Core"));
     /* The window's app id: every desktop matches it with the launcher's
        .desktop file, for its icon and name in the task bar (in a Flatpak,
        the Flatpak's own id and entry). */
@@ -198,8 +205,10 @@ int main(int argc, char** argv)
     qmlRegisterType<ServiceWatcher>(URI, 1, 0, "ServiceWatcher");
     qmlRegisterType<MediaController>(URI, 1, 0, "MediaController");
     qmlRegisterType<OutputVolume>(URI, 1, 0, "OutputVolume");
+    qmlRegisterType<PlayerVolume>(URI, 1, 0, "PlayerVolume");
     qmlRegisterType<RadioDirectory>(URI, 1, 0, "RadioDirectory");
     qmlRegisterType<RadioTitle>(URI, 1, 0, "RadioTitle");
+    qmlRegisterType<ImagePalette>(URI, 1, 0, "ImagePalette");
     qmlRegisterUncreatableType<DBusReply>(URI, 1, 0, "DBusReply", QStringLiteral("returned by SessionBus.asyncCall"));
     SessionBus sessionBus;
     qmlRegisterSingletonInstance(URI, 1, 0, "SessionBus", &sessionBus);

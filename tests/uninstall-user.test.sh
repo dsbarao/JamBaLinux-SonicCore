@@ -94,7 +94,7 @@ test_install_uninstall_unit_parity() {
         return 1
     fi
 
-    expected_units=$'jambalinux-soniccore-equalizer.service\njambalinux-soniccore-spatial.service\njambalinux-soniccore.service'
+    expected_units=$'jambalinux-soniccore-equalizer.service\njambalinux-soniccore-lights.service\njambalinux-soniccore-spatial.service\njambalinux-soniccore.service'
     [[ -n "$installed_units" ]]
     [[ "$installed_units" == "$expected_units" ]]
 

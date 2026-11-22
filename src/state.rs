@@ -54,6 +54,13 @@ pub struct RuntimeState {
     /// Consecutive battery readings that went up, and when the last did.
     pub battery_rises: Option<u8>,
     pub battery_rose_at_ms: Option<u128>,
+    /// When the headset last re-sent its battery level unchanged: it does
+    /// so when a charger is plugged in or out (EVT-012, EVT-047..049), and
+    /// one rise after it is enough to show charging.
+    pub charger_hint_at_ms: Option<u128>,
+    /// When the headset last came on: its start-up burst repeats the level
+    /// too (EVT-013), which is no charger.
+    pub connected_at_ms: Option<u128>,
     pub game_chat_value: Option<u8>,
     pub bluetooth: Option<String>,
     pub sidetone_level: Option<String>,
@@ -156,20 +163,16 @@ impl RuntimeState {
             [0x07, value @ 0x00..=0x01] => {
                 replace_if_changed(&mut self.lighting_enabled, *value == 1)
             }
-            [0x08, value @ 0x00..=0x64] => {
-                let previous = self.battery_percent;
-                let changed = replace_if_changed(&mut self.battery_percent, *value);
-                if changed && let Some(previous) = previous {
-                    self.follow_battery_trend(previous, *value, now_ms());
-                }
-                changed
-            }
+            [0x08, value @ 0x00..=0x64] => self.battery_report(*value, now_ms()),
             [0x09, value @ 0x00..=0x01] => {
                 // Off, the headset sends no battery: the trend starts over
                 // (a level gained while off is not a charger seen live).
                 if *value == 0 {
                     self.battery_rises = Some(0);
                     self.battery_rose_at_ms = None;
+                    self.charger_hint_at_ms = None;
+                } else if self.headset_connected != Some(true) {
+                    self.connected_at_ms = Some(now_ms());
                 }
                 replace_if_changed(&mut self.headset_connected, *value == 1)
             }
@@ -186,10 +189,32 @@ impl RuntimeState {
         self.updated_at_ms = now_ms();
     }
 
+    /// A battery report. The same level again, outside the start-up burst,
+    /// is the headset noticing a charger plugged in or out: a hint, kept
+    /// (and saved) on its own; it shows nothing until the level rises.
+    fn battery_report(&mut self, value: u8, now: u128) -> bool {
+        let previous = self.battery_percent;
+        if previous == Some(value) {
+            let starting = self
+                .connected_at_ms
+                .is_some_and(|on| now.saturating_sub(on) < STARTUP_BURST_MS);
+            if starting {
+                return false;
+            }
+            self.charger_hint_at_ms = Some(now);
+            return true;
+        }
+        self.battery_percent = Some(value);
+        if let Some(previous) = previous {
+            self.follow_battery_trend(previous, value, now);
+        }
+        true
+    }
+
     /// Charging without this computer's USB is seen only in the battery:
     /// two readings in a row going up (one may be a reading settling after
-    /// the lights turned off) mean a charger; a reading going down, or a
-    /// full battery, ends it.
+    /// the lights turned off) mean a charger, or one right after a charger
+    /// hint; a reading going down, or a full battery, ends it.
     fn follow_battery_trend(&mut self, previous: u8, current: u8, now: u128) {
         if current > previous {
             // A rise long after the last one starts a new count.
@@ -199,13 +224,17 @@ impl RuntimeState {
             let rises = if recent { self.battery_rises.unwrap_or(0) } else { 0 }.saturating_add(1);
             self.battery_rises = Some(rises);
             self.battery_rose_at_ms = Some(now);
-            if rises >= 2 && current < 100 && self.charging != Some(true) {
+            let hinted = self
+                .charger_hint_at_ms
+                .is_some_and(|hint| now.saturating_sub(hint) <= INFERRED_CHARGING_TIMEOUT_MS);
+            if (rises >= 2 || hinted) && current < 100 && self.charging != Some(true) {
                 self.charging = Some(true);
                 self.charging_inferred = Some(true);
             }
         } else {
             self.battery_rises = Some(0);
             self.battery_rose_at_ms = None;
+            self.charger_hint_at_ms = None;
             self.end_inferred_charging();
         }
         if current >= 100 {
@@ -239,6 +268,8 @@ impl RuntimeState {
 
 /// A charging headset gains 5% roughly every 10–15 minutes.
 pub const INFERRED_CHARGING_TIMEOUT_MS: u128 = 40 * 60 * 1000;
+/// The burst of reports after the headset comes on.
+const STARTUP_BURST_MS: u128 = 15_000;
 
 fn now_ms() -> u128 {
     SystemTime::now()
@@ -765,6 +796,49 @@ mod tests {
     }
 
     #[test]
+    fn after_a_charger_hint_one_rise_is_enough() {
+        let minute = 60_000;
+        let mut state = RuntimeState {
+            battery_percent: Some(35),
+            charging: Some(false),
+            headset_connected: Some(true),
+            ..Default::default()
+        };
+        // The level re-sent unchanged: kept as a hint, showing nothing yet.
+        assert!(state.battery_report(35, 10 * minute), "the hint is saved");
+        assert_eq!(state.charging, Some(false));
+        assert!(state.battery_report(40, 14 * minute));
+        assert_eq!((state.charging, state.charging_inferred), (Some(true), Some(true)));
+
+        // Without a hint, one rise is still a reading settling.
+        let mut state = RuntimeState { battery_percent: Some(35), charging: Some(false), ..Default::default() };
+        state.battery_report(40, 14 * minute);
+        assert_eq!(state.charging, Some(false));
+
+        // A hint too old does not count, and a fall forgets it.
+        let mut state = RuntimeState { battery_percent: Some(35), charging: Some(false), ..Default::default() };
+        state.battery_report(35, minute);
+        state.battery_report(40, 50 * minute);
+        assert_eq!(state.charging, Some(false));
+        let mut state = RuntimeState { battery_percent: Some(35), charging: Some(false), ..Default::default() };
+        state.battery_report(35, minute);
+        state.battery_report(30, 2 * minute);
+        state.battery_report(35, 3 * minute);
+        assert_eq!(state.charging, Some(false));
+    }
+
+    #[test]
+    fn the_start_up_burst_repeating_the_level_is_no_charger() {
+        let mut state = RuntimeState { battery_percent: Some(35), charging: Some(false), ..Default::default() };
+        state.apply_input(&[0x09, 0x00]);
+        state.apply_input(&[0x09, 0x01]);
+        assert!(!state.apply_input(&[0x08, 35]), "the burst after switching on");
+        assert_eq!(state.charger_hint_at_ms, None);
+        assert!(state.apply_input(&[0x08, 40]));
+        assert_eq!(state.charging, Some(false));
+    }
+
+    #[test]
     fn inferred_charging_ends_when_full_or_when_the_level_stops_rising() {
         let minute = 60_000;
         let mut state = RuntimeState { charging: Some(false), ..Default::default() };
@@ -920,7 +994,10 @@ mod tests {
         assert_eq!(state.lighting_enabled, Some(true));
         assert!(state.apply_input(&[0x08, 75]));
         assert_eq!(state.battery_percent, Some(75));
-        assert!(!state.apply_input(&[0x08, 75]));
+        // The same level again is a charger hint, saved; the level stays.
+        assert!(state.apply_input(&[0x08, 75]));
+        assert!(state.charger_hint_at_ms.is_some());
+        assert_eq!(state.battery_percent, Some(75));
         assert!(!state.apply_input(&[0xff, 0x01]));
     }
 

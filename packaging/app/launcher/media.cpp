@@ -46,6 +46,24 @@ void MediaController::addPlayer(const QString& service, const QString& owner)
     players.insert(service, player);
     fetch(service, ROOT_IFACE);
     fetch(service, PLAYER_IFACE);
+    /* Which process plays, for its volume ("Tocando agora"). */
+    QDBusMessage message = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetConnectionUnixProcessID"));
+    message.setArguments({ owner });
+    auto* watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 2000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, service, owner]() {
+        watcher->deleteLater();
+        const QDBusMessage reply = watcher->reply();
+        auto found = players.find(service);
+        if(found == players.end() || found->owner != owner || reply.type() != QDBusMessage::ReplyMessage
+           || reply.arguments().isEmpty())
+        {
+            return;
+        }
+        found->pid = reply.arguments().first().toLongLong();
+        update();
+    });
 }
 
 void MediaController::fetch(const QString& service, const QString& iface)

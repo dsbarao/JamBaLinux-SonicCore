@@ -1477,6 +1477,9 @@ pub(crate) struct PlayingStream {
     pub app: String,
     pub icon: Option<String>,
     pub route: &'static str,
+    /// The playing program, for "Luzes do PC" to tell games apart.
+    pub pid: Option<u32>,
+    pub binary: Option<String>,
 }
 
 /// Every application stream playing now (not SonicCore's own outputs).
@@ -1490,28 +1493,36 @@ pub(crate) fn playing_streams() -> Result<Vec<PlayingStream>, String> {
             .find(|sink| sink.object_serial == serial)
             .map(|sink| sink.name.as_str())
     };
-    let icons = value
+    let property = |input: &Value, name: &str| {
+        input
+            .get("properties")
+            .and_then(|properties| properties.get(name))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let details = value
         .as_array()
         .map(|array| {
             array
                 .iter()
                 .map(|input| {
-                    input
-                        .get("properties")
-                        .and_then(|properties| properties.get("application.icon_name"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
+                    (
+                        property(input, "application.icon_name"),
+                        property(input, "application.process.id")
+                            .and_then(|pid| pid.parse::<u32>().ok()),
+                        property(input, "application.process.binary"),
+                    )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     Ok(inputs
         .into_iter()
-        .zip(icons.into_iter().chain(std::iter::repeat(None)))
+        .zip(details.into_iter().chain(std::iter::repeat((None, None, None))))
         .filter(|(input, _)| {
             !is_equalizer_output(input) && !is_spatial_output(input) && !input.app.is_empty()
         })
-        .map(|(input, icon)| PlayingStream {
+        .map(|(input, (icon, pid, binary))| PlayingStream {
             route: match sink_name(input.sink_serial) {
                 Some(name) if name == SPATIAL_SINK_NODE => "spatial",
                 Some(name) if name == VIRTUAL_SINK => "equalizer",
@@ -1519,6 +1530,8 @@ pub(crate) fn playing_streams() -> Result<Vec<PlayingStream>, String> {
             },
             app: input.app,
             icon,
+            pid,
+            binary,
         })
         .collect())
 }
@@ -1922,8 +1935,15 @@ fn plan_route_iteration_for_apps(
         let registered = state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
         });
-        if input.sink_serial == virtual_sink.object_serial
-            && !is_equalizer_output(input)
+        // A stream WirePlumber put back by itself (it remembers each
+        // application's last sink) on the equalizer or straight on the 3D
+        // sink: adopted when proven, so it follows the 3D switch; else
+        // evacuated, like any stream that skipped the proof.
+        if managed_route_destination(
+            input.sink_serial,
+            virtual_sink.object_serial,
+            spatial_sink_serial,
+        ) && !is_equalizer_output(input)
             && !is_spatial_output(input)
             && !registered
         {
@@ -3206,6 +3226,53 @@ mod tests {
             moves(&plan),
             [(10, VIRTUAL_SINK.to_owned()), (11, SPATIAL_SINK_NODE.to_owned())]
         );
+    }
+
+    #[test]
+    fn a_stream_restored_straight_onto_the_3d_sink_follows_the_3d_switch() {
+        let (sinks, game, spatial_output) = spatial_ready_sinks();
+        // WirePlumber put the browser back on the 3D sink by itself: no
+        // route was recorded for it, but its application was proven.
+        let browser = app_input(10, 400, "chrome", "Google Chrome");
+        let state = BackendState {
+            proven_stream_keys: vec!["chrome".into()],
+            ..BackendState::default()
+        };
+        let flat = HashSet::from(["Google Chrome".to_owned()]);
+        let plan = plan_route_iteration_for_apps(
+            &sinks,
+            &[spatial_output.clone(), browser.clone()],
+            &game,
+            state.clone(),
+            &flat,
+        )
+        .unwrap();
+        assert_eq!(plan.state.routed_streams.len(), 1);
+        assert_eq!(moves(&plan), [(10, VIRTUAL_SINK.to_owned())]);
+
+        // With its 3D on it is adopted where it is.
+        let plan = plan_route_iteration_for_apps(
+            &sinks,
+            &[spatial_output.clone(), browser],
+            &game,
+            state,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.state.routed_streams.len(), 1);
+        assert!(moves(&plan).is_empty());
+
+        // Never proven: evacuated to the physical sink, as from the EQ.
+        let plan = plan_route_iteration_for_apps(
+            &sinks,
+            &[spatial_output, app_input(12, 400, "unknown", "Unknown")],
+            &game,
+            BackendState::default(),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.state.unproven_streams.len(), 1);
+        assert_eq!(moves(&plan), [(12, game.name.clone())]);
     }
 
     #[test]

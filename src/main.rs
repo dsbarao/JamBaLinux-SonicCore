@@ -19,6 +19,8 @@ mod equalizer;
 mod hid;
 mod meter;
 mod openrgb;
+mod openrgb_sdk;
+mod pc_lights;
 mod pipewire;
 mod power;
 mod spatial;
@@ -1797,7 +1799,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux Sonic Core — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>|gain <db|auto>|night <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|apps [--format json]|app <on|off> <application>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|lights [--format json|run|on|off|theme <id>|effect <id>|speed <0.25-3>|brightness <5-100>|headset <on|off>|alerts <on|off>|device <key> <on|off>|rule <app> <theme> <effect>|rule <app> remove|games <theme> <effect>|games off|restore <profile|openrgb>|live <wallpaper|cover> <#rrggbb...>|profile <name>]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>|gain <db|auto>|night <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|apps [--format json]|app <on|off> <application>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -2657,6 +2659,7 @@ fn main() {
             _ => Err("usage: soniccore wallpaper --format json".into()),
         },
         "openrgb" => openrgb::command(args),
+        "lights" => pc_lights::command(args),
         "audio-path" => match (args.next().as_deref(), args.next().as_deref(), args.next()) {
             (Some("--format"), Some("json"), None) => audio_path::print_json().map(|()| true),
             _ => Err("usage: soniccore audio-path --format json".into()),

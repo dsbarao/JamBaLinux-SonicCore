@@ -453,6 +453,13 @@ Item {
     // sink, through PipeWire), on any desktop.
     Sonic.MediaController { id: media }
     Sonic.OutputVolume { id: outputVolume }
+    // The volume of the player shown in "Tocando agora": its own audio
+    // streams, found by its process or, failing that, its names.
+    Sonic.PlayerVolume {
+        id: playerVolume
+        pid: media.pid
+        names: media.hasPlayer ? [media.iconName, media.identity] : []
+    }
     readonly property bool mediaPlaying: media.playing
     readonly property int outputVolumePercent: outputVolume.percent
 
@@ -504,6 +511,8 @@ Item {
     // Stations that failed one after another; all of them failing stops.
     property int radioFailures: 0
     property string radioMessage: ""
+    // The sink the equalizer plays to now (`soniccore output`'s "effective").
+    property string outputEffective: ""
     readonly property bool radioPlaying: radioPlayer.playbackState === MediaPlayer.PlayingState
     readonly property bool radioFavorite: radioStation !== null
         && radioFavorites.some(station => station.uuid === radioStation.uuid)
@@ -697,9 +706,36 @@ Item {
         onErrorChanged: if (root.radioOn && error.length > 0) root.radioMessage = error
     }
 
+    // The radio plays on the output the equalizer plays to, like any app
+    // there: the router then takes it through the equalizer and the 3D. It
+    // follows that output when it changes (another default, the headset
+    // switched on), instead of staying on the one it started on.
+    MediaDevices {
+        id: mediaDevices
+        onDefaultAudioOutputChanged: if (root.radioOn) outputSource.connectSource(
+            root.soniccoreCommand(["output", "--format", "json"]))
+    }
+
+    function audioDeviceName(device) {
+        try {
+            return String.fromCharCode(...new Uint8Array(device.id))
+        } catch (error) {
+            return ""
+        }
+    }
+
+    readonly property var radioDevice: {
+        const outputs = mediaDevices.audioOutputs
+        if (outputEffective.length > 0) {
+            const found = outputs.find(device => audioDeviceName(device) === outputEffective)
+            if (found) return found
+        }
+        return mediaDevices.defaultAudioOutput
+    }
+
     MediaPlayer {
         id: radioPlayer
-        audioOutput: AudioOutput {}
+        audioOutput: AudioOutput { device: root.radioDevice }
         onErrorOccurred: root.radioSkip()
         onPlaybackStateChanged: {
             Sonic.RadioPlayer.playbackStatus = playbackState === MediaPlayer.PlayingState
@@ -888,6 +924,22 @@ Item {
     readonly property string hoursLeftText: hoursLeft > 0 && !charging
         ? (hoursLeft >= 1 ? `~${Math.round(hoursLeft)} h restantes` : `~${Math.max(1, Math.round(hoursLeft * 60))} min restantes`)
         : ""
+    // While charging: how long until full, at the charging speed measured
+    // from the battery's own steps.
+    property real hoursToFull: -1
+    readonly property string hoursToFullText: charging && hoursToFull > 0 && batteryPercent < 100
+        ? `~${durationText(hoursToFull)} para carregar`
+        : ""
+    // What the battery line shows: time left, or time to full.
+    readonly property string batteryTimeText: charging ? hoursToFullText : hoursLeftText
+
+    // "1 h 30 min", "40 min": in tens of minutes, as the estimate allows.
+    function durationText(hours) {
+        const minutes = Math.max(10, Math.round(hours * 6) * 10)
+        if (minutes < 60) return `${minutes} min`
+        const rest = minutes % 60
+        return rest > 0 ? `${Math.floor(minutes / 60)} h ${rest} min` : `${minutes / 60} h`
+    }
     property real nowMs: Date.now()
     // OpenRGB wrote within the last few seconds and nobody took the lights
     // back: changes made here would be overwritten by its next frame.
@@ -895,6 +947,12 @@ Item {
         && lightingSource === "openrgb"
         && nowMs - lightingUpdatedAtMs < 5000
     readonly property bool lightingWritable: deviceAvailable && !openRgbControlsLighting
+    // "Luzes do PC" in charge with "O fone segue o tema": the theme sets
+    // the headset's colors and effect (on/off stays the user's).
+    // ("Cores do fone" takes its colors from the headset instead.)
+    readonly property bool headsetFollowsTheme: pcLightsActive && pcLightsStatus?.in_charge === true
+        && pcLightsConfig.headset !== false && pcLightsStatus?.theme !== "headset"
+    readonly property bool lightingColorsWritable: lightingWritable && !headsetFollowsTheme
     // Live color while dragging the picker: only the latest value waits, and
     // it is sent when the running command finishes and the throttle allows.
     property string pendingLightingFeature: ""
@@ -1015,15 +1073,23 @@ Item {
     // lighting, published by the OpenRGB plugin) take their place, so the
     // effects keep following the PC: { off, colors: [10 × "#rrggbb"] }.
     property var pcLighting: null
-    readonly property bool usePcLighting: headsetConnected !== true && pcLighting !== null
+    // While Sonic Core is in charge of the PC lights ("Luzes do PC"), the
+    // colors its engine is drawing lead instead, headset on or off: the
+    // headset only gets a still copy of the theme.
+    property var pcLightsFrame: null
+    readonly property bool useEngineColors: pcLightsActive && pcLightsStatus?.in_charge === true
+        && pcLightsFrame !== null
+    readonly property bool usePcLighting: !useEngineColors && headsetConnected !== true && pcLighting !== null
+    readonly property bool useComputerColors: useEngineColors || usePcLighting
     // An effect paints the colors even when OpenRGB lists the headset as
     // Off (as it does while the headset itself is off); only black means
     // no color, and the palette already leaves black out.
-    readonly property var themeLightingEnabled: usePcLighting ? true : lightingEnabled
+    readonly property var themeLightingEnabled: useComputerColors ? true : lightingEnabled
     // Their hue at full brightness: effects often send them dimmed.
-    readonly property var pcColors: usePcLighting ? pcLighting.colors.map(Palette.fullBrightness) : []
-    readonly property var themeLogoColors: usePcLighting ? pcColors.slice(0, 5) : (logoColors ?? logoColor)
-    readonly property var themeRingColors: usePcLighting ? pcColors.slice(5, 10) : (ringColors ?? ringColor)
+    readonly property var pcColors: useEngineColors ? pcLightsFrame.colors.map(Palette.fullBrightness)
+        : usePcLighting ? pcLighting.colors.map(Palette.fullBrightness) : []
+    readonly property var themeLogoColors: useComputerColors ? pcColors.slice(0, 5) : (logoColors ?? logoColor)
+    readonly property var themeRingColors: useComputerColors ? pcColors.slice(5, 10) : (ringColors ?? ringColor)
     readonly property color vivoAccentA: vivoAccent(Array.isArray(themeLogoColors) ? themeLogoColors[0] : themeLogoColors)
     readonly property color vivoAccentB: vivoAccent(Array.isArray(themeRingColors) ? themeRingColors[0] : themeRingColors)
     // Every light color (all segments of both zones), so the theme follows
@@ -1177,13 +1243,119 @@ Item {
         return path
     }
 
+    // ---- "Luzes do PC": Sonic Core in charge of the computer's lights ----
+    // The engine's report (`soniccore lights --format json`): its settings,
+    // its link to OpenRGB's SDK server, the devices and the themes.
+    property var pcLights: null
+    property string pcLightsError: ""
+    property bool pcLightsMore: false
+    readonly property var pcLightsConfig: pcLights?.config ?? ({})
+    readonly property var pcLightsStatus: pcLights?.status ?? null
+    readonly property bool pcLightsRunning: pcLights?.running === true
+    readonly property bool pcLightsActive: pcLightsConfig.active === true
+    readonly property bool pcLightsConnected: pcLightsStatus?.connected === true
+    readonly property var pcLightsThemes: pcLights?.themes ?? []
+    readonly property var pcLightsEffects: pcLights?.effects ?? []
+    readonly property var pcLightsDevices: pcLightsStatus?.devices ?? []
+    readonly property var pcLightsProfiles: pcLightsStatus?.profiles ?? []
+    readonly property var pcLightsRules: pcLightsConfig.rules ?? []
+    // Applications playing now without a rule of their own, to add one.
+    readonly property var pcLightsNewApps: (pcLightsStatus?.playing ?? []).filter(app =>
+        !pcLightsRules.some(rule => rule.app.toLowerCase() === app.toLowerCase()))
+
+    function refreshPcLights() {
+        pcLightsSource.connectSource(soniccoreCommand(["lights", "--format", "json"]))
+    }
+
+    // Shown at once; the engine follows the settings file within a frame.
+    function setPcLights(words, change) {
+        if (pcLights && change) {
+            const next = Object.assign({}, pcLights)
+            next.config = Object.assign({}, pcLightsConfig, change)
+            pcLights = next
+        }
+        pcLightsError = ""
+        pcLightsSource.connectSource(soniccoreCommand(["lights"].concat(words)))
+    }
+
+    function setPcDevice(key, included) {
+        if (pcLightsStatus) {
+            const next = Object.assign({}, pcLights)
+            next.status = Object.assign({}, pcLightsStatus, {
+                "devices": pcLightsDevices.map(device => device.key === key
+                    ? Object.assign({}, device, { "included": included }) : device)
+            })
+            pcLights = next
+        }
+        setPcLights(["device", key, included ? "on" : "off"])
+    }
+
+    function pcLightsThemeName(id) {
+        const theme = pcLightsThemes.find(entry => entry.id === id)
+        return theme ? theme.name : id
+    }
+
+    function pcLightsEffectName(id) {
+        const effect = pcLightsEffects.find(entry => entry.id === id)
+        return effect ? effect.name : id
+    }
+
+    // A theme's colors for its preview: fixed ones from the catalog, the
+    // live ones from the headset, the wallpaper or the cover.
+    function pcLightsPalette(id) {
+        if (id === "headset")
+            return [].concat(logoColors ?? [], ringColors ?? []).filter(color => !!color)
+        if (id === "wallpaper") return wallpaperPalette.colors
+        if (id === "cover") return coverPalette.colors
+        const theme = pcLightsThemes.find(entry => entry.id === id)
+        return theme?.colors ?? []
+    }
+
+    function pcLightsUses(theme) {
+        return pcLightsConfig.theme === theme
+            || pcLightsRules.some(rule => rule.theme === theme)
+            || pcLightsConfig.games?.theme === theme
+    }
+
+    function pcLightsSubtitle() {
+        if (!pcLights) return "Aguardando estado"
+        if (!pcLightsRunning) return "Serviço parado"
+        if (!pcLightsActive) return "OpenRGB no comando"
+        if (!pcLightsConnected) return "Sem conexão com o OpenRGB"
+        const count = pcLightsDevices.filter(device => device.included).length
+        const rule = pcLightsStatus.rule
+        const why = rule === "games" ? " · jogo" : rule ? ` · ${rule}` : ""
+        return `Sonic Core no comando · ${count} ${count === 1 ? "aparelho" : "aparelhos"}${why}`
+    }
+
+    function pcLightsDeviceIcon(kind) {
+        return ({
+            "motherboard": "cpu", "memory": "memory", "gpu": "video-display",
+            "keyboard": "input-keyboard", "mouse": "input-mouse", "mousemat": "input-mouse",
+            "headset": "audio-headset", "speaker": "audio-speakers", "gamepad": "input-gaming",
+            "storage": "drive-harddisk", "case": "computer", "laptop": "computer-laptop",
+            "monitor": "video-display"
+        })[kind] ?? "preferences-desktop-color"
+    }
+
+    function pcLightsDeviceKind(kind) {
+        return ({
+            "motherboard": "placa-mãe", "memory": "memória", "gpu": "placa de vídeo",
+            "cooler": "cooler", "ledstrip": "fita de LED", "keyboard": "teclado",
+            "mouse": "mouse", "mousemat": "mousepad", "headset": "fone", "gamepad": "controle",
+            "light": "luminária", "speaker": "caixa de som", "storage": "armazenamento",
+            "case": "gabinete", "laptop": "notebook", "monitor": "monitor"
+        })[kind] ?? "aparelho"
+    }
+
     function loadShownSections() {
         if (!openRgbLinking) openRgbMessage = ""
         refreshOpenRgb()
         loadPicker()
         refreshEqualizer()
         // The wallpaper can change at any time; look it up each time.
-        if (vivo && (vivoBackground === "glass" || vivoBackground === "wallpaper"))
+        if ((vivo && (vivoBackground === "glass" || vivoBackground === "wallpaper"))
+            || pcLightsUses("wallpaper"))
             wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
     }
 
@@ -1197,7 +1369,7 @@ Item {
     }
 
     function queueLightingColor() {
-        if (!lightingWritable || !canApplyLightingColor()) return
+        if (!lightingColorsWritable || !canApplyLightingColor()) return
         pendingLightingFeature = lightingFeature()
         pendingLightingColor = pickerHex()
         if (!lightingColorThrottle.running) flushLightingColor()
@@ -1368,6 +1540,38 @@ Item {
         triggeredOnStart: true
         running: root.expanded && root.vivo && root.headsetConnected !== true
         onTriggered: root.readPcLighting()
+    }
+
+    // The Sonic Core engine's colors (a few hundred bytes, ten times a
+    // second while it is in charge and the window is shown).
+    readonly property string pcLightsFrameUrl: StandardPaths.writableLocation(StandardPaths.RuntimeLocation)
+        + "/jambalinux-soniccore-pc-lights-frame.json"
+
+    function readPcLightsFrame() {
+        const request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) return
+            let next = null
+            try {
+                const value = JSON.parse(request.responseText)
+                if (value && value.schema === 1 && Array.isArray(value.colors) && value.colors.length === 10)
+                    next = { "colors": value.colors.map(String) }
+            } catch (error) {
+            }
+            if (JSON.stringify(next) !== JSON.stringify(root.pcLightsFrame))
+                root.pcLightsFrame = next
+        }
+        request.open("GET", pcLightsFrameUrl)
+        request.send()
+    }
+
+    Timer {
+        interval: 120
+        repeat: true
+        triggeredOnStart: true
+        running: root.expanded && root.vivo && root.pcLightsActive
+        onTriggered: root.readPcLightsFrame()
+        onRunningChanged: if (!running) root.pcLightsFrame = null
     }
 
     Timer {
@@ -2163,7 +2367,7 @@ Item {
                     pathCommand: root.soniccoreCommand(["audio-path", "--format", "json"])
                     outputIsQuantum: root.outputIsQuantum
                     outputIcon: root.outputIcon
-                    hoursLeftText: root.hoursLeftText
+                    hoursLeftText: root.batteryTimeText
                 }
 
                 // The glass: a faint reflection across the top.
@@ -2230,10 +2434,10 @@ Item {
             }
 
             SonicControls.Label {
-                visible: !root.vivo && root.hoursLeftText.length > 0
+                visible: !root.vivo && root.batteryTimeText.length > 0
                 Layout.alignment: Qt.AlignHCenter
                 Layout.maximumHeight: implicitHeight
-                text: root.hoursLeftText
+                text: root.batteryTimeText
                 opacity: 0.7
             }
 
@@ -2366,156 +2570,227 @@ Item {
                     id: nowPlayingCard
                     title: "Tocando agora"
 
+                    // The player on the left, its own volume (a browser's
+                    // video, Spotify, the radio) upright on the right.
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: Kirigami.Units.largeSpacing
+                        spacing: Kirigami.Units.smallSpacing
 
-                        // The cover, framed like a display window in Hi-Fi.
-                        Rectangle {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 3.6
-                            Layout.preferredHeight: Layout.preferredWidth
-                            radius: 4
-                            clip: true
-                            color: root.hifi ? "#060a08" : Qt.rgba(Kirigami.Theme.textColor.r,
-                                Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.08)
-                            border.width: root.hifi ? 2 : 0
-                            border.color: "#3a3a36"
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
 
-                            Image {
-                                id: mediaCover
-                                anchors.fill: parent
-                                anchors.margins: root.hifi ? 2 : 0
-                                source: media.artUrl
-                                sourceSize.width: 160
-                                sourceSize.height: 160
-                                fillMode: Image.PreserveAspectCrop
-                                asynchronous: true
-                                smooth: true
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.largeSpacing
+
+                                // The cover, framed like a display window in Hi-Fi.
+                                Rectangle {
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 3.6
+                                    Layout.preferredHeight: Layout.preferredWidth
+                                    radius: 4
+                                    clip: true
+                                    color: root.hifi ? "#060a08" : Qt.rgba(Kirigami.Theme.textColor.r,
+                                        Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.08)
+                                    border.width: root.hifi ? 2 : 0
+                                    border.color: "#3a3a36"
+
+                                    Image {
+                                        id: mediaCover
+                                        anchors.fill: parent
+                                        anchors.margins: root.hifi ? 2 : 0
+                                        source: media.artUrl
+                                        sourceSize.width: 160
+                                        sourceSize.height: 160
+                                        fillMode: Image.PreserveAspectCrop
+                                        asynchronous: true
+                                        smooth: true
+                                    }
+
+                                    Kirigami.Icon {
+                                        anchors.centerIn: parent
+                                        visible: mediaCover.status !== Image.Ready
+                                        width: Kirigami.Units.iconSizes.medium
+                                        height: width
+                                        source: media.iconName || "media-default-album"
+                                        opacity: 0.7
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+
+                                    SonicControls.Label {
+                                        Layout.fillWidth: true
+                                        text: media.hasPlayer
+                                            ? (media.track || media.identity)
+                                            : "Nada tocando agora"
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                    }
+
+                                    SonicControls.Label {
+                                        Layout.fillWidth: true
+                                        text: media.hasPlayer
+                                            ? media.artist
+                                            : "Toque algo no YouTube, no Spotify ou em outro player."
+                                        elide: Text.ElideRight
+                                        wrapMode: media.hasPlayer ? Text.NoWrap : Text.Wrap
+                                        maximumLineCount: 2
+                                        opacity: 0.75
+                                    }
+
+                                    SonicControls.Label {
+                                        Layout.fillWidth: true
+                                        visible: media.hasPlayer
+                                        text: media.identity
+                                        elide: Text.ElideRight
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                        opacity: 0.55
+                                    }
+                                }
                             }
 
-                            Kirigami.Icon {
-                                anchors.centerIn: parent
-                                visible: mediaCover.status !== Image.Ready
-                                width: Kirigami.Units.iconSizes.medium
-                                height: width
-                                source: media.iconName || "media-default-album"
-                                opacity: 0.7
+                            RowLayout {
+                                Layout.alignment: Qt.AlignHCenter
+                                spacing: Kirigami.Units.smallSpacing
+
+                                SonicControls.Button {
+                                    icon.name: "media-skip-backward"
+                                    display: QQC2.AbstractButton.IconOnly
+                                    text: "Anterior"
+                                    enabled: media.hasPlayer && media.canGoPrevious
+                                    onClicked: media.previous()
+                                    QQC2.ToolTip.text: text
+                                    QQC2.ToolTip.visible: hovered
+                                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                }
+
+                                SonicControls.Button {
+                                    icon.name: root.mediaPlaying ? "media-playback-pause" : "media-playback-start"
+                                    display: QQC2.AbstractButton.IconOnly
+                                    text: root.mediaPlaying ? "Pausar" : "Tocar"
+                                    enabled: media.hasPlayer
+                                        && (root.mediaPlaying ? media.canPause : media.canPlay)
+                                    onClicked: media.playPause()
+                                    QQC2.ToolTip.text: text
+                                    QQC2.ToolTip.visible: hovered
+                                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                }
+
+                                SonicControls.Button {
+                                    icon.name: "media-skip-forward"
+                                    display: QQC2.AbstractButton.IconOnly
+                                    text: "Próxima"
+                                    enabled: media.hasPlayer && media.canGoNext
+                                    onClicked: media.next()
+                                    QQC2.ToolTip.text: text
+                                    QQC2.ToolTip.visible: hovered
+                                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                }
+                            }
+
+                            // Where the track is: drag to move it back or forward.
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+                                visible: media.hasPlayer && media.length > 0
+                                enabled: media.canSeek
+
+                                SonicControls.Label {
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                                    horizontalAlignment: Text.AlignRight
+                                    text: root.mediaTime(mediaPositionSlider.pressed
+                                        ? mediaPositionSlider.value : root.mediaPositionShown)
+                                    font.family: "monospace"
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    opacity: 0.75
+                                }
+
+                                SonicControls.Slider {
+                                    id: mediaPositionSlider
+                                    Layout.fillWidth: true
+                                    from: 0
+                                    to: Math.max(1, media.length)
+                                    value: root.mediaPositionShown
+                                    onPressedChanged: {
+                                        if (pressed) return
+                                        media.setPosition(value)
+                                        value = Qt.binding(() => root.mediaPositionShown)
+                                    }
+
+                                    HifiFader { slider: mediaPositionSlider }
+                                }
+
+                                SonicControls.Label {
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                                    text: root.mediaTime(media.length)
+                                    font.family: "monospace"
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    opacity: 0.75
+                                }
                             }
                         }
 
                         ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 0
+                            id: playerVolumeColumn
+                            Layout.fillHeight: true
+                            spacing: Kirigami.Units.smallSpacing / 2
+                            visible: media.hasPlayer && playerVolume.available
 
-                            SonicControls.Label {
-                                Layout.fillWidth: true
-                                text: media.hasPlayer
-                                    ? (media.track || media.identity)
-                                    : "Nada tocando agora"
-                                font.bold: true
-                                elide: Text.ElideRight
-                                maximumLineCount: 1
+                            SonicControls.Slider {
+                                id: playerVolumeSlider
+                                Layout.alignment: Qt.AlignHCenter
+                                // As tall as the player beside it, and never
+                                // too short to hold.
+                                Layout.fillHeight: true
+                                Layout.preferredHeight: Kirigami.Units.gridUnit * 3.5
+                                Layout.minimumHeight: Kirigami.Units.gridUnit * 3.5
+                                orientation: Qt.Vertical
+                                from: 0
+                                to: 100
+                                stepSize: 1
+                                value: playerVolume.muted ? 0 : playerVolume.percent
+                                onMoved: playerVolume.setPercent(Math.round(value))
+                                QQC2.ToolTip.text: `Volume de ${media.identity}`
+                                QQC2.ToolTip.visible: hovered && !pressed
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+                                HifiFader { slider: playerVolumeSlider }
                             }
 
-                            SonicControls.Label {
-                                Layout.fillWidth: true
-                                text: media.hasPlayer
-                                    ? media.artist
-                                    : "Toque algo no YouTube, no Spotify ou em outro player."
-                                elide: Text.ElideRight
-                                wrapMode: media.hasPlayer ? Text.NoWrap : Text.Wrap
-                                maximumLineCount: 2
-                                opacity: 0.75
+                            // The level, and a click on it mutes the player.
+                            RowLayout {
+                                Layout.alignment: Qt.AlignHCenter
+                                spacing: 2
+
+                                Kirigami.Icon {
+                                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                                    source: playerVolume.muted || playerVolume.percent === 0
+                                        ? "audio-volume-muted"
+                                        : playerVolume.percent < 34 ? "audio-volume-low"
+                                        : playerVolume.percent < 67 ? "audio-volume-medium" : "audio-volume-high"
+                                    color: Kirigami.Theme.textColor
+                                    isMask: root.hifi
+                                }
+
+                                SonicControls.Label {
+                                    text: playerVolume.muted ? "mudo" : `${playerVolume.percent}%`
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    opacity: 0.75
+                                }
+
+                                TapHandler {
+                                    onTapped: playerVolume.setMuted(!playerVolume.muted)
+                                }
+
+                                HoverHandler {
+                                    cursorShape: Qt.PointingHandCursor
+                                }
                             }
-
-                            SonicControls.Label {
-                                Layout.fillWidth: true
-                                visible: media.hasPlayer
-                                text: media.identity
-                                elide: Text.ElideRight
-                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                opacity: 0.55
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.alignment: Qt.AlignHCenter
-                        spacing: Kirigami.Units.smallSpacing
-
-                        SonicControls.Button {
-                            icon.name: "media-skip-backward"
-                            display: QQC2.AbstractButton.IconOnly
-                            text: "Anterior"
-                            enabled: media.hasPlayer && media.canGoPrevious
-                            onClicked: media.previous()
-                            QQC2.ToolTip.text: text
-                            QQC2.ToolTip.visible: hovered
-                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                        }
-
-                        SonicControls.Button {
-                            icon.name: root.mediaPlaying ? "media-playback-pause" : "media-playback-start"
-                            display: QQC2.AbstractButton.IconOnly
-                            text: root.mediaPlaying ? "Pausar" : "Tocar"
-                            enabled: media.hasPlayer
-                                && (root.mediaPlaying ? media.canPause : media.canPlay)
-                            onClicked: media.playPause()
-                            QQC2.ToolTip.text: text
-                            QQC2.ToolTip.visible: hovered
-                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                        }
-
-                        SonicControls.Button {
-                            icon.name: "media-skip-forward"
-                            display: QQC2.AbstractButton.IconOnly
-                            text: "Próxima"
-                            enabled: media.hasPlayer && media.canGoNext
-                            onClicked: media.next()
-                            QQC2.ToolTip.text: text
-                            QQC2.ToolTip.visible: hovered
-                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                        }
-                    }
-
-                    // Where the track is: drag to move it back or forward.
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
-                        visible: media.hasPlayer && media.length > 0
-                        enabled: media.canSeek
-
-                        SonicControls.Label {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                            horizontalAlignment: Text.AlignRight
-                            text: root.mediaTime(mediaPositionSlider.pressed
-                                ? mediaPositionSlider.value : root.mediaPositionShown)
-                            font.family: "monospace"
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            opacity: 0.75
-                        }
-
-                        SonicControls.Slider {
-                            id: mediaPositionSlider
-                            Layout.fillWidth: true
-                            from: 0
-                            to: Math.max(1, media.length)
-                            value: root.mediaPositionShown
-                            onPressedChanged: {
-                                if (pressed) return
-                                media.setPosition(value)
-                                value = Qt.binding(() => root.mediaPositionShown)
-                            }
-
-                            HifiFader { slider: mediaPositionSlider }
-                        }
-
-                        SonicControls.Label {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                            text: root.mediaTime(media.length)
-                            font.family: "monospace"
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            opacity: 0.75
                         }
                     }
 
@@ -3552,9 +3827,6 @@ Item {
                 spacing: Kirigami.Units.largeSpacing
 
                 SectionCard {
-                    // The last card of each column stretches to the bottom,
-                    // so the three columns end level.
-                    Layout.fillHeight: true
                     title: "Iluminação"
                     subtitle: root.lightingEnabled === null ? "Aguardando estado" : root.lightingEnabled ? "Atual: ligada" : "Atual: desligada"
                     enabled: root.deviceAvailable
@@ -3590,7 +3862,7 @@ Item {
 
                     SonicControls.Button {
                         Layout.alignment: Qt.AlignHCenter
-                            && (root.openRgbControlsLighting || root.lightingHeld)
+                        visible: root.openRgbControlsLighting || root.lightingHeld
                         enabled: !root.controlBusy
                         text: root.lightingHeld ? "Devolver ao OpenRGB" : "Assumir controle"
                         icon.name: root.lightingHeld ? "edit-undo" : "object-locked"
@@ -3608,7 +3880,7 @@ Item {
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
-                            && (root.openRgbLinking || root.openRgbCanLink())
+                        visible: root.openRgbLinking || root.openRgbCanLink()
 
                         SonicControls.BusyIndicator {
                             visible: root.openRgbLinking
@@ -3624,6 +3896,23 @@ Item {
                             icon.name: "insert-link"
                             onClicked: root.linkOpenRgb()
                         }
+                    }
+
+                    SonicControls.Label {
+                        Layout.fillWidth: true
+                        visible: root.headsetFollowsTheme
+                        text: `O fone está seguindo o tema das Luzes do PC (${root.pcLightsThemeName(root.pcLightsStatus?.theme ?? root.pcLightsConfig.theme)}).`
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.neutralTextColor
+                    }
+
+                    SonicControls.Button {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.headsetFollowsTheme
+                        text: "Escolher a cor só do fone"
+                        icon.name: "color-picker"
+                        onClicked: root.setPcLights(["headset", "off"], { "headset": false })
                     }
 
                     KeyRow {
@@ -3652,7 +3941,7 @@ Item {
                     KeyRow {
                         visible: root.lightingEnabled !== false
                         Layout.alignment: Qt.AlignHCenter
-                        enabled: root.lightingWritable && !root.controlBusy
+                        enabled: root.lightingColorsWritable && !root.controlBusy
 
                         SonicControls.Button {
                             text: "Ambos"
@@ -3696,7 +3985,7 @@ Item {
                     KeyRow {
                         Layout.alignment: Qt.AlignHCenter
                         visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
-                        enabled: root.lightingWritable && !root.controlBusy && root.lightingTargetProfileKnown()
+                        enabled: root.lightingColorsWritable && !root.controlBusy && root.lightingTargetProfileKnown()
 
                         SonicControls.Button { text: "Respiração"; checked: root.selectedLightingEffect() === "breathing"; onClicked: root.runControl(root.lightingEffectFeature(), "breathing") }
                         SonicControls.Button { text: "Sólido"; checked: root.selectedLightingEffect() === "solid"; onClicked: root.runControl(root.lightingEffectFeature(), "solid") }
@@ -3714,7 +4003,7 @@ Item {
                     KeyRow {
                         Layout.alignment: Qt.AlignHCenter
                         visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
-                        enabled: root.lightingWritable && !root.controlBusy
+                        enabled: root.lightingColorsWritable && !root.controlBusy
 
                         SonicControls.Button { text: "0,5×"; checked: root.selectedLightingSpeed() === "0.5"; onClicked: root.runControl(root.lightingSpeedFeature(), "0.5") }
                         SonicControls.Button { text: "1×"; checked: root.selectedLightingSpeed() === "1.0"; onClicked: root.runControl(root.lightingSpeedFeature(), "1.0") }
@@ -3734,8 +4023,9 @@ Item {
                     KeyRow {
                         Layout.alignment: Qt.AlignHCenter
                         visible: root.lightingEnabled !== false && root.lightingTargetProfileKnown()
-                        enabled: root.lightingWritable && !root.controlBusy
+                        enabled: root.lightingColorsWritable && !root.controlBusy
                         SonicControls.Button {
+                            id: allSegmentsKey
                             text: "Todos"
                             checkable: true
                             checked: root.lightingSegment < 0
@@ -3752,8 +4042,11 @@ Item {
                                 required property int index
                                 readonly property var colors: root.lightingTarget === "ring"
                                     ? root.ringColors : root.logoColors
-                                Layout.preferredWidth: 34
-                                Layout.preferredHeight: 30
+                                // Its own size, so the row counts it as a key
+                                // and keeps the five beside "Todos", level
+                                // with it.
+                                implicitWidth: 34
+                                implicitHeight: allSegmentsKey.implicitHeight
                                 radius: Kirigami.Units.cornerRadius
                                 color: Array.isArray(colors) ? colors[index] ?? "transparent" : "transparent"
                                 border.width: root.lightingSegment === index ? 3 : 1
@@ -3789,7 +4082,7 @@ Item {
                         Layout.preferredHeight: 220
                         // Stays usable while a write runs: the latest color is
                         // queued and sent as soon as the headset is free.
-                        enabled: root.lightingWritable && root.canApplyLightingColor()
+                        enabled: root.lightingColorsWritable && root.canApplyLightingColor()
 
                         readonly property real centerX: width / 2
                         readonly property real centerY: height / 2
@@ -3920,7 +4213,7 @@ Item {
                     RowLayout {
                         visible: root.lightingEnabled !== false
                         Layout.alignment: Qt.AlignHCenter
-                        enabled: root.lightingWritable && root.canApplyLightingColor()
+                        enabled: root.lightingColorsWritable && root.canApplyLightingColor()
                         spacing: Kirigami.Units.smallSpacing
 
                         Rectangle {
@@ -3939,6 +4232,472 @@ Item {
                             font.family: "monospace"
                         }
 
+                    }
+                }
+
+                SectionCard {
+                    id: pcLightsCard
+                    // The last card of each column stretches to the bottom,
+                    // so the three columns end level.
+                    Layout.fillHeight: true
+                    title: "Luzes do PC"
+                    subtitle: root.pcLightsSubtitle()
+
+                    SonicControls.Label {
+                        Layout.fillWidth: true
+                        visible: root.pcLights !== null && !root.pcLightsRunning
+                        text: "O serviço das luzes do PC não está rodando. Instale esta versão do Sonic Core de novo (tools/install-user.sh)."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.negativeTextColor
+                    }
+
+                    // OpenRGB drives the devices; its SDK server lets Sonic
+                    // Core give it the colors.
+                    SonicControls.Label {
+                        Layout.fillWidth: true
+                        visible: root.pcLightsRunning && !root.pcLightsConnected
+                        text: root.pcLightsStatus?.problem === "server-off"
+                            ? `O OpenRGB não está aberto ou o servidor dele está desligado. Abra o OpenRGB e, na aba "Servidor SDK", clique em "Iniciar servidor". Para ele ligar sempre, em Configurações → Início automático, escreva --server em "Argumentos".`
+                            : `Sem conexão com o OpenRGB: ${root.pcLightsStatus?.error ?? ""}`
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.neutralTextColor
+                    }
+
+                    // Taking the lights pauses OpenRGB's own effects; they
+                    // start again when OpenRGB takes the lights back.
+                    SonicControls.Label {
+                        Layout.fillWidth: true
+                        visible: root.pcLightsActive && (root.pcLightsStatus?.openrgb_paused ?? []).length > 0
+                        text: `Efeitos do OpenRGB pausados: ${(root.pcLightsStatus?.openrgb_paused ?? []).join(", ")}. Voltam quando o OpenRGB retomar, com as cores de antes.`
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        opacity: 0.6
+                    }
+
+                    SonicControls.Label {
+                        Layout.fillWidth: true
+                        visible: root.pcLightsActive && root.pcLightsStatus?.conflict === true
+                        text: (root.pcLightsStatus?.openrgb_effects ?? []).length > 0
+                            ? `O efeito "${root.pcLightsStatus.openrgb_effects.join(", ")}" foi ligado no OpenRGB e também muda as luzes, que piscam. Pare-o no OpenRGB (aba Effects) ou devolva o comando ao OpenRGB.`
+                            : "Outro programa também está mudando as luzes, e elas piscam. Feche-o ou devolva o comando ao OpenRGB."
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.neutralTextColor
+                    }
+
+                    SonicControls.Label {
+                        Layout.fillWidth: true
+                        visible: root.pcLightsError.length > 0
+                        text: root.pcLightsError
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.negativeTextColor
+                    }
+
+                    SonicControls.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "Quem comanda"
+                        opacity: 0.7
+                    }
+
+                    KeyRow {
+                        Layout.alignment: Qt.AlignHCenter
+                        enabled: root.pcLights !== null
+
+                        SonicControls.Button {
+                            text: "Sonic Core"
+                            icon.source: Qt.resolvedUrl("../images/light-on.svg")
+                            checked: root.pcLightsActive
+                            onClicked: root.setPcLights(["on"], { "active": true })
+                        }
+                        SonicControls.Button {
+                            text: "OpenRGB"
+                            icon.name: "edit-undo"
+                            checked: root.pcLights !== null && !root.pcLightsActive
+                            onClicked: root.setPcLights(["off"], { "active": false })
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        visible: root.pcLightsActive
+
+                        SonicControls.Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Tema"
+                            opacity: 0.7
+                        }
+
+                        SonicControls.ComboBox {
+                            id: pcLightsThemeBox
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 12
+                            model: root.pcLightsThemes
+                            textRole: "name"
+                            currentIndex: root.pcLightsThemes.findIndex(theme => theme.id === root.pcLightsConfig.theme)
+                            onActivated: function(index) {
+                                const theme = root.pcLightsThemes[index]
+                                if (theme) root.setPcLights(["theme", theme.id], { "theme": theme.id })
+                            }
+                        }
+
+                        // The theme's colors, as the lights show them: one
+                        // blend from each color to the next.
+                        Row {
+                            id: pcLightsPreview
+                            readonly property var colors: root.pcLightsPalette(root.pcLightsConfig.theme)
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: pcLightsThemeBox.Layout.preferredWidth
+                            Layout.preferredHeight: Kirigami.Units.smallSpacing * 2
+                            visible: colors.length > 0
+
+                            Repeater {
+                                model: Math.max(1, pcLightsPreview.colors.length - 1)
+
+                                delegate: Rectangle {
+                                    required property int index
+                                    readonly property var colors: pcLightsPreview.colors
+                                    width: pcLightsPreview.width / Math.max(1, colors.length - 1)
+                                    height: pcLightsPreview.height
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0; color: colors[index] ?? "transparent" }
+                                        GradientStop { position: 1; color: colors[Math.min(index + 1, colors.length - 1)] ?? "transparent" }
+                                    }
+                                }
+                            }
+                        }
+
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            visible: (root.pcLightsConfig.theme === "wallpaper" || root.pcLightsConfig.theme === "cover")
+                            text: root.pcLightsConfig.theme === "cover"
+                                ? "As cores da capa do que está tocando (com o app aberto ou na bandeja)."
+                                : "As cores do papel de parede da área de trabalho."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.6
+                        }
+
+                        SonicControls.Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Efeito"
+                            opacity: 0.7
+                        }
+
+                        KeyRow {
+                            Layout.alignment: Qt.AlignHCenter
+
+                            Repeater {
+                                model: root.pcLightsEffects
+
+                                delegate: SonicControls.Button {
+                                    required property var modelData
+                                    text: modelData.name
+                                    checked: root.pcLightsConfig.effect === modelData.id
+                                    onClicked: root.setPcLights(["effect", modelData.id], { "effect": modelData.id })
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+
+                            SonicControls.Label {
+                                text: "Velocidade"
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 4.5
+                            }
+
+                            SonicControls.Slider {
+                                id: pcLightsSpeedSlider
+                                Layout.fillWidth: true
+                                from: 0.25
+                                to: 3
+                                stepSize: 0.25
+                                value: Number(root.pcLightsConfig.speed ?? 1)
+                                onPressedChanged: {
+                                    if (pressed) return
+                                    root.setPcLights(["speed", String(value)], { "speed": value })
+                                    value = Qt.binding(() => Number(root.pcLightsConfig.speed ?? 1))
+                                }
+
+                                HifiFader { slider: pcLightsSpeedSlider }
+                            }
+
+                            SonicControls.Label {
+                                text: `${String(Math.round(pcLightsSpeedSlider.value * 100) / 100).replace(".", ",")}×`
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+
+                            SonicControls.Label {
+                                text: "Brilho"
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 4.5
+                            }
+
+                            SonicControls.Slider {
+                                id: pcLightsBrightnessSlider
+                                Layout.fillWidth: true
+                                from: 5
+                                to: 100
+                                stepSize: 5
+                                value: Number(root.pcLightsConfig.brightness ?? 100)
+                                onPressedChanged: {
+                                    if (pressed) return
+                                    root.setPcLights(["brightness", String(Math.round(value))], { "brightness": Math.round(value) })
+                                    value = Qt.binding(() => Number(root.pcLightsConfig.brightness ?? 100))
+                                }
+
+                                HifiFader { slider: pcLightsBrightnessSlider }
+                            }
+
+                            SonicControls.Label {
+                                text: `${Math.round(pcLightsBrightnessSlider.value)}%`
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+
+                        SonicControls.Switch {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "O fone segue o tema"
+                            checked: root.pcLightsConfig.headset !== false
+                            onClicked: {
+                                const on = checked
+                                checked = Qt.binding(() => root.pcLightsConfig.headset !== false)
+                                root.setPcLights(["headset", on ? "on" : "off"], { "headset": on })
+                            }
+                        }
+
+                        SonicControls.Switch {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Piscar com o microfone e a bateria fraca"
+                            checked: root.pcLightsConfig.alerts !== false
+                            onClicked: {
+                                const on = checked
+                                checked = Qt.binding(() => root.pcLightsConfig.alerts !== false)
+                                root.setPcLights(["alerts", on ? "on" : "off"], { "alerts": on })
+                            }
+                        }
+                    }
+
+                    SonicControls.Button {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.pcLights !== null
+                        text: root.pcLightsMore ? "Menos opções" : "Aparelhos, jogos e perfis"
+                        icon.name: root.pcLightsMore ? "go-up" : "go-down"
+                        onClicked: root.pcLightsMore = !root.pcLightsMore
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        visible: root.pcLightsMore && root.pcLights !== null
+
+                        // ---- Devices: each one can stay with OpenRGB ----
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            visible: root.pcLightsDevices.length > 0
+                            text: "Aparelhos"
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        Repeater {
+                            model: root.pcLightsDevices
+
+                            delegate: RowLayout {
+                                id: pcDeviceRow
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+
+                                Kirigami.Icon {
+                                    source: root.pcLightsDeviceIcon(pcDeviceRow.modelData.kind)
+                                    fallback: "preferences-desktop-color"
+                                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                                }
+
+                                SonicControls.Label {
+                                    Layout.fillWidth: true
+                                    text: `${pcDeviceRow.modelData.name} · ${root.pcLightsDeviceKind(pcDeviceRow.modelData.kind)}, ${pcDeviceRow.modelData.leds} ${pcDeviceRow.modelData.leds === 1 ? "luz" : "luzes"}`
+                                    elide: Text.ElideRight
+                                }
+
+                                SonicControls.Switch {
+                                    checked: pcDeviceRow.modelData.included === true
+                                    onClicked: {
+                                        const on = checked
+                                        checked = Qt.binding(() => pcDeviceRow.modelData.included === true)
+                                        root.setPcDevice(pcDeviceRow.modelData.key, on)
+                                    }
+                                }
+                            }
+                        }
+
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            visible: root.pcLightsDevices.length > 0
+                            text: "Desligue um aparelho para ele ficar com o OpenRGB."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.6
+                        }
+
+                        // ---- Automatic looks while a game or an app plays ----
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            Layout.topMargin: Kirigami.Units.smallSpacing
+                            text: "Automático"
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+
+                            SonicControls.Label {
+                                text: "Em jogos"
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 4.5
+                            }
+
+                            SonicControls.ComboBox {
+                                Layout.fillWidth: true
+                                model: [{ "id": "", "name": "Desligado" }].concat(root.pcLightsThemes)
+                                textRole: "name"
+                                currentIndex: root.pcLightsConfig.games
+                                    ? 1 + root.pcLightsThemes.findIndex(theme => theme.id === root.pcLightsConfig.games.theme)
+                                    : 0
+                                onActivated: function(index) {
+                                    if (index === 0) {
+                                        root.setPcLights(["games", "off"], { "games": null })
+                                        return
+                                    }
+                                    const theme = root.pcLightsThemes[index - 1]
+                                    const effect = root.pcLightsConfig.games?.effect ?? "wave"
+                                    root.setPcLights(["games", theme.id, effect],
+                                        { "games": { "theme": theme.id, "effect": effect } })
+                                }
+                            }
+
+                            SonicControls.ComboBox {
+                                Layout.fillWidth: true
+                                enabled: !!root.pcLightsConfig.games
+                                model: root.pcLightsEffects
+                                textRole: "name"
+                                currentIndex: root.pcLightsEffects.findIndex(effect =>
+                                    effect.id === (root.pcLightsConfig.games?.effect ?? "wave"))
+                                onActivated: function(index) {
+                                    const games = root.pcLightsConfig.games
+                                    const effect = root.pcLightsEffects[index]
+                                    if (games && effect)
+                                        root.setPcLights(["games", games.theme, effect.id],
+                                            { "games": { "theme": games.theme, "effect": effect.id } })
+                                }
+                            }
+                        }
+
+                        Repeater {
+                            model: root.pcLightsRules
+
+                            delegate: RowLayout {
+                                id: pcRuleRow
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+
+                                SonicControls.Label {
+                                    Layout.fillWidth: true
+                                    text: `${pcRuleRow.modelData.app}: ${root.pcLightsThemeName(pcRuleRow.modelData.theme)}, ${root.pcLightsEffectName(pcRuleRow.modelData.effect)}`
+                                    elide: Text.ElideRight
+                                }
+
+                                SonicControls.Button {
+                                    icon.name: "edit-delete"
+                                    text: "Tirar"
+                                    onClicked: root.setPcLights(["rule", pcRuleRow.modelData.app, "remove"])
+                                }
+                            }
+                        }
+
+                        // A rule for an application playing now: the theme
+                        // and effect chosen above.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+                            visible: root.pcLightsNewApps.length > 0
+
+                            SonicControls.ComboBox {
+                                id: pcRuleApp
+                                Layout.fillWidth: true
+                                model: root.pcLightsNewApps
+                            }
+
+                            SonicControls.Button {
+                                text: "Usar este tema nele"
+                                icon.name: "list-add"
+                                onClicked: {
+                                    const app = root.pcLightsNewApps[pcRuleApp.currentIndex]
+                                    if (app)
+                                        root.setPcLights(["rule", app, root.pcLightsConfig.theme, root.pcLightsConfig.effect])
+                                }
+                            }
+                        }
+
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            text: root.pcLightsNewApps.length > 0 || root.pcLightsRules.length > 0
+                                ? "Enquanto um aplicativo da lista toca, as luzes usam o tema dele."
+                                : "Os aplicativos que tocarem aparecem aqui, para terem um tema só deles."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.6
+                        }
+
+                        // ---- OpenRGB's own profiles ----
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            Layout.topMargin: Kirigami.Units.smallSpacing
+                            visible: root.pcLightsProfiles.length > 0
+                            text: "Perfis do OpenRGB"
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        KeyRow {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: root.pcLightsProfiles.length > 0
+
+                            Repeater {
+                                model: root.pcLightsProfiles
+
+                                delegate: SonicControls.Button {
+                                    required property string modelData
+                                    text: modelData
+                                    onClicked: root.setPcLights(["profile", modelData], { "active": false })
+                                }
+                            }
+                        }
+
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            visible: root.pcLightsProfiles.length > 0
+                            text: "Um perfil devolve as luzes ao OpenRGB com as cores dele."
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.6
+                        }
                     }
                 }
             }
@@ -4242,6 +5001,59 @@ Item {
     }
 
     Sonic.Executable {
+        id: pcLightsSource
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            const exitCode = Number(data["exit code"] ?? -1)
+            if (sourceName.indexOf("'--format'") < 0) {
+                // A change (or the live colors): read the result back.
+                if (exitCode !== 0 && sourceName.indexOf("'live'") < 0)
+                    root.pcLightsError = String(data.stderr ?? "").trim()
+                        .replace(/^inspection failed: /, "")
+                        || "Não foi possível mudar as luzes do PC"
+                root.refreshPcLights()
+                return
+            }
+            if (exitCode !== 0) return
+            try {
+                const result = JSON.parse(String(data.stdout ?? ""))
+                if (result && result.schema === 1) root.pcLights = result
+            } catch (error) {
+            }
+        }
+    }
+
+    // A light read every 2 s while the window is shown.
+    Timer {
+        interval: 2000
+        repeat: true
+        triggeredOnStart: true
+        running: root.expanded
+        onTriggered: root.refreshPcLights()
+    }
+
+    // The "Papel de parede" and "Capa do que toca" themes: the colors of the
+    // desktop wallpaper and of the cover (or station logo) of what plays,
+    // handed to the engine whenever they change.
+    Sonic.ImagePalette {
+        id: wallpaperPalette
+        source: root.pcLightsUses("wallpaper") ? root.wallpaperUrl : ""
+        onColorsChanged: if (colors.length > 0)
+            pcLightsSource.connectSource(root.soniccoreCommand(["lights", "live", "wallpaper"].concat(colors)))
+    }
+
+    Sonic.ImagePalette {
+        id: coverPalette
+        source: root.pcLightsUses("cover") ? media.artUrl : ""
+        onColorsChanged: if (colors.length > 0)
+            pcLightsSource.connectSource(root.soniccoreCommand(["lights", "live", "cover"].concat(colors)))
+    }
+
+    // Choosing the wallpaper theme looks the wallpaper up.
+    onPcLightsConfigChanged: if (pcLightsUses("wallpaper") && String(wallpaperUrl).length === 0)
+        wallpaperSource.connectSource(soniccoreCommand(["wallpaper", "--format", "json"]))
+
+    Sonic.Executable {
         id: wallpaperSource
         onNewData: function(sourceName, data) {
             disconnectSource(sourceName)
@@ -4266,17 +5078,20 @@ Item {
                 root.outputIsQuantum = !current || current.quantum_game === true
                 root.outputIcon = current?.icon ?? "audio-headphones"
                 root.outputLabel = current?.description ?? ""
+                root.outputEffective = String(result.effective ?? "")
             } catch (error) {
                 root.outputIsQuantum = true
             }
         }
     }
 
-    // The output can change whenever the system default changes.
+    // The output can change whenever the system default changes; the radio
+    // follows it even with the window closed.
     Timer {
-        interval: 5000
+        id: outputRefresh
+        interval: root.expanded ? 5000 : 3000
         repeat: true
-        running: root.expanded
+        running: root.expanded || root.radioOn
         triggeredOnStart: true
         onTriggered: outputSource.connectSource(root.soniccoreCommand(["output", "--format", "json"]))
     }
@@ -4292,9 +5107,12 @@ Item {
                 const power = JSON.parse(String(data.stdout ?? ""))
                 const hours = Number(power?.history?.hours_left)
                 root.hoursLeft = Number.isFinite(hours) ? hours : -1
+                const toFull = Number(power?.history?.hours_to_full)
+                root.hoursToFull = Number.isFinite(toFull) ? toFull : -1
                 root.powerSaving = String(power?.saving ?? "")
             } catch (error) {
                 root.hoursLeft = -1
+                root.hoursToFull = -1
             }
         }
     }

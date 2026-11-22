@@ -49,3 +49,13 @@ test("assumir e devolver usam o comando lighting-hold", () => {
     assert.match(widgetSource, /text: root\.lightingHeld \? "Devolver ao OpenRGB" : "Assumir controle"/)
     assert.match(widgetSource, /lightingHeld = result\.lighting_held === true/)
 })
+
+test("com o fone seguindo o tema das Luzes do PC, só ligar e desligar ficam livres", () => {
+    assert.match(widgetSource,
+        /readonly property bool headsetFollowsTheme: pcLightsActive && pcLightsStatus\?\.in_charge === true\n\s+&& pcLightsConfig\.headset !== false && pcLightsStatus\?\.theme !== "headset"/)
+    assert.match(widgetSource, /readonly property bool lightingColorsWritable: lightingWritable && !headsetFollowsTheme/)
+    // On/off keeps the plain rule; colors, effects and the wheel need both.
+    assert.match(widgetSource, /enabled: root\.lightingWritable && !root\.controlBusy\n\s+SonicControls\.Button \{ text: "Ligar"/)
+    assert.equal((widgetSource.match(/enabled: root\.lightingWritable /g) || []).length, 1)
+    assert.match(widgetSource, /text: "Escolher a cor só do fone"[\s\S]{0,120}onClicked: root\.setPcLights\(\["headset", "off"\], \{ "headset": false \}\)/)
+})

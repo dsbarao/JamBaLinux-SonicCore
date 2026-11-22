@@ -36,6 +36,9 @@ class MediaController : public QObject
     Q_PROPERTY(double position READ position NOTIFY positionChanged)
     Q_PROPERTY(double length READ length NOTIFY changed)
     Q_PROPERTY(bool canSeek READ canSeek NOTIFY changed)
+    /* The player's process (its D-Bus connection's), 0 until known: what
+       its audio streams are found by. */
+    Q_PROPERTY(qint64 pid READ pid NOTIFY changed)
 
 public:
     explicit MediaController(QObject* parent = nullptr);
@@ -55,6 +58,7 @@ public:
     double position() const;
     double length() const;
     bool canSeek() const;
+    qint64 pid() const { return hasPlayer() ? players.value(current).pid : 0; }
 
     Q_INVOKABLE void previous();
     Q_INVOKABLE void playPause();
@@ -78,6 +82,7 @@ public:
         bool        canSeek = false;
         qint64      position = 0;    /* microseconds, as MPRIS counts */
         qint64      activeSince = 0; /* when it last started playing */
+        qint64      pid = 0;
     };
 
     /* Which of `players` to show: the one that started playing last; if

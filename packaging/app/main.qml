@@ -52,8 +52,31 @@ Kirigami.ApplicationWindow {
         property string radioLastStation: ""
     }
 
-    color: Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,
-        Kirigami.Theme.backgroundColor.b, settings.windowOpacity)
+    // Vivo's "Vidro" and "Papel de parede" cover the whole window with a
+    // picture of their own, faded by the opacity: the window itself stays
+    // clear, or the two would add up and never get see-through.
+    readonly property bool pictureBackground: settings.theme === "vivo"
+        && (settings.background === "glass" || settings.background === "wallpaper")
+    // Premultiplied by the opacity: Qt clears the window with this color as
+    // given, and the compositor reads the window as premultiplied, so a
+    // plain color would be added in full over what is behind (over a dark
+    // desktop the window looked the same at any opacity).
+    readonly property real clearOpacity: pictureBackground ? 0 : settings.windowOpacity
+    color: Qt.rgba(Kirigami.Theme.backgroundColor.r * clearOpacity,
+        Kirigami.Theme.backgroundColor.g * clearOpacity,
+        Kirigami.Theme.backgroundColor.b * clearOpacity, clearOpacity)
+
+    // "Vidro" is frosted glass: below 100% the desktop compositor blurs
+    // what is behind the window (KWin; elsewhere the glass keeps its own
+    // blurred wallpaper).
+    readonly property bool wantsBlur: visible && settings.theme === "vivo"
+        && settings.background === "glass" && settings.windowOpacity < 0.999
+    property bool blurred: false
+    function updateBlur() {
+        if (wantsBlur || blurred)
+            blurred = Sonic.App.setBlurBehind(window, wantsBlur)
+    }
+    onWantsBlurChanged: Qt.callLater(updateBlur)
 
 
     // The window's size as the user left it, kept across closing, logging
@@ -84,6 +107,7 @@ Kirigami.ApplicationWindow {
         }
         if (visible && windowState.maximized)
             showMaximized()
+        Qt.callLater(updateBlur)
     }
 
     // Remember the normal (not maximized) size shortly after a resize stops,

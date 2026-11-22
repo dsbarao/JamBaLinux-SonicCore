@@ -8,6 +8,7 @@ readonly PLASMOID_TARGET="$HOME/.local/share/plasma/plasmoids/$PLASMOID_ID"
 readonly SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore.service"
 readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
+readonly LIGHTS_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-lights.service"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 readonly AUTOSTART_TARGET="$HOME/.config/autostart/jambalinux-soniccore.desktop"
 readonly APP_TARGET="$HOME/.local/share/jambalinux-soniccore/app"
@@ -22,6 +23,7 @@ show_plan() {
     printf '  %s\n' "$SERVICE_TARGET"
     printf '  %s\n' "$EQUALIZER_SERVICE_TARGET"
     printf '  %s\n' "$SPATIAL_SERVICE_TARGET"
+    printf '  %s\n' "$LIGHTS_SERVICE_TARGET"
     printf '  %s\n' "$LAUNCHER_TARGET"
     printf '  %s\n' "$AUTOSTART_TARGET"
     printf '  %s\n' "$APP_TARGET"
@@ -46,6 +48,12 @@ fi
 
 show_plan
 
+# The PC's lights go back to OpenRGB (and its profile) before the engine
+# that drew them stops.
+if [[ -x "$CARGO_BINARY" ]]; then
+    "$CARGO_BINARY" lights off >/dev/null 2>&1 && sleep 1 || true
+fi
+systemctl --user disable --now jambalinux-soniccore-lights.service 2>/dev/null || true
 # Stop spatial first: its shutdown restores streams to the equalizer sink.
 systemctl --user disable --now jambalinux-soniccore-spatial.service 2>/dev/null || true
 systemctl --user disable --now jambalinux-soniccore-equalizer.service 2>/dev/null || true
@@ -64,7 +72,7 @@ rm -f -- "$ICON_TARGET"
 if command -v kwriteconfig6 >/dev/null 2>&1; then
     "$SCRIPT_DIR/kwin-window-rule.sh" --uninstall || true
 fi
-rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET" "$AUTOSTART_TARGET" "$METER_SERVICE_TARGET" "$OPENRGB_PLUGIN"
+rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LIGHTS_SERVICE_TARGET" "$LAUNCHER_TARGET" "$AUTOSTART_TARGET" "$METER_SERVICE_TARGET" "$OPENRGB_PLUGIN"
 # Files edited outside JamBaLinux are kept and reported; the rest still goes.
 overlay_kept=0
 "$ACP_OVERLAY" --uninstall || overlay_kept=1

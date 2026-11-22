@@ -434,6 +434,18 @@ The rule matches only USB device `0ecb:2069`, HID interface `05`, and uses
 systemd-logind's `uaccess` mechanism. It does not use world-writable mode,
 create a privileged daemon, or grant access to unrelated hidraw devices.
 
+### Charging
+
+The headset says nothing about charging over the dongle (EVT-039). Plugged
+into this computer, its own USB device shows it at once. On a wall charger
+or a power-only cable, charging is told from the battery: two readings in a
+row going up, or one right after the headset re-sends its level unchanged —
+which it does when a charger is plugged in or out (EVT-012, EVT-047..049),
+though not in a way that tells which. A reading going down, a full battery
+or 40 minutes without a rise ends it. While charging, the app shows the
+time to full at the speed measured from the battery's own steps (`soniccore
+power`: charging speed, estimated time to full).
+
 ### Battery history and lighting economy
 
 The daemon records every change of battery percentage, charging, or lighting
@@ -496,8 +508,10 @@ app's **Configurações → Saída de áudio** page offers the same choice.
 
 With the app's **Vivo** theme, the **Fundo** menu also picks a
 background: **Aurora** (soft light in the headset lights' colors, drifting
-slowly), **Vidro** (the desktop wallpaper, blurred and dimmed, found with
-`soniccore wallpaper --format json`), **Partículas** (glowing dots rising),
+slowly), **Vidro** (frosted glass: the desktop wallpaper, blurred and dimmed, found
+with `soniccore wallpaper --format json`; below 100% **Opacidade** KWin also
+blurs whatever is behind the window, through KDE's KWindowSystem when it is
+installed), **Partículas** (glowing dots rising),
 **Ondas** (glowing lines following the sound), or none; with an intensity and an
 option to pulse with the bass from the live meter. Each light is drawn once
 into a cached texture and only moved, scaled, and faded; every moving part of
@@ -568,6 +582,59 @@ one write every 150 ms and always the newest state: fast OpenRGB effects are
 reduced to that rate. The plugin sources are MIT licensed; because they are
 compiled against OpenRGB (GPL-2.0-or-later) headers, the built plugin binary
 is distributed under the GPL.
+
+### PC lights (Luzes do PC)
+
+The **Luzes do PC** card puts Sonic Core in charge of every light OpenRGB
+drives (memory, motherboard, video card, keyboards, fans...). OpenRGB stays
+the driver of the devices; Sonic Core only hands it colors through OpenRGB's
+official SDK server (protocol 4, `src/openrgb_sdk.rs`), so no device protocol
+is added here. **Quem comanda** switches between Sonic Core and OpenRGB.
+Taking the lights pauses the effects the OpenRGB Effects plugin is running
+(through that plugin's own SDK commands) and saves each device's mode and
+colors; handing them back puts all of it back as it was, or loads one of
+OpenRGB's profiles listed in the card.
+
+- **Themes**: Synthwave, Aurora, Oceano, Lava, Pôr do sol, Floresta, Gelo,
+  Matrix, Vermelho, Branco, and the open-source color schemes
+  [Catppuccin](https://github.com/catppuccin/catppuccin),
+  [Dracula](https://draculatheme.com),
+  [Nord](https://www.nordtheme.com),
+  [Tokyo Night](https://github.com/folke/tokyonight.nvim) and
+  [Gruvbox](https://github.com/morhetz/gruvbox) (MIT-licensed palettes);
+  plus live ones: the headset's own colors, the desktop wallpaper, and the
+  cover (or station logo) of what is playing. Pastel tones are pushed to
+  vivid ones, which LEDs show better.
+- **Effects** drawn frame by frame (30 per second): Sólido, Respiração,
+  Onda, Arco-íris, Estrelas, and two that follow the spectrum meter —
+  Música and VU (memory sticks and strips fill like a level meter, keyboards
+  become a spectrum). An automatic gain keeps them moving at any volume.
+- **Automático**: a theme while any game plays (Steam/Proton/Wine programs)
+  and per application ("while Spotify plays, Gelo").
+- The **headset** follows the theme with its own built-in effects (through
+  the same allowlisted commands as `soniccore set`), and the lights flash on
+  a microphone mute and a low battery.
+- Each device can stay with OpenRGB.
+
+It needs OpenRGB's SDK server: in OpenRGB, **SDK Server → Start Server**;
+to start it with OpenRGB, add `--server` to *Settings → Autostart → Custom
+arguments*. If an effect is started in OpenRGB while Sonic Core is in charge,
+or another program writes the same lights, they flicker; the card says so.
+
+```bash
+soniccore lights                      # who is in charge, devices
+soniccore lights on                   # Sonic Core in charge (off: OpenRGB)
+soniccore lights theme dracula
+soniccore lights effect vu            # solid breathing wave rainbow stars music vu
+soniccore lights games lava wave      # while a game plays
+soniccore lights rule Spotify gelo music
+soniccore lights profile blue         # back to OpenRGB with one of its profiles
+```
+
+The engine is the `jambalinux-soniccore-lights.service` user unit
+(`soniccore lights run`): idle while OpenRGB is in charge, a fraction of a
+percent of one CPU core while drawing. Settings live in
+`~/.config/jambalinux-soniccore/pc-lights.json`.
 
 ## Repository layout
 

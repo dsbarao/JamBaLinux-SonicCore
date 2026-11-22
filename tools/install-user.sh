@@ -12,6 +12,8 @@ readonly EQUALIZER_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-son
 readonly EQUALIZER_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-equalizer.service"
 readonly SPATIAL_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore-spatial.service"
 readonly SPATIAL_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-spatial.service"
+readonly LIGHTS_SERVICE_SOURCE="$PROJECT_DIR/packaging/systemd/jambalinux-soniccore-lights.service"
+readonly LIGHTS_SERVICE_TARGET="$HOME/.config/systemd/user/jambalinux-soniccore-lights.service"
 readonly LAUNCHER_SOURCE="$PROJECT_DIR/packaging/desktop/jambalinux-soniccore.desktop"
 readonly LAUNCHER_TARGET="$HOME/.local/share/applications/jambalinux-soniccore.desktop"
 readonly AUTOSTART_SOURCE="$PROJECT_DIR/packaging/desktop/jambalinux-soniccore-autostart.desktop"
@@ -124,6 +126,7 @@ check_prerequisites() {
     [[ -f "$SERVICE_SOURCE" ]] || fail "serviço systemd não encontrado"
     [[ -f "$EQUALIZER_SERVICE_SOURCE" ]] || fail "serviço systemd do equalizador não encontrado"
     [[ -f "$SPATIAL_SERVICE_SOURCE" ]] || fail "serviço systemd espacial não encontrado"
+    [[ -f "$LIGHTS_SERVICE_SOURCE" ]] || fail "serviço systemd das luzes do PC não encontrado"
     [[ -f "$LAUNCHER_SOURCE" ]] || fail "atalho do menu não encontrado"
     [[ -f "$AUTOSTART_SOURCE" ]] || fail "início automático do app não encontrado"
     [[ -f "$APP_SOURCE/main.qml" && -f "$APP_SOURCE/launcher/soniccore-app.pro" ]] || fail "app SonicCore não encontrado"
@@ -159,6 +162,7 @@ stage_packaging() {
     SERVICE_INSTALL="$SERVICE_SOURCE"
     EQUALIZER_SERVICE_INSTALL="$EQUALIZER_SERVICE_SOURCE"
     SPATIAL_SERVICE_INSTALL="$SPATIAL_SERVICE_SOURCE"
+    LIGHTS_SERVICE_INSTALL="$LIGHTS_SERVICE_SOURCE"
     LAUNCHER_INSTALL="$LAUNCHER_SOURCE"
     [[ "$CARGO_BIN_DIR" != "$DEFAULT_CARGO_BIN_DIR" ]] || return 0
 
@@ -172,14 +176,16 @@ stage_packaging() {
     SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$SERVICE_SOURCE")"
     EQUALIZER_SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$EQUALIZER_SERVICE_SOURCE")"
     SPATIAL_SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$SPATIAL_SERVICE_SOURCE")"
+    LIGHTS_SERVICE_INSTALL="$STAGE_DIR/$(basename -- "$LIGHTS_SERVICE_SOURCE")"
     sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$SERVICE_SOURCE" > "$SERVICE_INSTALL"
     sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$EQUALIZER_SERVICE_SOURCE" > "$EQUALIZER_SERVICE_INSTALL"
     sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$SPATIAL_SERVICE_SOURCE" > "$SPATIAL_SERVICE_INSTALL"
+    sed "s|%h/.cargo/bin/|$CARGO_BIN_DIR/|g" "$LIGHTS_SERVICE_SOURCE" > "$LIGHTS_SERVICE_INSTALL"
     local staged
     for staged in "$CONTENTS_INSTALL/ui/SonicCore.qml" \
         "$CONTENTS_INSTALL/ui/configBattery.qml" \
         "$CONTENTS_INSTALL/ui/configOutput.qml" "$SERVICE_INSTALL" \
-        "$EQUALIZER_SERVICE_INSTALL" "$SPATIAL_SERVICE_INSTALL"; do
+        "$EQUALIZER_SERVICE_INSTALL" "$SPATIAL_SERVICE_INSTALL" "$LIGHTS_SERVICE_INSTALL"; do
         grep -Fq "$CARGO_BIN_DIR/soniccore" "$staged" \
             || fail "não foi possível apontar $staged para $CARGO_BIN_DIR"
         ! grep -Fq '.cargo/bin' "$staged" || [[ "$CARGO_BIN_DIR" == *.cargo/bin* ]] \
@@ -244,6 +250,7 @@ remove_old_widget
 install -Dm644 "$SERVICE_INSTALL" "$SERVICE_TARGET"
 install -Dm644 "$EQUALIZER_SERVICE_INSTALL" "$EQUALIZER_SERVICE_TARGET"
 install -Dm644 "$SPATIAL_SERVICE_INSTALL" "$SPATIAL_SERVICE_TARGET"
+install -Dm644 "$LIGHTS_SERVICE_INSTALL" "$LIGHTS_SERVICE_TARGET"
 if [[ "$FLATPAK_MODE" -eq 1 ]]; then
     # The Flatpak brings its own menu entry; at login it starts in the tray.
     rm -f -- "$LAUNCHER_TARGET"
@@ -292,6 +299,7 @@ systemctl --user daemon-reload
 systemctl --user enable jambalinux-soniccore.service
 systemctl --user enable jambalinux-soniccore-equalizer.service
 systemctl --user enable jambalinux-soniccore-spatial.service
+systemctl --user enable jambalinux-soniccore-lights.service
 # Installation is the controlled deployment boundary: restart once here so an
 # already-running service cannot keep an older binary. Band changes never use
 # systemctl and update the persistent equalizer node in place.
@@ -301,6 +309,8 @@ systemctl --user restart jambalinux-soniccore.service
 systemctl --user stop jambalinux-soniccore-spatial.service
 systemctl --user restart jambalinux-soniccore-equalizer.service
 systemctl --user start jambalinux-soniccore-spatial.service
+# "Luzes do PC" only draws while Sonic Core is put in charge of the lights.
+systemctl --user restart jambalinux-soniccore-lights.service
 # The ACP overlay only takes effect when WirePlumber recreates the card; the
 # installer does not restart it, so audio is never cut without being asked.
 "$ACP_OVERLAY" --install
