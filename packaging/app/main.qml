@@ -44,6 +44,12 @@ Kirigami.ApplicationWindow {
         // the window, the cards and the Vivo background; text and controls
         // stay solid.
         property real windowOpacity: 1
+        // The radio: the style picked, Brazil only ("BR") or the world (""),
+        // the favorite stations (JSON) and the last station played.
+        property string radioStyle: "synthwave"
+        property string radioRegion: ""
+        property string radioFavorites: "[]"
+        property string radioLastStation: ""
     }
 
     color: Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g,

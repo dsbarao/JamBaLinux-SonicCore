@@ -24,6 +24,10 @@ finish-args:
   - --talk-name=org.mpris.MediaPlayer2.*
   # The tray icon.
   - --talk-name=org.kde.StatusNotifierWatcher
+  # The radio: the station catalog and the streams, and the radio as a
+  # media player of the desktop (media keys, "Tocando agora").
+  - --share=network
+  - --own-name=org.mpris.MediaPlayer2.jambalinux_soniccore
   # The colors the OpenRGB plugin publishes, the desktop wallpaper (system
   # wallpapers under /usr, and the user's own pictures) and cover art.
   - --filesystem=xdg-run/jambalinux-soniccore-openrgb.json:ro

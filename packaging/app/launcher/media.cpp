@@ -307,6 +307,18 @@ void MediaController::call(const QString& method)
     QDBusConnection::sessionBus().asyncCall(message, 2000);
 }
 
+void MediaController::pauseOthers(const QString& except)
+{
+    for(auto player = players.cbegin(); player != players.cend(); ++player)
+    {
+        if(player.key() != except && player->status == QLatin1String("Playing"))
+        {
+            QDBusConnection::sessionBus().asyncCall(
+                QDBusMessage::createMethodCall(player.key(), MPRIS_PATH, PLAYER_IFACE, QStringLiteral("Pause")), 2000);
+        }
+    }
+}
+
 void MediaController::previous() { call(QStringLiteral("Previous")); }
 void MediaController::playPause() { call(QStringLiteral("PlayPause")); }
 void MediaController::next() { call(QStringLiteral("Next")); }

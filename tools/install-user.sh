@@ -94,7 +94,7 @@ check_qt() {
 check_qml_modules() {
     local qml_dir module missing=()
     qml_dir="$("$QMAKE" -query QT_INSTALL_QML 2>/dev/null || true)"
-    for module in org/kde/kirigami QtQuick/Controls QtQuick/Effects QtQuick/Shapes QtCore Qt/labs/platform; do
+    for module in org/kde/kirigami QtQuick/Controls QtQuick/Effects QtQuick/Shapes QtCore Qt/labs/platform QtMultimedia; do
         [[ -f "$qml_dir/$module/qmldir" ]] || missing+=("${module//\//.}")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then

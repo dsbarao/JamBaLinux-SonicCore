@@ -2039,17 +2039,37 @@ fn plan_route_iteration_for_apps(
 }
 
 fn execute_route_plan(plan: RoutePlan) -> Result<(), String> {
-    for action in plan.actions {
+    execute_route_actions(plan.actions, pactl_success, write_state)
+}
+
+/// Runs a plan's actions in order. A stream PipeWire refuses to move (a
+/// native PipeWire stream pinned to its device, "node.dont-reconnect")
+/// must not hold the others back: the remaining moves still run and the
+/// first failure is reported afterwards. A failed default change or state
+/// write stops at once, since later actions depend on it.
+fn execute_route_actions(
+    actions: Vec<RouteAction>,
+    mut pactl: impl FnMut(&[&str]) -> Result<(), String>,
+    mut persist: impl FnMut(&BackendState) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut first_move_error = None;
+    for action in actions {
         match action {
-            RouteAction::SetDefaultSink(name) => pactl_success(&["set-default-sink", &name])?,
-            RouteAction::PersistState(state) => write_state(&state)?,
+            RouteAction::SetDefaultSink(name) => pactl(&["set-default-sink", &name])?,
+            RouteAction::PersistState(state) => persist(&state)?,
             RouteAction::MoveSinkInput {
                 input_serial,
                 sink_name,
-            } => pactl_success(&["move-sink-input", &input_serial.to_string(), &sink_name])?,
+            } => {
+                if let Err(error) =
+                    pactl(&["move-sink-input", &input_serial.to_string(), &sink_name])
+                {
+                    first_move_error.get_or_insert(error);
+                }
+            }
         }
     }
-    Ok(())
+    first_move_error.map_or(Ok(()), Err)
 }
 
 fn run_route_iteration() -> Result<(), String> {
@@ -3241,6 +3261,38 @@ mod tests {
         );
         assert_eq!(stream_app_name(&properties(&[("node.name", "game.exe")])), "game.exe");
         assert_eq!(stream_app_name(&properties(&[])), "");
+    }
+
+    #[test]
+    fn a_stream_that_cannot_move_does_not_hold_the_others_back() {
+        let moves = std::cell::RefCell::new(Vec::new());
+        let result = execute_route_actions(
+            vec![
+                RouteAction::MoveSinkInput { input_serial: 7, sink_name: "eq".into() },
+                RouteAction::MoveSinkInput { input_serial: 8, sink_name: "eq".into() },
+            ],
+            |arguments| {
+                moves.borrow_mut().push(arguments[1].to_owned());
+                if arguments[1] == "7" {
+                    Err("pactl failed: Failure: Invalid argument".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(*moves.borrow(), ["7", "8"]);
+        assert_eq!(result, Err("pactl failed: Failure: Invalid argument".into()));
+        // A state that cannot be written still stops before any move.
+        let result = execute_route_actions(
+            vec![
+                RouteAction::PersistState(BackendState::default()),
+                RouteAction::MoveSinkInput { input_serial: 9, sink_name: "eq".into() },
+            ],
+            |_| panic!("no move after a failed state write"),
+            |_| Err("disk full".into()),
+        );
+        assert_eq!(result, Err("disk full".into()));
     }
 
     #[test]

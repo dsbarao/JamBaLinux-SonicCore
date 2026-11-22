@@ -3,6 +3,7 @@
 
 #include "executable.h"
 #include "media.h"
+#include "radio.h"
 #include "volume.h"
 
 #include <QCoreApplication>
@@ -103,12 +104,75 @@ static void TestExecutable()
     CHECK(executable.connectedSources().isEmpty());
 }
 
+static void TestRadioRanking()
+{
+    // Two answers (two tags) of Radio Browser's station search for reggae.
+    const QByteArray reggae = R"json([
+        {"stationuuid":"generalist","name":"Big Radio 6","url_resolved":"https://big.example/stream",
+         "favicon":"https://big.example/logo.png","countrycode":"GB","codec":"MP3","bitrate":128,
+         "votes":3600,"clickcount":200,"lastcheckok":1,
+         "tags":"alternative,indie,rock,pop,jazz,funk,soul,hip hop,electronic,reggae,folk,blues"},
+        {"stationuuid":"devoted","name":" Roots  Reggae FM ","url_resolved":"https://roots.example/live",
+         "favicon":"","countrycode":"JM","codec":"MP3","bitrate":128,
+         "votes":50,"clickcount":40,"lastcheckok":1,"tags":"reggae,roots reggae"},
+        {"stationuuid":"dead","name":"Dead","url_resolved":"https://dead.example","votes":999,
+         "lastcheckok":0,"bitrate":128,"tags":"reggae"},
+        {"stationuuid":"thin","name":"Thin","url_resolved":"https://thin.example","votes":900,
+         "lastcheckok":1,"bitrate":24,"tags":"reggae"},
+        {"stationuuid":"noaddress","name":"No address","url_resolved":"","url":"","votes":800,"lastcheckok":1},
+        {"stationuuid":"spam","name":"# TOP 100 DJ CHARTS - DJ REMIX & CHARTS RADIO @ Reggaeton, Urban, HipHop, Club & Party",
+         "url_resolved":"https://spam.example","votes":900,"clickcount":50,"lastcheckok":1,"tags":"reggae"}
+    ])json";
+    const QByteArray roots = R"json([
+        {"stationuuid":"devoted","name":"Roots Reggae FM","url_resolved":"https://roots.example/live","votes":50,"lastcheckok":1},
+        {"stationuuid":"copy","name":"roots reggae fm","url_resolved":"https://mirror.example/live","votes":10,"lastcheckok":1,"tags":"reggae"},
+        {"stationuuid":"fallback","name":"Dub Station","url_resolved":"","url":"http://dub.example/live",
+         "votes":5,"clickcount":3,"lastcheckok":1,"bitrate":0,"tags":"roots reggae,dub"},
+        {"stationuuid":"odd","name":"Odd","url_resolved":"rtsp://odd.example","votes":60,"lastcheckok":1,"tags":"reggae"}
+    ])json";
+    const QStringList style = { QStringLiteral("reggae"), QStringLiteral("roots reggae") };
+    const QVariantList stations = RadioDirectory::rank({ reggae, roots, "not json" }, style, 10);
+    // Working, listenable, http(s) stations, each once (by id and name).
+    CHECK(stations.size() == 3);
+    // A reggae station comes before a big station that also plays reggae.
+    CHECK(stations.value(0).toMap().value(QStringLiteral("uuid")) == QStringLiteral("devoted"));
+    CHECK(stations.value(0).toMap().value(QStringLiteral("name")) == QStringLiteral("Roots Reggae FM"));
+    CHECK(stations.value(0).toMap().value(QStringLiteral("country")) == QStringLiteral("JM"));
+    QStringList order;
+    for(const QVariant& station : stations)
+    {
+        order.append(station.toMap().value(QStringLiteral("uuid")).toString());
+    }
+    CHECK(order.contains(QStringLiteral("generalist")) && order.contains(QStringLiteral("fallback")));
+    // `url` stands in for a missing `url_resolved`.
+    for(const QVariant& station : stations)
+    {
+        if(station.toMap().value(QStringLiteral("uuid")) == QStringLiteral("fallback"))
+        {
+            CHECK(station.toMap().value(QStringLiteral("url")) == QStringLiteral("http://dub.example/live"));
+        }
+    }
+    CHECK(RadioDirectory::rank({ reggae, roots }, style, 1).size() == 1);
+}
+
+static void TestRadioTitle()
+{
+    CHECK(RadioTitle::parse("StreamTitle='Depeche Mode - Waiting for the Night';StreamUrl='';")
+          == QStringLiteral("Depeche Mode - Waiting for the Night"));
+    CHECK(RadioTitle::parse("StreamTitle='Rock 'n' Roll';") == QStringLiteral("Rock 'n' Roll"));
+    CHECK(RadioTitle::parse(QByteArray("StreamTitle='Jo\xe3o Gilberto';")) == QStringLiteral("João Gilberto"));
+    CHECK(RadioTitle::parse("StreamTitle='Caf\xc3\xa9 Tacvba';") == QStringLiteral("Café Tacvba"));
+    CHECK(RadioTitle::parse("StreamUrl='x';").isEmpty());
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     TestPlayerChoice();
     TestVolumeReading();
     TestExecutable();
+    TestRadioRanking();
+    TestRadioTitle();
     if(failures > 0)
     {
         std::cerr << failures << " check(s) failed\n";

@@ -6,5 +6,5 @@ QT += core gui widgets qml quick quickcontrols2 dbus network
 CONFIG += c++17 release warn_on
 
 
-HEADERS += appinfo.h dbushelpers.h executable.h media.h volume.h
-SOURCES += main.cpp dbushelpers.cpp executable.cpp media.cpp volume.cpp
+HEADERS += appinfo.h dbushelpers.h executable.h media.h radio.h radiompris.h volume.h
+SOURCES += main.cpp dbushelpers.cpp executable.cpp media.cpp radio.cpp radiompris.cpp volume.cpp

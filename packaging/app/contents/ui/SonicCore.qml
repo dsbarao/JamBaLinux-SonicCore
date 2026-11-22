@@ -2,6 +2,7 @@ import QtCore
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
+import QtMultimedia
 import QtQml.Models
 
 import org.kde.kirigami as Kirigami
@@ -428,8 +429,11 @@ Item {
                 skin = hifiSwitchSkin.createObject(item, { "control": item })
             } else if (item instanceof SonicControls.ComboBox) {
                 skin = hifiComboSkin.createObject(item, { "control": item })
-                skin.ownLabel = hifiInkLabels(item.contentItem, skin, 0) === 0
-                    || !item.contentItem.visible
+                const labels = hifiInkLabels(item.contentItem, skin, 0)
+                // Followed live: a hidden card hides the text field too, which
+                // must not be taken for a style that paints the text itself.
+                skin.ownLabel = Qt.binding(() => labels === 0
+                    || (item.visible && !item.contentItem.visible))
             } else if (item instanceof SonicControls.Button) {
                 skin = hifiKeySkin.createObject(item, { "control": item })
                 skin.ownLabel = hifiInkLabels(item.contentItem, skin, 0) === 0
@@ -451,6 +455,286 @@ Item {
     Sonic.OutputVolume { id: outputVolume }
     readonly property bool mediaPlaying: media.playing
     readonly property int outputVolumePercent: outputVolume.percent
+
+    // ---- Rádio: pick a style, then just change stations ----
+    // Stations come from Radio Browser (radio-browser.info); while it plays
+    // the radio is a media player of the desktop (MPRIS), so "Tocando agora"
+    // and the keyboard's media keys show and control it like any player.
+    // Each style is a few exact Radio Browser tags (several spellings).
+    readonly property var radioStyles: [
+        { "id": "rock", "label": "Rock", "tags": ["rock", "classic rock", "hard rock", "rock and roll"] },
+        { "id": "pop", "label": "Pop", "tags": ["pop", "top 40", "hits", "pop music"] },
+        { "id": "reggae", "label": "Reggae", "tags": ["reggae", "roots reggae", "reggae music", "dancehall"] },
+        { "id": "metal", "label": "Heavy Metal", "tags": ["heavy metal", "metal", "thrash metal", "hard rock"] },
+        { "id": "alternative", "label": "Alternativo", "tags": ["alternative", "alternative rock", "indie", "indie rock"] },
+        { "id": "80s", "label": "Anos 80", "tags": ["80s", "80er", "eighties", "80s hits"] },
+        { "id": "synthwave", "label": "Synthwave", "tags": ["synthwave", "retrowave", "outrun", "darksynth"] },
+        { "id": "electronic", "label": "Eletrônica", "tags": ["electronic", "edm", "house", "dance"] },
+        { "id": "hiphop", "label": "Hip Hop", "tags": ["hip hop", "hiphop", "rap", "hip-hop"] },
+        { "id": "blues", "label": "Blues", "tags": ["blues", "blues rock"] },
+        { "id": "jazz", "label": "Jazz", "tags": ["jazz", "smooth jazz", "jazz fusion"] },
+        { "id": "classical", "label": "Clássica", "tags": ["classical", "classical music", "orchestra"] },
+        { "id": "lofi", "label": "Lo-fi", "tags": ["lofi", "lo-fi", "chillhop", "lofi hip hop"] },
+        { "id": "chill", "label": "Chill", "tags": ["chillout", "lounge", "ambient", "downtempo"] },
+        { "id": "country", "label": "Country", "tags": ["country", "classic country"] },
+        { "id": "mpb", "label": "MPB", "tags": ["mpb", "musica popular brasileira", "brazilian music", "bossa nova"] },
+        { "id": "samba", "label": "Samba e Pagode", "tags": ["samba", "pagode"] },
+        { "id": "sertanejo", "label": "Sertanejo", "tags": ["sertanejo", "sertanejo universitario"] },
+        { "id": "forro", "label": "Forró", "tags": ["forro", "forró", "xote", "baiao"] },
+        { "id": "funk", "label": "Funk", "tags": ["funk", "funk carioca", "baile funk"] },
+        { "id": "gospel", "label": "Gospel", "tags": ["gospel", "christian", "worship"] },
+        { "id": "news", "label": "Notícias", "tags": ["news", "talk", "noticias", "jornalismo"] },
+        { "id": "favorites", "label": "Favoritas", "tags": [] }
+    ]
+    property bool radioOn: false
+    readonly property string radioStyle: configuration.radioStyle || "synthwave"
+    readonly property string radioRegion: configuration.radioRegion || ""
+    readonly property var radioFavorites: {
+        try {
+            const list = JSON.parse(configuration.radioFavorites || "[]")
+            return Array.isArray(list) ? list.filter(station => station && station.url) : []
+        } catch (error) {
+            return []
+        }
+    }
+    property var radioStations: []
+    property int radioIndex: -1
+    readonly property var radioStation: radioIndex >= 0 && radioIndex < radioStations.length
+        ? radioStations[radioIndex] : null
+    // Stations that failed one after another; all of them failing stops.
+    property int radioFailures: 0
+    property string radioMessage: ""
+    readonly property bool radioPlaying: radioPlayer.playbackState === MediaPlayer.PlayingState
+    readonly property bool radioFavorite: radioStation !== null
+        && radioFavorites.some(station => station.uuid === radioStation.uuid)
+
+    function radioStyleOf(id) {
+        return radioStyles.find(style => style.id === id) ?? radioStyles[0]
+    }
+
+    // While the tuning dial is dragged: the station it points at.
+    property int radioPreviewIndex: -1
+    readonly property var radioShownStation: radioPreviewIndex >= 0 && radioPreviewIndex < radioStations.length
+        ? radioStations[radioPreviewIndex] : radioStation
+
+    // The dial: a station chosen by position (0..1) along the stations.
+    function radioIndexAt(fraction) {
+        if (radioStations.length <= 1) return 0
+        return Math.round(Math.max(0, Math.min(1, fraction)) * (radioStations.length - 1))
+    }
+
+    function radioTuneTo(index) {
+        radioPreviewIndex = -1
+        if (index === radioIndex && radioPlaying) return
+        radioFailures = 0
+        radioTune(index)
+    }
+
+    function setRadioOn(on) {
+        if (on === radioOn) return
+        radioOn = on
+        Sonic.RadioPlayer.active = on
+        if (on) {
+            radioFailures = 0
+            radioLoad()
+        } else {
+            radioWatchdog.stop()
+            radioPlayer.stop()
+            radioPlayer.source = ""
+            radioIndex = -1
+            radioMessage = ""
+        }
+    }
+
+    function setRadioStyle(id) {
+        configuration.radioStyle = id
+        if (radioOn) {
+            radioFailures = 0
+            radioLoad()
+        }
+    }
+
+    function setRadioRegion(region) {
+        configuration.radioRegion = region
+        if (radioOn && radioStyle !== "favorites") {
+            radioFailures = 0
+            radioLoad()
+        }
+    }
+
+    function radioLoad() {
+        radioPlayer.stop()
+        radioIndex = -1
+        if (radioStyle === "favorites") {
+            radioStations = radioFavorites
+            radioMessage = radioStations.length > 0 ? "" : "Nenhuma favorita ainda: toque ♥ numa estação."
+            radioStart()
+            return
+        }
+        radioMessage = "Procurando estações…"
+        radioDirectory.search(radioStyleOf(radioStyle).tags, radioRegion)
+    }
+
+    function radioStart() {
+        if (radioStations.length === 0) return
+        const last = radioStations.findIndex(station => station.uuid === configuration.radioLastStation)
+        radioTune(last >= 0 ? last : 0)
+    }
+
+    function radioTune(index) {
+        if (!radioOn || radioStations.length === 0) return
+        radioIndex = (index % radioStations.length + radioStations.length) % radioStations.length
+        const station = radioStations[radioIndex]
+        configuration.radioLastStation = station.uuid
+        radioTitle.clear()
+        radioMessage = ""
+        // Other players pause: one sound at a time, like changing the source.
+        media.pauseOthers(Sonic.RadioPlayer.service)
+        radioPlayer.source = station.url
+        radioPlayer.play()
+        radioWatchdog.restart()
+    }
+
+    // A station that does not start in time, or fails, gives way to the next.
+    function radioSkip() {
+        if (!radioOn || radioStations.length === 0) return
+        radioFailures += 1
+        if (radioFailures >= Math.min(radioStations.length, 8)) {
+            radioPlayer.stop()
+            radioWatchdog.stop()
+            radioMessage = "As estações desse estilo não responderam. Tente outro estilo ou mais tarde."
+            return
+        }
+        radioTune(radioIndex + 1)
+    }
+
+    function radioNext() {
+        radioFailures = 0
+        radioTune(radioIndex + 1)
+    }
+
+    function radioPrevious() {
+        radioFailures = 0
+        radioTune(radioIndex - 1)
+    }
+
+    // Live streams do not pause: stopping and starting again plays "now".
+    function radioPlayPause() {
+        if (!radioOn) {
+            setRadioOn(true)
+        } else if (radioPlaying) {
+            radioPlayer.stop()
+        } else if (radioStation !== null) {
+            radioTune(radioIndex)
+        }
+    }
+
+    function toggleRadioFavorite() {
+        if (radioStation === null) return
+        const station = radioStation
+        const favorites = radioFavorites.filter(entry => entry.uuid !== station.uuid)
+        if (!radioFavorite) {
+            favorites.push({ "uuid": station.uuid, "name": station.name, "url": station.url,
+                "favicon": station.favicon || "", "country": station.country || "",
+                "bitrate": station.bitrate || 0 })
+        }
+        configuration.radioFavorites = JSON.stringify(favorites)
+    }
+
+    function playRadioFavorite(index) {
+        const station = radioFavorites[index]
+        if (!station) return
+        if (!radioOn) {
+            radioOn = true
+            Sonic.RadioPlayer.active = true
+        }
+        radioFailures = 0
+        const found = radioStations.findIndex(entry => entry.uuid === station.uuid)
+        if (found >= 0) {
+            radioTune(found)
+        } else {
+            radioStations = radioFavorites
+            radioTune(index)
+        }
+    }
+
+    function radioStationLine(station) {
+        if (!station) return ""
+        const details = [station.country, station.bitrate > 0 ? `${station.bitrate} kbps` : ""]
+            .filter(detail => detail && detail.length > 0)
+        return details.length > 0 ? `${station.name} · ${details.join(" · ")}` : station.name
+    }
+
+    // The song the station announces, read by the launcher (the player
+    // does not pass it on): soon after tuning, then every 20 s.
+    readonly property string radioSongTitle: radioTitle.title
+    Sonic.RadioTitle { id: radioTitle }
+
+    Timer {
+        id: radioTitleRead
+        interval: 20000
+        triggeredOnStart: false
+        repeat: true
+        running: root.radioOn && root.radioPlaying && root.radioStation !== null
+        onRunningChanged: if (running) radioTitleSoon.restart()
+        onTriggered: radioTitle.read(root.radioStation.url)
+    }
+
+    Timer {
+        id: radioTitleSoon
+        interval: 2500
+        onTriggered: if (root.radioStation !== null) radioTitle.read(root.radioStation.url)
+    }
+
+    Sonic.RadioDirectory {
+        id: radioDirectory
+        onStationsChanged: {
+            if (!root.radioOn || root.radioStyle === "favorites") return
+            root.radioStations = stations
+            root.radioMessage = error
+            root.radioStart()
+        }
+        onErrorChanged: if (root.radioOn && error.length > 0) root.radioMessage = error
+    }
+
+    MediaPlayer {
+        id: radioPlayer
+        audioOutput: AudioOutput {}
+        onErrorOccurred: root.radioSkip()
+        onPlaybackStateChanged: {
+            Sonic.RadioPlayer.playbackStatus = playbackState === MediaPlayer.PlayingState
+                ? "Playing" : root.radioOn && root.radioStation !== null ? "Paused" : "Stopped"
+        }
+        onMediaStatusChanged: {
+            if (mediaStatus === MediaPlayer.BufferedMedia || mediaStatus === MediaPlayer.LoadedMedia)
+                root.radioFailures = 0
+        }
+    }
+
+    Timer {
+        id: radioWatchdog
+        interval: 12000
+        onTriggered: {
+            if (root.radioOn && radioPlayer.playbackState !== MediaPlayer.PlayingState)
+                root.radioSkip()
+        }
+    }
+
+    // The radio's player face (MPRIS): what it shows, and the requests from
+    // "Tocando agora", the media keys and the desktop's media controls.
+    Binding { target: Sonic.RadioPlayer; property: "station"; value: root.radioStation ? root.radioStation.name : "" }
+    Binding { target: Sonic.RadioPlayer; property: "title"; value: root.radioSongTitle }
+    Binding { target: Sonic.RadioPlayer; property: "artUrl"; value: root.radioStation ? (root.radioStation.favicon || "") : "" }
+
+    Connections {
+        target: Sonic.RadioPlayer
+        function onNextRequested() { root.radioNext() }
+        function onPreviousRequested() { root.radioPrevious() }
+        function onPlayPauseRequested() { root.radioPlayPause() }
+        function onPlayRequested() { if (!root.radioPlaying) root.radioPlayPause() }
+        function onPauseRequested() { if (root.radioPlaying) radioPlayer.stop() }
+        function onStopRequested() { root.setRadioOn(false) }
+    }
 
     // "Volume" and "Ganho" share a label width so their sliders line up.
     readonly property real mixLabelWidth: Kirigami.Units.gridUnit * 3.2
@@ -2232,6 +2516,236 @@ Item {
                             font.family: "monospace"
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                             opacity: 0.75
+                        }
+                    }
+
+                    // ---- Rádio ----
+                    KeyRow {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.topMargin: Kirigami.Units.smallSpacing
+
+                        SonicControls.Button {
+                            text: "Rádio"
+                            icon.name: "radio"
+                            checkable: true
+                            checked: root.radioOn
+                            onClicked: {
+                                const on = checked
+                                checked = Qt.binding(() => root.radioOn)
+                                root.setRadioOn(on)
+                            }
+                            QQC2.ToolTip.text: root.radioOn ? "Desligar o rádio" : "Ligar o rádio da internet"
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+
+                        SonicControls.ComboBox {
+                            id: radioStyleSelector
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                            model: root.radioStyles.map(style => style.label)
+                            currentIndex: Math.max(0, root.radioStyles.findIndex(style => style.id === root.radioStyle))
+                            onActivated: function(index) { root.setRadioStyle(root.radioStyles[index].id) }
+                        }
+
+                        SonicControls.Button {
+                            text: "BR"
+                            checkable: true
+                            checked: root.radioRegion === "BR"
+                            enabled: root.radioStyle !== "favorites"
+                            onClicked: {
+                                const brazil = checked
+                                checked = Qt.binding(() => root.radioRegion === "BR")
+                                root.setRadioRegion(brazil ? "BR" : "")
+                            }
+                            QQC2.ToolTip.text: "Só estações do Brasil"
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
+
+                    // Sintonia: the stations of the style, one after another, like
+                    // the dial of a radio. ◀ ▶ step, the list picks one directly,
+                    // and the dial (a slider; the display's needle in Hi-Fi) is
+                    // dragged through them, showing each name, tuning on release.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.radioOn && root.radioStations.length > 0
+                        spacing: Kirigami.Units.smallSpacing
+
+                        SonicControls.Button {
+                            icon.name: "go-previous"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: "Estação anterior"
+                            onClicked: root.radioPrevious()
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+
+                        SonicControls.ComboBox {
+                            id: radioStationSelector
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: Kirigami.Units.gridUnit * 5
+                            model: root.radioStations.map((station, index) => `${index + 1}. ${station.name}`)
+                            currentIndex: root.radioIndex
+                            displayText: root.radioShownStation ? root.radioShownStation.name : "—"
+                            onActivated: function(index) { root.radioTuneTo(index) }
+                        }
+
+                        SonicControls.Button {
+                            icon.name: "go-next"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: "Próxima estação"
+                            onClicked: root.radioNext()
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+
+                        SonicControls.Button {
+                            visible: root.radioStation !== null
+                            icon.name: root.radioFavorite ? "starred-symbolic" : "non-starred-symbolic"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: root.radioFavorite ? "Tirar das favoritas" : "Favoritar esta estação"
+                            checkable: true
+                            checked: root.radioFavorite
+                            onClicked: {
+                                checked = Qt.binding(() => root.radioFavorite)
+                                root.toggleRadioFavorite()
+                            }
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
+
+                    // The dial in Vivo and Leve: drag through the stations.
+                    SonicControls.Slider {
+                        id: radioTuningSlider
+                        Layout.fillWidth: true
+                        visible: !root.hifi && root.radioOn && root.radioStations.length > 1
+                        from: 0
+                        to: Math.max(1, root.radioStations.length - 1)
+                        stepSize: 1
+                        snapMode: QQC2.Slider.SnapAlways
+                        value: Math.max(0, root.radioIndex)
+                        onMoved: root.radioPreviewIndex = Math.round(value)
+                        onPressedChanged: {
+                            if (pressed) return
+                            root.radioTuneTo(Math.round(value))
+                            value = Qt.binding(() => Math.max(0, root.radioIndex))
+                        }
+                    }
+
+                    // Hi-Fi: a tuner's dial in the green display; drag the
+                    // needle through the stations, it tunes on release.
+                    Rectangle {
+                        id: radioDial
+                        visible: root.hifi && root.radioOn
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 2.6
+                        radius: 3
+                        color: "#060a08"
+                        border.width: 2
+                        border.color: "#3a3a36"
+                        readonly property real span: width - 16
+                        readonly property int shownIndex: root.radioPreviewIndex >= 0 ? root.radioPreviewIndex : root.radioIndex
+
+                        Text {
+                            anchors.top: parent.top
+                            anchors.topMargin: 3
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: parent.width - 12
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                            text: root.radioShownStation ? root.radioShownStation.name.toUpperCase()
+                                : root.radioMessage.toUpperCase()
+                            color: root.vfdColor
+                            font.family: "monospace"
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            font.letterSpacing: 1
+                        }
+
+                        // One mark per station, a longer one every fifth.
+                        Repeater {
+                            model: Math.max(2, root.radioStations.length)
+                            delegate: Rectangle {
+                                required property int index
+                                readonly property int count: Math.max(2, root.radioStations.length)
+                                x: 8 + index / (count - 1) * radioDial.span
+                                y: radioDial.height - height - 4
+                                width: 1
+                                height: index % 5 === 0 ? 8 : 4
+                                color: Qt.darker(root.vfdColor, index % 5 === 0 ? 1.4 : 2.2)
+                            }
+                        }
+
+                        Rectangle {
+                            width: 2
+                            height: radioDial.height - 8
+                            y: 4
+                            x: 8 + (root.radioStations.length > 1 && radioDial.shownIndex >= 0
+                                ? radioDial.shownIndex / (root.radioStations.length - 1) : 0.5) * radioDial.span
+                            color: "#ff5a3c"
+                            Behavior on x { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: root.radioStations.length > 1
+                            cursorShape: Qt.SizeHorCursor
+                            onPressed: mouse => root.radioPreviewIndex = root.radioIndexAt((mouse.x - 8) / radioDial.span)
+                            onPositionChanged: mouse => {
+                                if (pressed) root.radioPreviewIndex = root.radioIndexAt((mouse.x - 8) / radioDial.span)
+                            }
+                            onReleased: root.radioTuneTo(root.radioPreviewIndex)
+                            onCanceled: root.radioPreviewIndex = -1
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.radioOn
+                        spacing: Kirigami.Units.smallSpacing
+
+                        SonicControls.Label {
+                            Layout.fillWidth: true
+                            text: root.radioShownStation
+                                ? `${root.radioStationLine(root.radioShownStation)} · ${(root.radioPreviewIndex >= 0 ? root.radioPreviewIndex : root.radioIndex) + 1} de ${root.radioStations.length}`
+                                : root.radioMessage
+                            elide: Text.ElideRight
+                            wrapMode: root.radioShownStation ? Text.NoWrap : Text.Wrap
+                            maximumLineCount: 2
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.8
+                        }
+
+                        SonicControls.BusyIndicator {
+                            visible: running
+                            running: radioDirectory.busy
+                                || (root.radioStation !== null && radioPlayer.mediaStatus === MediaPlayer.LoadingMedia)
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        }
+                    }
+
+                    // The favorites as memory keys, like a car radio's presets.
+                    KeyRow {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.radioFavorites.length > 0
+
+                        Repeater {
+                            model: Math.min(6, root.radioFavorites.length)
+                            delegate: SonicControls.Button {
+                                required property int index
+                                text: String(index + 1)
+                                checked: root.radioOn && root.radioStation !== null
+                                    && root.radioStation.uuid === root.radioFavorites[index].uuid
+                                onClicked: root.playRadioFavorite(index)
+                                QQC2.ToolTip.text: root.radioFavorites[index] ? root.radioFavorites[index].name : ""
+                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                            }
                         }
                     }
                 }

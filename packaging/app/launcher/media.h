@@ -19,6 +19,8 @@ class MediaController : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool hasPlayer READ hasPlayer NOTIFY changed)
+    /* The bus name of the player shown (the app's own radio included). */
+    Q_PROPERTY(QString service READ service NOTIFY changed)
     Q_PROPERTY(QString identity READ identity NOTIFY changed)
     Q_PROPERTY(QString iconName READ iconName NOTIFY changed)
     Q_PROPERTY(QString track READ track NOTIFY changed)
@@ -39,6 +41,7 @@ public:
     explicit MediaController(QObject* parent = nullptr);
 
     bool hasPlayer() const { return players.contains(current); }
+    QString service() const { return hasPlayer() ? current : QString(); }
     QString identity() const;
     QString iconName() const;
     QString track() const;
@@ -56,6 +59,8 @@ public:
     Q_INVOKABLE void previous();
     Q_INVOKABLE void playPause();
     Q_INVOKABLE void next();
+    /* Pauses every player that plays, except `except` (a bus name). */
+    Q_INVOKABLE void pauseOthers(const QString& except);
     /* Moves the track to `milliseconds` from its start. */
     Q_INVOKABLE void setPosition(double milliseconds);
 

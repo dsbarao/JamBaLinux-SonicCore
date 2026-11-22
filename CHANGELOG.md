@@ -19,7 +19,15 @@
 - one copy of the app per user: opening it again shows the running window;
   without a tray (GNOME without AppIndicator) closing quits and it does not
   start at login;
-- every helper process ends with the app, even when it is killed.
+- every helper process ends with the app, even when it is killed;
+- internet radio in *Tocando agora*: styles mapped to Radio Browser tags,
+  working stations best voted first (optionally Brazil only), next/previous
+  station, automatic skip of stations that do not answer, favorites as
+  memory keys, the song title read from the stream (ICY), a tuner dial in the
+  Hi-Fi theme, and the radio published as an MPRIS player so media keys and
+  the desktop's controls drive it;
+- the system volume moves above "Ganho"; *Tocando agora* gets a seek bar;
+  level marks beside the equalizer bands with Plasma's controls.
 
 ## 0.2.0 — unreleased
 

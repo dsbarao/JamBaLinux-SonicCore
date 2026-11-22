@@ -14,6 +14,8 @@
 #include "dbushelpers.h"
 #include "executable.h"
 #include "media.h"
+#include "radio.h"
+#include "radiompris.h"
 #include "volume.h"
 
 #include <QApplication>
@@ -83,6 +85,18 @@ int main(int argc, char** argv)
     /* The effects read the colors the OpenRGB plugin publishes in a small
        local file. */
     qputenv("QML_XHR_ALLOW_FILE_READ", "1");
+    /* The radio plays through PipeWire's PulseAudio layer, like most apps:
+       Qt's native PipeWire output pins the stream to one device, so it
+       could not be moved through the equalizer and the 3D sound. Its
+       streams are named after the app in the desktop's lists. */
+    if(qEnvironmentVariableIsEmpty("QT_AUDIO_BACKEND"))
+    {
+        qputenv("QT_AUDIO_BACKEND", "pulseaudio");
+    }
+    if(qEnvironmentVariableIsEmpty("PULSE_PROP"))
+    {
+        qputenv("PULSE_PROP", "application.name='JamBaLinux Sonic Core' application.icon_name='jambalinux-soniccore'");
+    }
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("jambalinux-soniccore"));
@@ -184,10 +198,16 @@ int main(int argc, char** argv)
     qmlRegisterType<ServiceWatcher>(URI, 1, 0, "ServiceWatcher");
     qmlRegisterType<MediaController>(URI, 1, 0, "MediaController");
     qmlRegisterType<OutputVolume>(URI, 1, 0, "OutputVolume");
+    qmlRegisterType<RadioDirectory>(URI, 1, 0, "RadioDirectory");
+    qmlRegisterType<RadioTitle>(URI, 1, 0, "RadioTitle");
     qmlRegisterUncreatableType<DBusReply>(URI, 1, 0, "DBusReply", QStringLiteral("returned by SessionBus.asyncCall"));
     SessionBus sessionBus;
     qmlRegisterSingletonInstance(URI, 1, 0, "SessionBus", &sessionBus);
     qmlRegisterSingletonInstance(URI, 1, 0, "App", &info);
+    /* The radio's media-player face; "raise" from a panel shows the window. */
+    RadioMpris radioMpris;
+    QObject::connect(&radioMpris, &RadioMpris::raiseRequested, &info, &AppInfo::activateRequested);
+    qmlRegisterSingletonInstance(URI, 1, 0, "RadioPlayer", &radioMpris);
 
     /* A tray may appear a little after login (the panel starts late). */
     QTimer trayCheck;

@@ -184,9 +184,9 @@ tools/install-user.sh
 
 | Distribution | Dependencies |
 | --- | --- |
-| Arch, CachyOS, Manjaro (any desktop) | `sudo pacman -S --needed rustup base-devel qt6-base qt6-declarative qt6-svg qt6-wayland kirigami qqc2-desktop-style libpulse` then `rustup default stable` |
-| Fedora 41+ (Workstation/GNOME, KDE, Cinnamon spins) | `sudo dnf install cargo gcc-c++ make qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg qt6-qtwayland kf6-kirigami kf6-qqc2-desktop-style pulseaudio-utils` |
-| Debian 13, Ubuntu 25.04+ | Qt 6 and Kirigami 6 from the distribution (`qt6-base-dev`, `qt6-declarative-dev`, the `qml6-module-*` packages for QtQuick Controls, Layouts, Effects, Shapes, QtCore, Qt.labs.platform and `org.kde.kirigami`), `build-essential`, `pulseaudio-utils`, and Rust from [rustup](https://rustup.rs) (the packaged cargo is older than 1.88). Package names can vary between releases. |
+| Arch, CachyOS, Manjaro (any desktop) | `sudo pacman -S --needed rustup base-devel qt6-base qt6-declarative qt6-svg qt6-wayland qt6-multimedia qt6-multimedia-ffmpeg kirigami qqc2-desktop-style libpulse` then `rustup default stable` |
+| Fedora 41+ (Workstation/GNOME, KDE, Cinnamon spins) | `sudo dnf install cargo gcc-c++ make qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg qt6-qtwayland qt6-qtmultimedia kf6-kirigami kf6-qqc2-desktop-style pulseaudio-utils` |
+| Debian 13, Ubuntu 25.04+ | Qt 6 and Kirigami 6 from the distribution (`qt6-base-dev`, `qt6-declarative-dev`, the `qml6-module-*` packages for QtQuick Controls, Layouts, Effects, Shapes, QtCore, Qt.labs.platform, QtMultimedia and `org.kde.kirigami`), `build-essential`, `pulseaudio-utils`, and Rust from [rustup](https://rustup.rs) (the packaged cargo is older than 1.88). Package names can vary between releases. |
 | **Ubuntu 24.04, Pop!_OS 24.04 (COSMIC), Linux Mint 22 (Cinnamon)** | Their Qt is 6.4, too old for the app: install the app as a **Flatpak** (below). `sudo apt install flatpak build-essential pulseaudio-utils`, Rust from [rustup](https://rustup.rs). |
 
 On Ubuntu 24.04 and the distributions built on it, install the core and the
@@ -204,6 +204,17 @@ through `flatpak-spawn`.
 
 The installer does not install the privileged udev rule (see above) and does
 not restart the desktop.
+
+**Rádio.** *Tocando agora* also plays internet radio: pick a style (Rock,
+Heavy Metal, Synthwave, Anos 80, Lo-fi, MPB, …) and change stations with the
+previous/next buttons; ♥ keeps a station, and the first six favorites become
+memory keys. Stations come from [Radio Browser](https://www.radio-browser.info),
+a free community catalog (only working stations, best voted first, Brazil
+only with **BR**); the song title is read from the station's own stream. While
+it is on, the radio is a media player of the desktop (MPRIS), so the
+keyboard's media keys and the desktop's media controls work with it, and it
+goes through the equalizer and 3D like any app. The app contacts the internet
+only while the radio is on, and does not report "clicks" to the catalog.
 
 **Desktop notes.** Plasma, COSMIC, Cinnamon, MATE and Xfce show the battery
 in the tray. GNOME shows tray icons only with the *AppIndicator and
