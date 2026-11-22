@@ -16,7 +16,7 @@ static constexpr unsigned int LOG_LEVEL_ERROR   = 1;
 static constexpr unsigned int LOG_LEVEL_WARNING = 2;
 static constexpr unsigned int LOG_LEVEL_INFO    = 3;
 
-static const char* const PLUGIN_NAME = "JamBaLinux SonicCore";
+static const char* const PLUGIN_NAME = "JamBaLinux Sonic Core";
 
 /*---------------------------------------------------------*\
 | Virtual controller callbacks. OpenRGB releases the       |
@@ -77,7 +77,7 @@ OpenRGBPluginInfo JamBaLinuxPlugin::GetPluginInfo()
 {
     OpenRGBPluginInfo info;
     info.Name            = PLUGIN_NAME;
-    info.Description     = "JBL Quantum 810 Wireless lighting through the JamBaLinux SonicCore CLI";
+    info.Description     = "JBL Quantum 810 Wireless lighting through the JamBaLinux Sonic Core CLI";
     info.Version         = "0.1.0";
     info.Commit          = "";
     info.URL             = "https://github.com/dsbarao/JamBaLinux-SonicCore";
@@ -107,7 +107,7 @@ void JamBaLinuxPlugin::Load(OpenRGBPluginAPIInterface* plugin_api_ptr)
     if(soniccore.empty())
     {
         status_text = "soniccore não foi encontrado em $CARGO_HOME/bin, ~/.cargo/bin ou no PATH. "
-                      "Instale o JamBaLinux SonicCore com tools/install-user.sh.";
+                      "Instale o JamBaLinux Sonic Core com tools/install-user.sh.";
         Log(LOG_LEVEL_ERROR, "soniccore not found; the headset is not registered");
         return;
     }
@@ -123,7 +123,7 @@ void JamBaLinuxPlugin::Load(OpenRGBPluginAPIInterface* plugin_api_ptr)
     RGBController_Setup setup{};
     setup.name          = "JBL Quantum 810 Wireless";
     setup.vendor        = "JBL";
-    setup.description   = "Headset lighting through JamBaLinux SonicCore";
+    setup.description   = "Headset lighting through JamBaLinux Sonic Core";
     setup.location      = "soniccore: " + soniccore;
     setup.version       = "";
     setup.serial        = "";
@@ -243,7 +243,7 @@ void JamBaLinuxPlugin::MirrorExternalChange(const CachedLighting& cached)
 QWidget* JamBaLinuxPlugin::GetWidget()
 {
     QLabel* label = new QLabel(QString::fromStdString(
-        "<b>JamBaLinux SonicCore</b><br>" + status_text +
+        "<b>JamBaLinux Sonic Core</b><br>" + status_text +
         "<br><br>Logo e anel têm 5 LEDs cada. As cores são enviadas pela CLI soniccore, "
         "no máximo uma escrita a cada 150 ms; efeitos rápidos do OpenRGB são "
         "reduzidos a essa taxa."));

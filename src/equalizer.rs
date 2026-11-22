@@ -157,6 +157,10 @@ pub struct EqualizerProfile {
     /// the equalizer cannot push the signal past full scale.
     #[serde(default)]
     pub preamp_auto: bool,
+    /// "Volume equilibrado": loud passages turned down towards a steady
+    /// loudness (night mode). Independent of the bands and of "som natural".
+    #[serde(default)]
+    pub night: bool,
 }
 
 impl EqualizerProfile {
@@ -225,6 +229,7 @@ impl Default for EqualizerProfile {
             bypassed: false,
             preamp_db: 0.0,
             preamp_auto: false,
+            night: false,
         }
     }
 }
@@ -384,6 +389,7 @@ fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile,
             bypassed: false,
             preamp_db: 0.0,
             preamp_auto: false,
+            night: false,
         },
         // Schema 1 had no named profiles, so bands that match no factory preset
         // become the one custom profile the migrated file selects.
@@ -401,6 +407,7 @@ fn migrate_schema_one(mut profile: EqualizerProfile) -> Result<EqualizerProfile,
                 bypassed: false,
                 preamp_db: 0.0,
                 preamp_auto: false,
+                night: false,
             }
         }
     };

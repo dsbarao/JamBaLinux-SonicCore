@@ -317,6 +317,58 @@ std::optional<LightingState> ReadCachedLighting(const std::string& program)
     return cached->state;
 }
 
+static std::string RequestedLightingPath()
+{
+    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+    if(runtime == nullptr || runtime[0] != '/')
+    {
+        return std::string();
+    }
+    return std::string(runtime) + "/jambalinux-soniccore-openrgb.json";
+}
+
+void PublishRequestedLighting(const LightingState& state)
+{
+    const std::string path = RequestedLightingPath();
+    if(path.empty())
+    {
+        return;
+    }
+    QJsonArray colors;
+    for(uint32_t color : state.colors)
+    {
+        colors.append(QString::fromStdString(ColorHex(color)));
+    }
+    QJsonObject object;
+    object["schema"] = 1;
+    object["off"]    = state.mode == MODE_OFF;
+    object["colors"] = colors;
+    const QByteArray text = QJsonDocument(object).toJson(QJsonDocument::Compact);
+
+    /* Written aside and renamed, so a reader never sees half a file. */
+    const std::string temporary = path + ".tmp";
+    int fd = open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if(fd < 0)
+    {
+        return;
+    }
+    bool written = write(fd, text.constData(), text.size()) == text.size();
+    written = close(fd) == 0 && written;
+    if(!written || rename(temporary.c_str(), path.c_str()) != 0)
+    {
+        unlink(temporary.c_str());
+    }
+}
+
+void ClearRequestedLighting()
+{
+    const std::string path = RequestedLightingPath();
+    if(!path.empty())
+    {
+        unlink(path.c_str());
+    }
+}
+
 LightingWriter::LightingWriter(std::string program, std::optional<LightingState> applied, Logger log)
     : program(std::move(program)), applied(std::move(applied)), log(std::move(log))
 {
@@ -334,6 +386,7 @@ LightingWriter::~LightingWriter()
     {
         worker.join();
     }
+    ClearRequestedLighting();
 }
 
 void LightingWriter::Request(const LightingState& state)
@@ -385,6 +438,9 @@ void LightingWriter::Run()
             known = applied;
             busy = true;
         }
+
+        /* Before the device write, which fails while the headset is off. */
+        PublishRequestedLighting(desired);
 
         bool ok   = true;
         bool held = false;

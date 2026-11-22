@@ -123,6 +123,8 @@ struct PulseInput {
     stream_key: String,
     node_name: String,
     media_name: String,
+    /// The application, as the per-application 3D choice names it.
+    app: String,
 }
 
 /// An ordered, side-effect-free description of a routing update.  Keeping
@@ -1247,17 +1249,48 @@ fn applied_preamp(node: &Value) -> Option<f32> {
     Some(preamp)
 }
 
-/// Every live gain the DSP runs, in dB: the ten bands, then the input gain.
+/// Every numeric live control of the graph, by name.
+fn live_controls(node: &Value) -> Option<HashMap<String, f64>> {
+    let props_values = node.get("info")?.get("params")?.get("Props")?.as_array()?;
+    let mut controls = HashMap::new();
+    for object in props_values {
+        let Some(params) = object.get("params").and_then(Value::as_array) else {
+            continue;
+        };
+        let (pairs, _) = params.as_chunks::<2>();
+        for pair in pairs {
+            if let (Some(key), Some(value)) = (pair[0].as_str(), pair[1].as_f64()) {
+                controls.insert(key.to_owned(), value);
+            }
+        }
+    }
+    Some(controls)
+}
+
+/// Every live value the DSP runs: the ten bands and the input gain in dB,
+/// then the levelled share. A graph without a control (started before it
+/// existed) runs it at 0 dB / off. `None` when the right channel's copy of
+/// a control disagrees with the left one.
 fn graph_applied_gains(nodes: &[Value], node_id: u32) -> Option<Vec<f32>> {
     let node = nodes
         .iter()
         .find(|node| node.get("id").and_then(Value::as_u64) == Some(u64::from(node_id)))?;
+    let controls = live_controls(node)?;
     let mut gains = applied_bands(node)?
         .into_iter()
         .map(|band| band.gain_db)
         .collect::<Vec<_>>();
     gains.push(applied_preamp(node)?);
-    Some(gains)
+    gains.push(controls.get(NIGHT_CONTROL).copied().unwrap_or(0.0) as f32);
+    let right_matches = controls.iter().all(|(key, value)| {
+        let Some(left) = key.strip_prefix(RIGHT_PREFIX) else {
+            return true;
+        };
+        controls
+            .get(left)
+            .is_none_or(|left_value| (left_value - value).abs() <= 1e-3)
+    });
+    right_matches.then_some(gains)
 }
 
 fn profile_matches(applied: &[f32], expected: &EqualizerProfile) -> bool {
@@ -1285,38 +1318,74 @@ fn render(profile: &EqualizerProfile, target: &str) -> String {
     // the "- bandpass" comes through an invert node.
     // The input is a mixer too, so the input gain ("Ganho") is one more
     // linear factor changed live.
-    let mut nodes = format!(
-        "                    {{ type = builtin name = eq_in label = mixer control = {{ \"Gain 1\" = {:.4} }} }}\n",
-        band_factor(profile.dsp_preamp_db())
-    );
+    //
+    // Both channels are written out (left: `eq_*`, right: `r_eq_*`, set to
+    // the same values) so the "Volume equilibrado" stage after them measures
+    // the stereo signal as one and turns both sides down together.
+    let mut nodes = String::new();
     let mut links = String::new();
-    let mut previous = "eq_in:Out".to_owned();
-    for (index, band) in profile.dsp_bands().iter().enumerate() {
-        nodes.push_str(&format!(
-            "                    {{ type = builtin name = eq_bp_{index} label = bq_bandpass control = {{ \"Freq\" = {:.1} \"Q\" = 1.0 }} }}\n",
-            band.frequency_hz
+    let link = |links: &mut String, output: &str, input: &str| {
+        links.push_str(&format!(
+            "                    {{ output = \"{output}\" input = \"{input}\" }}\n"
         ));
+    };
+    for side in ["", RIGHT_PREFIX] {
         nodes.push_str(&format!(
-            "                    {{ type = builtin name = eq_inv_{index} label = invert }}\n"
+            "                    {{ type = builtin name = {side}eq_in label = mixer control = {{ \"Gain 1\" = {:.4} }} }}\n",
+            band_factor(profile.dsp_preamp_db())
         ));
-        nodes.push_str(&format!(
-            "                    {{ type = builtin name = eq_band_{index} label = mixer control = {{ \"Gain 1\" = 1.0 \"Gain 2\" = {:.4} \"Gain 3\" = 1.0 }} }}\n",
-            band_factor(band.gain_db)
-        ));
-        for (output, input) in [
-            (previous.clone(), format!("eq_bp_{index}:In")),
-            (previous.clone(), format!("eq_band_{index}:In 1")),
-            (format!("eq_bp_{index}:Out"), format!("eq_band_{index}:In 2")),
-            (format!("eq_bp_{index}:Out"), format!("eq_inv_{index}:In")),
-            (format!("eq_inv_{index}:Out"), format!("eq_band_{index}:In 3")),
-        ] {
-            links.push_str(&format!(
-                "                    {{ output = \"{output}\" input = \"{input}\" }}\n"
+        let mut previous = format!("{side}eq_in:Out");
+        for (index, band) in profile.dsp_bands().iter().enumerate() {
+            nodes.push_str(&format!(
+                "                    {{ type = builtin name = {side}eq_bp_{index} label = bq_bandpass control = {{ \"Freq\" = {:.1} \"Q\" = 1.0 }} }}\n",
+                band.frequency_hz
             ));
+            nodes.push_str(&format!(
+                "                    {{ type = builtin name = {side}eq_inv_{index} label = invert }}\n"
+            ));
+            nodes.push_str(&format!(
+                "                    {{ type = builtin name = {side}eq_band_{index} label = mixer control = {{ \"Gain 1\" = 1.0 \"Gain 2\" = {:.4} \"Gain 3\" = 1.0 }} }}\n",
+                band_factor(band.gain_db)
+            ));
+            link(&mut links, &previous, &format!("{side}eq_bp_{index}:In"));
+            link(&mut links, &previous, &format!("{side}eq_band_{index}:In 1"));
+            link(&mut links, &format!("{side}eq_bp_{index}:Out"), &format!("{side}eq_band_{index}:In 2"));
+            link(&mut links, &format!("{side}eq_bp_{index}:Out"), &format!("{side}eq_inv_{index}:In"));
+            link(&mut links, &format!("{side}eq_inv_{index}:Out"), &format!("{side}eq_band_{index}:In 3"));
+            previous = format!("{side}eq_band_{index}:Out");
         }
-        previous = format!("eq_band_{index}:Out");
     }
+    // "Volume equilibrado": the EBU R128 momentary loudness of both channels
+    // becomes one gain that only ever turns loud passages down towards
+    // NIGHT_TARGET_LUFS (capped at unity, so nothing ever plays louder than
+    // it came in), applied to both sides. A mixer per side fades between
+    // the plain and the levelled sound, so switching it is live and smooth.
     let last = BANDS_HZ.len() - 1;
+    let night = night_amount(profile);
+    nodes.push_str("                    { type = ebur128 name = night_meter label = ebur128 }\n");
+    nodes.push_str(&format!(
+        "                    {{ type = ebur128 name = night_lufs label = lufs2gain control = {{ \"Target LUFS\" = {NIGHT_TARGET_LUFS:.1} }} }}\n"
+    ));
+    nodes.push_str(&format!(
+        "                    {{ type = builtin name = night_limit label = clamp control = {{ \"Min\" = {NIGHT_MIN_GAIN} \"Max\" = 1.0 }} }}\n"
+    ));
+    link(&mut links, &format!("eq_band_{last}:Out"), "night_meter:In FL");
+    link(&mut links, &format!("{RIGHT_PREFIX}eq_band_{last}:Out"), "night_meter:In FR");
+    link(&mut links, "night_meter:Momentary LUFS", "night_lufs:LUFS");
+    link(&mut links, "night_lufs:Gain", "night_limit:Control");
+    for (side, channel) in [("", "FL"), (RIGHT_PREFIX, "FR")] {
+        nodes.push_str(&format!(
+            "                    {{ type = builtin name = {side}night_gain label = linear control = {{ \"Mult\" = 1.0 \"Add\" = 0.0 }} }}\n"
+        ));
+        nodes.push_str(&format!(
+            "                    {{ type = builtin name = {side}night_mix label = mixer control = {{ \"Gain 1\" = {:.4} \"Gain 2\" = {night:.4} }} }}\n",
+            1.0 - night
+        ));
+        link(&mut links, &format!("night_meter:Out {channel}"), &format!("{side}night_gain:In"));
+        link(&mut links, "night_limit:Notify", &format!("{side}night_gain:Mult"));
+        link(&mut links, &format!("night_meter:Out {channel}"), &format!("{side}night_mix:In 1"));
+        link(&mut links, &format!("{side}night_gain:Out"), &format!("{side}night_mix:In 2"));
+    }
     let base = r#"context.properties = { log.level = 0 }
 context.spa-libs = {
     audio.convert.* = audioconvert/libspa-audioconvert
@@ -1324,7 +1393,7 @@ context.spa-libs = {
 }
 "#;
     let filter = format!(
-        "# Generated by JamBaLinux SonicCore. Do not edit while the equalizer is active.\n# Ten bands (fixed Q=1.0 band-passes scaled by a mixer) are an initial approximation, not QuantumENGINE parity.\ncontext.modules = [\n    {{ name = libpipewire-module-filter-chain\n        args = {{\n            node.description = \"JamBaLinux Game Equalizer\"\n            media.name = \"JamBaLinux Game Equalizer\"\n            filter.graph = {{\n                nodes = [\n{nodes}                ]\n                links = [\n{links}                ]\n                inputs = [ \"eq_in:In 1\" ]\n                outputs = [ \"eq_band_{last}:Out\" ]\n            }}\n            audio.channels = 2\n            audio.position = [ FL FR ]\n            capture.props = {{\n                node.name = \"{VIRTUAL_SINK}\"\n                node.description = \"JamBaLinux Game Equalizer\"\n                media.class = Audio/Sink\n                node.virtual = true\n                priority.session = 0\n                priority.driver = 0\n            }}\n            playback.props = {{\n                node.name = \"{OUTPUT_NODE}\"\n                node.passive = true\n                target.object = \"{}\"\n            }}\n        }}\n    }}\n]\n",
+        "# Generated by JamBaLinux SonicCore. Do not edit while the equalizer is active.\n# Ten bands (fixed Q=1.0 band-passes scaled by a mixer) are an initial approximation, not QuantumENGINE parity.\ncontext.modules = [\n    {{ name = libpipewire-module-filter-chain\n        args = {{\n            node.description = \"JamBaLinux Game Equalizer\"\n            media.name = \"JamBaLinux Game Equalizer\"\n            filter.graph = {{\n                nodes = [\n{nodes}                ]\n                links = [\n{links}                ]\n                inputs = [ \"eq_in:In 1\" \"r_eq_in:In 1\" ]\n                outputs = [ \"night_mix:Out\" \"r_night_mix:Out\" ]\n            }}\n            audio.channels = 2\n            audio.position = [ FL FR ]\n            capture.props = {{\n                node.name = \"{VIRTUAL_SINK}\"\n                node.description = \"JamBaLinux Game Equalizer\"\n                media.class = Audio/Sink\n                node.virtual = true\n                priority.session = 0\n                priority.driver = 0\n            }}\n            playback.props = {{\n                node.name = \"{OUTPUT_NODE}\"\n                node.passive = true\n                target.object = \"{}\"\n            }}\n        }}\n    }}\n]\n",
         pipewire_string(target)
     );
     let filter = filter.replacen(
@@ -1397,9 +1466,73 @@ fn pulse_inputs(value: &Value) -> Result<Vec<PulseInput>, String> {
                 stream_key,
                 node_name: property("node.name").to_owned(),
                 media_name: property("media.name").to_owned(),
+                app: stream_app_name(properties),
             })
         })
         .collect()
+}
+
+/// A stream playing now, as the per-application 3D list shows it.
+pub(crate) struct PlayingStream {
+    pub app: String,
+    pub icon: Option<String>,
+    pub route: &'static str,
+}
+
+/// Every application stream playing now (not SonicCore's own outputs).
+pub(crate) fn playing_streams() -> Result<Vec<PlayingStream>, String> {
+    let sinks = pulse_sinks(&pactl_json(&["list", "sinks"])?)?;
+    let value = pactl_json(&["list", "sink-inputs"])?;
+    let inputs = pulse_inputs(&value)?;
+    let sink_name = |serial: u64| {
+        sinks
+            .iter()
+            .find(|sink| sink.object_serial == serial)
+            .map(|sink| sink.name.as_str())
+    };
+    let icons = value
+        .as_array()
+        .map(|array| {
+            array
+                .iter()
+                .map(|input| {
+                    input
+                        .get("properties")
+                        .and_then(|properties| properties.get("application.icon_name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(inputs
+        .into_iter()
+        .zip(icons.into_iter().chain(std::iter::repeat(None)))
+        .filter(|(input, _)| {
+            !is_equalizer_output(input) && !is_spatial_output(input) && !input.app.is_empty()
+        })
+        .map(|(input, icon)| PlayingStream {
+            route: match sink_name(input.sink_serial) {
+                Some(name) if name == SPATIAL_SINK_NODE => "spatial",
+                Some(name) if name == VIRTUAL_SINK => "equalizer",
+                _ => "other",
+            },
+            app: input.app,
+            icon,
+        })
+        .collect())
+}
+
+/// The name a stream's application goes by: its declared name, else its
+/// program, else its node.
+pub(crate) fn stream_app_name(properties: &Map<String, Value>) -> String {
+    ["application.name", "application.process.binary", "node.name"]
+        .into_iter()
+        .filter_map(|name| properties.get(name).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn pulse_game_sink(value: &Value) -> Result<PulseSink, String> {
@@ -1699,11 +1832,24 @@ fn plan_default_recovery(
     Ok((RoutePlan { state, actions }, default.to_owned()))
 }
 
+#[cfg(test)]
 fn plan_route_iteration(
     sinks: &[PulseSink],
     inputs: &[PulseInput],
     game: &PulseSink,
+    state: BackendState,
+) -> Result<RoutePlan, String> {
+    plan_route_iteration_for_apps(sinks, inputs, game, state, &HashSet::new())
+}
+
+/// Plans one routing pass. Applications in `flat_apps` had their 3D turned
+/// off: they go through the equalizer only, never the spatial graph.
+fn plan_route_iteration_for_apps(
+    sinks: &[PulseSink],
+    inputs: &[PulseInput],
+    game: &PulseSink,
     mut state: BackendState,
+    flat_apps: &HashSet<String>,
 ) -> Result<RoutePlan, String> {
     let mut actions = Vec::new();
     let mut changed = false;
@@ -1831,15 +1977,30 @@ fn plan_route_iteration(
         let registered = state.routed_streams.iter().any(|route| {
             route.object_serial == input.object_serial && route.stream_key == input.stream_key
         });
+        // 3D turned off for this application: the equalizer alone.
+        let destination = if flat_apps.contains(&input.app) {
+            &virtual_sink
+        } else {
+            processing_sink
+        };
         if registered {
             if registered_route_needs_promotion(
                 input.sink_serial,
                 virtual_sink.object_serial,
-                processing_sink.object_serial,
+                destination.object_serial,
             ) {
                 actions.push(RouteAction::MoveSinkInput {
                     input_serial: input.object_serial,
-                    sink_name: processing_sink.name.clone(),
+                    sink_name: destination.name.clone(),
+                });
+                changed = true;
+            } else if spatial_sink_serial == Some(input.sink_serial)
+                && destination.object_serial == virtual_sink.object_serial
+            {
+                // 3D turned off while the application plays.
+                actions.push(RouteAction::MoveSinkInput {
+                    input_serial: input.object_serial,
+                    sink_name: virtual_sink.name.clone(),
                 });
                 changed = true;
             }
@@ -1864,7 +2025,7 @@ fn plan_route_iteration(
         actions.push(RouteAction::PersistState(state.clone()));
         actions.push(RouteAction::MoveSinkInput {
             input_serial: input.object_serial,
-            sink_name: processing_sink.name.clone(),
+            sink_name: destination.name.clone(),
         });
         changed = true;
     }
@@ -1905,7 +2066,10 @@ fn run_route_iteration() -> Result<(), String> {
     }
     let game = pulse_game_sink(&sinks_value)?;
     let inputs = pulse_inputs(&pactl_json(&["list", "sink-inputs"])?)?;
-    execute_route_plan(plan_route_iteration(&sinks, &inputs, &game, state)?)
+    let flat_apps = crate::spatial_apps::flat_apps();
+    execute_route_plan(plan_route_iteration_for_apps(
+        &sinks, &inputs, &game, state, &flat_apps,
+    )?)
 }
 
 fn record_route_error(error: &str) -> Result<(), String> {
@@ -1933,23 +2097,47 @@ fn band_factor(gain_db: f32) -> f32 {
 
 /// The live control of the input gain, after the ten band controls.
 const PREAMP_CONTROL: &str = "eq_in:Gain 1";
-/// Gains the DSP runs: ten bands and the input gain.
-const DSP_GAINS: usize = BANDS_HZ.len() + 1;
+/// The share of the levelled sound ("Volume equilibrado"), 0 to 1.
+const NIGHT_CONTROL: &str = "night_mix:Gain 2";
+/// The right channel's copies of every control carry this prefix.
+const RIGHT_PREFIX: &str = "r_";
+/// Values the DSP runs: ten bands and the input gain in dB, then the
+/// levelled share.
+const DSP_GAINS: usize = BANDS_HZ.len() + 2;
+const PREAMP_INDEX: usize = BANDS_HZ.len();
+const NIGHT_INDEX: usize = BANDS_HZ.len() + 1;
+/// EBU R128 broadcast loudness: dialogue sits about here, explosions and
+/// loud music are turned down to it.
+const NIGHT_TARGET_LUFS: f32 = -23.0;
+/// The most a loud passage is turned down (-20 dB).
+const NIGHT_MIN_GAIN: f32 = 0.1;
+
+fn night_amount(profile: &EqualizerProfile) -> f32 {
+    if profile.night { 1.0 } else { 0.0 }
+}
 
 fn gain_payload(gains: &[f32]) -> String {
-    let values = gains
-        .iter()
-        .enumerate()
-        .map(|(index, gain)| {
-            if index < BANDS_HZ.len() {
-                format!("\"eq_band_{index}:Gain 2\" {:.4}", band_factor(*gain))
-            } else {
-                format!("\"{PREAMP_CONTROL}\" {:.4}", band_factor(*gain))
+    let mut values = Vec::new();
+    for (index, gain) in gains.iter().enumerate() {
+        for side in ["", RIGHT_PREFIX] {
+            match index {
+                PREAMP_INDEX => values.push(format!(
+                    "\"{side}{PREAMP_CONTROL}\" {:.4}",
+                    band_factor(*gain)
+                )),
+                NIGHT_INDEX => {
+                    let share = gain.clamp(0.0, 1.0);
+                    values.push(format!("\"{side}night_mix:Gain 1\" {:.4}", 1.0 - share));
+                    values.push(format!("\"{side}{NIGHT_CONTROL}\" {share:.4}"));
+                }
+                _ => values.push(format!(
+                    "\"{side}eq_band_{index}:Gain 2\" {:.4}",
+                    band_factor(*gain)
+                )),
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{{ params = [ {values} ] }}")
+        }
+    }
+    format!("{{ params = [ {} ] }}", values.join(" "))
 }
 
 fn update_controls(node_id: u32, gains: &[f32]) -> Result<(), String> {
@@ -1970,16 +2158,22 @@ fn profile_gains(profile: &EqualizerProfile) -> Vec<f32> {
         .map(|band| band.gain_db)
         .collect::<Vec<_>>();
     gains.push(profile.dsp_preamp_db());
+    gains.push(night_amount(profile));
     gains
 }
 
 /// Steps needed so no band moves more than RAMP_MAX_STEP_DB per audio cycle;
 /// never fewer than RAMP_STEPS, capped so a full-scale reset stays about a second.
+/// Switching the levelled sound fades over about 0.2 s, as a 20 dB move would.
 fn ramp_steps(from: &[f32], to: &[f32]) -> u32 {
     let largest = from
         .iter()
         .zip(to)
-        .map(|(start, end)| (end - start).abs())
+        .enumerate()
+        .map(|(index, (start, end))| {
+            let change = (end - start).abs();
+            if index == NIGHT_INDEX { change * 20.0 } else { change }
+        })
         .fold(0.0_f32, f32::max);
     ((largest / RAMP_MAX_STEP_DB).ceil() as u32).clamp(RAMP_STEPS, RAMP_MAX_STEPS)
 }
@@ -2154,7 +2348,9 @@ pub fn status(profile: &EqualizerProfile) -> Result<Status, String> {
     let applied_gains = virtual_node
         .as_ref()
         .and_then(|node| graph_applied_gains(&nodes, node.id));
-    let applied_preamp_db = applied_gains.as_ref().and_then(|gains| gains.last().copied());
+    let applied_preamp_db = applied_gains
+        .as_ref()
+        .and_then(|gains| gains.get(PREAMP_INDEX).copied());
     let profile_synced = applied_gains
         .as_deref()
         .is_some_and(|gains| profile_matches(gains, profile));
@@ -2580,14 +2776,15 @@ mod tests {
         let mut profile = crate::equalizer::preset_profile("bass-boost").unwrap();
         profile.bypassed = true;
         let graph = render(&profile, "alsa_output.usb_Quantum_Game");
-        // Flat: every band adds its range back at unity.
-        assert_eq!(graph.matches("\"Gain 2\" = 1.0000").count(), 10);
+        // Flat: every band adds its range back at unity, on both sides.
+        assert_eq!(graph.matches("eq_band_0 label = mixer control = { \"Gain 1\" = 1.0 \"Gain 2\" = 1.0000").count(), 2);
+        assert_eq!(graph.matches("\"Gain 3\" = 1.0 }").count(), 20);
         assert!(profile_gains(&profile).iter().all(|gain| *gain == 0.0));
         let saved = profile
             .bands
             .iter()
             .map(|band| band.gain_db)
-            .chain([0.0])
+            .chain([0.0, 0.0])
             .collect::<Vec<_>>();
         assert!(profile_matches(&profile_gains(&profile), &profile));
         assert!(!profile_matches(&saved, &profile));
@@ -2599,15 +2796,17 @@ mod tests {
         profile.preamp_db = -6.0;
         let graph = render(&profile, "alsa_output.usb_Quantum_Game");
         assert!(graph.contains("name = eq_in label = mixer control = { \"Gain 1\" = 0.5012 }"));
-        assert!(graph.contains("inputs = [ \"eq_in:In 1\" ]"));
+        assert!(graph.contains("name = r_eq_in label = mixer control = { \"Gain 1\" = 0.5012 }"));
+        assert!(graph.contains("inputs = [ \"eq_in:In 1\" \"r_eq_in:In 1\" ]"));
         assert!(graph.contains("{ output = \"eq_in:Out\" input = \"eq_bp_0:In\" }"));
 
         let gains = profile_gains(&profile);
         assert_eq!(gains.len(), DSP_GAINS);
-        assert_eq!(gains.last(), Some(&-6.0));
+        assert_eq!(gains[PREAMP_INDEX], -6.0);
         let payload = gain_payload(&gains);
         assert!(payload.contains("\"eq_in:Gain 1\" 0.5012"));
-        assert_eq!(payload.matches("Gain 2").count(), 10);
+        assert!(payload.contains("\"r_eq_in:Gain 1\" 0.5012"));
+        assert_eq!(payload.matches("eq_band_").count(), 20);
 
         let node = serde_json::json!({"info": {"params": {"Props": [{"params": ["eq_in:Gain 1", 0.5012]}]}}});
         assert!((applied_preamp(&node).unwrap() + 6.0).abs() < 0.01);
@@ -2617,18 +2816,70 @@ mod tests {
     }
 
     #[test]
+    fn the_levelled_sound_fades_in_live_and_never_raises_the_level() {
+        let mut profile = EqualizerProfile::default();
+        let graph = render(&profile, "alsa_output.usb_Quantum_Game");
+        // One meter for both channels, one gain for both, capped at unity.
+        assert_eq!(graph.matches("label = ebur128").count(), 1);
+        assert!(graph.contains("{ output = \"eq_band_9:Out\" input = \"night_meter:In FL\" }"));
+        assert!(graph.contains("{ output = \"r_eq_band_9:Out\" input = \"night_meter:In FR\" }"));
+        assert!(graph.contains("label = clamp control = { \"Min\" = 0.1 \"Max\" = 1.0 }"));
+        assert!(graph.contains("{ output = \"night_limit:Notify\" input = \"night_gain:Mult\" }"));
+        assert!(graph.contains("{ output = \"night_limit:Notify\" input = \"r_night_gain:Mult\" }"));
+        // Off: the plain sound only.
+        assert!(graph.contains("name = night_mix label = mixer control = { \"Gain 1\" = 1.0000 \"Gain 2\" = 0.0000 }"));
+
+        profile.night = true;
+        let gains = profile_gains(&profile);
+        assert_eq!(gains[NIGHT_INDEX], 1.0);
+        let payload = gain_payload(&gains);
+        assert!(payload.contains("\"night_mix:Gain 1\" 0.0000"));
+        assert!(payload.contains("\"r_night_mix:Gain 2\" 1.0000"));
+        // Switching fades over several steps instead of jumping.
+        let off = profile_gains(&EqualizerProfile::default());
+        assert!(ramp_steps(&off, &gains) >= 8);
+    }
+
+    #[test]
+    fn a_right_channel_that_disagrees_is_not_a_confirmed_update() {
+        let mut params = vec![Value::from("eq_in:Gain 1"), Value::from(1.0)];
+        for index in 0..10 {
+            for side in ["", "r_"] {
+                params.push(Value::from(format!("{side}eq_band_{index}:Gain 2")));
+                params.push(Value::from(1.0));
+            }
+        }
+        params.push(Value::from(NIGHT_CONTROL));
+        params.push(Value::from(1.0));
+        let node = |params: Vec<Value>| {
+            serde_json::json!({ "id": 7, "info": { "params": { "Props": [ { "params": params } ] } } })
+        };
+        let gains = graph_applied_gains(&[node(params.clone())], 7).unwrap();
+        assert_eq!(gains.len(), DSP_GAINS);
+        assert_eq!(gains[NIGHT_INDEX], 1.0);
+
+        let mut off = params;
+        off.push(Value::from("r_eq_band_3:Gain 2"));
+        off.push(Value::from(2.0));
+        assert_eq!(graph_applied_gains(&[node(off)], 7), None);
+    }
+
+    #[test]
     fn graph_has_ten_approximate_biquads_and_protects_default_priority() {
         let graph = render(&EqualizerProfile::default(), "alsa_output.usb_Quantum_Game");
         // Ten fixed band-passes, each scaled on its mixer (no coefficient
         // changes while a slider moves). The 31 Hz and 16 kHz bands are
         // band-passes too: shelves centred there were inaudible.
-        assert_eq!(graph.matches("label = bq_").count(), 10);
-        assert_eq!(graph.matches("label = bq_bandpass").count(), 10);
-        assert_eq!(graph.matches("label = invert").count(), 10);
-        assert_eq!(graph.matches("label = mixer").count(), 11); // ten bands and the input gain
+        // Both channels are written out: twenty of each.
+        assert_eq!(graph.matches("label = bq_").count(), 20);
+        assert_eq!(graph.matches("label = bq_bandpass").count(), 20);
+        assert_eq!(graph.matches("label = invert").count(), 20);
+        // Ten bands and the input gain per side, and the two night mixers.
+        assert_eq!(graph.matches("label = mixer").count(), 24);
         assert!(!graph.contains("shelf"));
-        assert!(graph.contains("inputs = [ \"eq_in:In 1\" ]"));
-        assert!(graph.contains("outputs = [ \"eq_band_9:Out\" ]"));
+        assert!(graph.contains("inputs = [ \"eq_in:In 1\" \"r_eq_in:In 1\" ]"));
+        assert!(graph.contains("outputs = [ \"night_mix:Out\" \"r_night_mix:Out\" ]"));
+        assert!(graph.contains("output = \"r_eq_band_3:Out\" input = \"r_eq_bp_4:In\""));
         // Each stage feeds the next.
         assert!(graph.contains("output = \"eq_band_3:Out\" input = \"eq_bp_4:In\""));
         assert!(graph.contains("output = \"eq_band_3:Out\" input = \"eq_band_4:In 1\""));
@@ -2726,6 +2977,7 @@ mod tests {
             stream_key: key.into(),
             node_name: "application.output".into(),
             media_name: "Application audio".into(),
+            app: String::new(),
         }
     }
 
@@ -2873,6 +3125,122 @@ mod tests {
             [RouteAction::MoveSinkInput { input_serial: 12, sink_name } , RouteAction::PersistState(_)]
                 if sink_name == SPATIAL_SINK_NODE
         ));
+    }
+
+    fn spatial_ready_sinks() -> (Vec<PulseSink>, PulseSink, PulseInput) {
+        let (mut sinks, game) = routing_sinks();
+        sinks.push(PulseSink {
+            object_serial: 400,
+            name: SPATIAL_SINK_NODE.into(),
+        });
+        let mut spatial_output = playback_input(99, 100, "spatial-output");
+        spatial_output.node_name = SPATIAL_OUTPUT_NODE.into();
+        (sinks, game, spatial_output)
+    }
+
+    fn app_input(serial: u64, sink_serial: u64, key: &str, app: &str) -> PulseInput {
+        PulseInput {
+            app: app.into(),
+            ..playback_input(serial, sink_serial, key)
+        }
+    }
+
+    fn registered(serial: u64, key: &str, game: &PulseSink) -> RoutedStream {
+        RoutedStream {
+            object_serial: serial,
+            stream_key: key.into(),
+            original_sink_name: game.name.clone(),
+            original_sink_serial: game.object_serial,
+        }
+    }
+
+    fn moves(plan: &RoutePlan) -> Vec<(u64, String)> {
+        plan.actions
+            .iter()
+            .filter_map(|action| match action {
+                RouteAction::MoveSinkInput { input_serial, sink_name } => {
+                    Some((*input_serial, sink_name.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_application_without_3d_is_routed_to_the_equalizer_only() {
+        let (sinks, game, spatial_output) = spatial_ready_sinks();
+        let flat = HashSet::from(["Spotify".to_owned()]);
+        let plan = plan_route_iteration_for_apps(
+            &sinks,
+            &[
+                spatial_output,
+                app_input(10, game.object_serial, "music", "Spotify"),
+                app_input(11, game.object_serial, "game", "Cyberpunk"),
+            ],
+            &game,
+            BackendState::default(),
+            &flat,
+        )
+        .unwrap();
+        assert_eq!(
+            moves(&plan),
+            [(10, VIRTUAL_SINK.to_owned()), (11, SPATIAL_SINK_NODE.to_owned())]
+        );
+    }
+
+    #[test]
+    fn turning_3d_off_or_on_moves_a_playing_application() {
+        let (sinks, game, spatial_output) = spatial_ready_sinks();
+        let state = BackendState {
+            routed_streams: vec![registered(10, "music", &game), registered(11, "game", &game)],
+            ..BackendState::default()
+        };
+        // Off while it plays in 3D: back to the equalizer alone.
+        let flat = HashSet::from(["Spotify".to_owned()]);
+        let plan = plan_route_iteration_for_apps(
+            &sinks,
+            &[
+                spatial_output.clone(),
+                app_input(10, 400, "music", "Spotify"),
+                app_input(11, 400, "game", "Cyberpunk"),
+            ],
+            &game,
+            state.clone(),
+            &flat,
+        )
+        .unwrap();
+        assert_eq!(moves(&plan), [(10, VIRTUAL_SINK.to_owned())]);
+
+        // On again: promoted to 3D like any registered stream.
+        let plan = plan_route_iteration_for_apps(
+            &sinks,
+            &[spatial_output, app_input(10, 100, "music", "Spotify")],
+            &game,
+            state,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(moves(&plan), [(10, SPATIAL_SINK_NODE.to_owned())]);
+    }
+
+    #[test]
+    fn the_application_name_falls_back_to_the_program_and_the_node() {
+        let properties = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), Value::from(*value)))
+                .collect::<Map<String, Value>>()
+        };
+        assert_eq!(
+            stream_app_name(&properties(&[("application.name", "Spotify"), ("node.name", "n")])),
+            "Spotify"
+        );
+        assert_eq!(
+            stream_app_name(&properties(&[("application.name", " "), ("application.process.binary", "mpv")])),
+            "mpv"
+        );
+        assert_eq!(stream_app_name(&properties(&[("node.name", "game.exe")])), "game.exe");
+        assert_eq!(stream_app_name(&properties(&[])), "");
     }
 
     #[test]
@@ -3155,6 +3523,7 @@ mod tests {
             stream_key: format!("spatial-{serial}"),
             node_name: SPATIAL_OUTPUT_NODE.into(),
             media_name: "JamBaLinux Game Spatial".into(),
+            app: String::new(),
         };
 
         assert!(!spatial_output_connected(&[], 100));
@@ -3228,12 +3597,13 @@ mod tests {
 
     #[test]
     fn one_control_payload_contains_all_ten_bands() {
-        let payload = gain_payload(&[0.0; 10]);
-        assert_eq!(payload.matches(":Gain 2").count(), 10);
+        let payload = gain_payload(&[0.0; DSP_GAINS]);
+        assert_eq!(payload.matches("eq_band_").count(), 20);
         assert!(payload.starts_with("{ params = ["));
         assert!(payload.contains("\"eq_band_9:Gain 2\" 1.0000"));
+        assert!(payload.contains("\"r_eq_band_9:Gain 2\" 1.0000"));
         // +6 dB is twice the band, -6 dB half.
-        let lifted = gain_payload(&[6.0206, -6.0206, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let lifted = gain_payload(&[6.0206, -6.0206, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert!(lifted.contains("\"eq_band_0:Gain 2\" 2.0000"), "{lifted}");
         assert!(lifted.contains("\"eq_band_1:Gain 2\" 0.5000"), "{lifted}");
     }
@@ -3246,6 +3616,7 @@ mod tests {
             stream_key: "key".into(),
             node_name: OUTPUT_NODE.into(),
             media_name: "JamBaLinux Game Equalizer".into(),
+            app: String::new(),
         };
         assert!(is_equalizer_output(&input));
     }
@@ -3258,6 +3629,7 @@ mod tests {
             stream_key: "key".into(),
             node_name: SPATIAL_OUTPUT_NODE.into(),
             media_name: "JamBaLinux Game Spatial".into(),
+            app: String::new(),
         };
         assert!(is_spatial_output(&input));
 

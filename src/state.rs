@@ -48,6 +48,12 @@ pub struct RuntimeState {
     pub ring_speed: Option<String>,
     pub battery_percent: Option<u8>,
     pub charging: Option<bool>,
+    /// `charging` was inferred from the battery rising while the headset is
+    /// not on this computer's USB (a wall charger or a power-only cable).
+    pub charging_inferred: Option<bool>,
+    /// Consecutive battery readings that went up, and when the last did.
+    pub battery_rises: Option<u8>,
+    pub battery_rose_at_ms: Option<u128>,
     pub game_chat_value: Option<u8>,
     pub bluetooth: Option<String>,
     pub sidetone_level: Option<String>,
@@ -150,8 +156,21 @@ impl RuntimeState {
             [0x07, value @ 0x00..=0x01] => {
                 replace_if_changed(&mut self.lighting_enabled, *value == 1)
             }
-            [0x08, value @ 0x00..=0x64] => replace_if_changed(&mut self.battery_percent, *value),
+            [0x08, value @ 0x00..=0x64] => {
+                let previous = self.battery_percent;
+                let changed = replace_if_changed(&mut self.battery_percent, *value);
+                if changed && let Some(previous) = previous {
+                    self.follow_battery_trend(previous, *value, now_ms());
+                }
+                changed
+            }
             [0x09, value @ 0x00..=0x01] => {
+                // Off, the headset sends no battery: the trend starts over
+                // (a level gained while off is not a charger seen live).
+                if *value == 0 {
+                    self.battery_rises = Some(0);
+                    self.battery_rose_at_ms = None;
+                }
                 replace_if_changed(&mut self.headset_connected, *value == 1)
             }
             [0x10, value @ 0x00..=0x10] => replace_if_changed(&mut self.game_chat_value, *value),
@@ -164,10 +183,67 @@ impl RuntimeState {
     }
 
     pub fn touch(&mut self) {
-        self.updated_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_millis());
+        self.updated_at_ms = now_ms();
     }
+
+    /// Charging without this computer's USB is seen only in the battery:
+    /// two readings in a row going up (one may be a reading settling after
+    /// the lights turned off) mean a charger; a reading going down, or a
+    /// full battery, ends it.
+    fn follow_battery_trend(&mut self, previous: u8, current: u8, now: u128) {
+        if current > previous {
+            // A rise long after the last one starts a new count.
+            let recent = self
+                .battery_rose_at_ms
+                .is_some_and(|rose| now.saturating_sub(rose) <= INFERRED_CHARGING_TIMEOUT_MS);
+            let rises = if recent { self.battery_rises.unwrap_or(0) } else { 0 }.saturating_add(1);
+            self.battery_rises = Some(rises);
+            self.battery_rose_at_ms = Some(now);
+            if rises >= 2 && current < 100 && self.charging != Some(true) {
+                self.charging = Some(true);
+                self.charging_inferred = Some(true);
+            }
+        } else {
+            self.battery_rises = Some(0);
+            self.battery_rose_at_ms = None;
+            self.end_inferred_charging();
+        }
+        if current >= 100 {
+            self.end_inferred_charging();
+        }
+    }
+
+    fn end_inferred_charging(&mut self) {
+        if self.charging_inferred == Some(true) {
+            self.charging = Some(false);
+            self.charging_inferred = None;
+        }
+    }
+
+    /// Ends inferred charging once the battery has not gone up for
+    /// [`INFERRED_CHARGING_TIMEOUT_MS`] (the charger was unplugged while the
+    /// level held). Returns whether anything changed.
+    pub fn expire_inferred_charging(&mut self, now: u128) -> bool {
+        let stale = self.charging_inferred == Some(true)
+            && self
+                .battery_rose_at_ms
+                .is_none_or(|rose| now.saturating_sub(rose) > INFERRED_CHARGING_TIMEOUT_MS);
+        if stale {
+            self.end_inferred_charging();
+            self.battery_rises = Some(0);
+            self.touch();
+        }
+        stale
+    }
+}
+
+/// A charging headset gains 5% roughly every 10–15 minutes.
+pub const INFERRED_CHARGING_TIMEOUT_MS: u128 = 40 * 60 * 1000;
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis())
 }
 
 fn replace_if_changed<T: PartialEq>(slot: &mut Option<T>, value: T) -> bool {
@@ -675,6 +751,61 @@ fn uniform_color(colors: &[String]) -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier, Mutex};
+
+    #[test]
+    fn two_rises_without_usb_mean_a_charger_and_a_fall_ends_it() {
+        let mut state = RuntimeState { battery_percent: Some(80), charging: Some(false), ..Default::default() };
+        let minute = 60_000;
+        state.follow_battery_trend(80, 85, 10 * minute);
+        assert_eq!(state.charging, Some(false), "one rise may be a reading settling");
+        state.follow_battery_trend(85, 90, 22 * minute);
+        assert_eq!((state.charging, state.charging_inferred), (Some(true), Some(true)));
+        state.follow_battery_trend(90, 85, 30 * minute);
+        assert_eq!((state.charging, state.charging_inferred), (Some(false), None));
+    }
+
+    #[test]
+    fn inferred_charging_ends_when_full_or_when_the_level_stops_rising() {
+        let minute = 60_000;
+        let mut state = RuntimeState { charging: Some(false), ..Default::default() };
+        state.follow_battery_trend(85, 90, minute);
+        state.follow_battery_trend(90, 95, 12 * minute);
+        assert_eq!(state.charging, Some(true));
+        state.follow_battery_trend(95, 100, 24 * minute);
+        assert_eq!(state.charging, Some(false), "full: no longer charging");
+
+        let mut state = RuntimeState { charging: Some(false), ..Default::default() };
+        state.follow_battery_trend(60, 65, minute);
+        state.follow_battery_trend(65, 70, 12 * minute);
+        assert!(!state.expire_inferred_charging(40 * minute));
+        assert!(state.expire_inferred_charging(53 * minute));
+        assert_eq!((state.charging, state.charging_inferred), (Some(false), None));
+    }
+
+    #[test]
+    fn rises_far_apart_or_across_power_off_do_not_count_as_charging() {
+        let minute = 60_000;
+        let mut state = RuntimeState { charging: Some(false), ..Default::default() };
+        state.follow_battery_trend(60, 65, minute);
+        state.follow_battery_trend(65, 70, 90 * minute);
+        assert_eq!(state.charging, Some(false));
+
+        let mut state = RuntimeState { battery_percent: Some(60), charging: Some(false), ..Default::default() };
+        state.follow_battery_trend(55, 60, minute);
+        state.apply_input(&[0x09, 0x00]);
+        state.apply_input(&[0x09, 0x01]);
+        state.apply_input(&[0x08, 75]);
+        assert_eq!(state.charging, Some(false));
+    }
+
+    #[test]
+    fn usb_charging_is_never_turned_off_by_the_battery_trend() {
+        let mut state = RuntimeState { charging: Some(true), ..Default::default() };
+        state.follow_battery_trend(90, 85, 0);
+        state.follow_battery_trend(85, 100, 0);
+        assert_eq!(state.charging, Some(true));
+        assert!(!state.expire_inferred_charging(u128::MAX));
+    }
 
     static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 

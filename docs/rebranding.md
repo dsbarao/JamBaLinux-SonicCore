@@ -42,10 +42,13 @@ Colours: chrome silver, ice blue `#38bdf8`, violet `#c084fc` and pink
 `#f472b6` on near-black.
 
 The name was written **JamBaLinux SonicCore** before; the identifiers above
-did not change with the new spelling. The OpenRGB plugin keeps its
-registered name "JamBaLinux SonicCore", because OpenRGB stores whether a
-plugin is enabled under that name, and generated PipeWire/ALSA configuration
-comments keep the old spelling so installed files are not reported as edited.
+did not change with the new spelling. The OpenRGB plugin is now listed as
+"JamBaLinux Sonic Core". OpenRGB stores whether a plugin is enabled under its
+name and adds the new name, enabled, the first time it loads the plugin;
+SonicCore never edits OpenRGB's settings, and the CLI still reads an entry
+left under the old name.
+Generated PipeWire/ALSA configuration comments keep the old spelling so
+installed files are not reported as edited.
 
 ## License attribution
 

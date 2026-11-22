@@ -210,6 +210,26 @@ static void TestWriterCoalesces()
     CHECK(!failed.empty() && failed[0].find("nope") != std::string::npos);
 }
 
+static void TestRequestedColorsArePublished()
+{
+    // The colors OpenRGB asks for are published even when the device write
+    // fails (the headset is off), and removed when the writer goes away.
+    std::string path = scratch + "/jambalinux-soniccore-openrgb.json";
+    std::string failing = WriteScript("off-cli", "exit 1\n");
+    {
+        LightingWriter writer(failing, std::nullopt, [](const std::string&) {});
+        writer.Request(Solid(0x00336699));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        std::ifstream file(path);
+        std::stringstream text;
+        text << file.rdbuf();
+        CHECK(text.str().find("\"#996633\"") != std::string::npos);
+        CHECK(text.str().find("\"off\":false") != std::string::npos);
+    }
+    struct stat info;
+    CHECK(stat(path.c_str(), &info) != 0);
+}
+
 static void TestOwnership()
 {
     // Every write identifies OpenRGB, replacing any inherited value.
@@ -286,6 +306,7 @@ int main(int argc, char** argv)
     TestRunCommand();
     TestCachedLighting();
     TestWriterCoalesces();
+    TestRequestedColorsArePublished();
     TestOwnership();
 
     if(failures > 0)

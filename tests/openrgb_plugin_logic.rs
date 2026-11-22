@@ -44,6 +44,9 @@ fn openrgb_plugin_logic_tests_pass() {
     let run = Command::new(&binary)
         .arg(&scratch)
         .current_dir(&scratch)
+        // The writer publishes the requested colors there; never the
+        // session's real runtime directory.
+        .env("XDG_RUNTIME_DIR", &scratch)
         .output()
         .unwrap();
     assert!(

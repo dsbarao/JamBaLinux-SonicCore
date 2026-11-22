@@ -2,7 +2,7 @@
 | JamBaLinuxPlugin.h                                        |
 |                                                           |
 |   OpenRGB plugin that exposes the JBL Quantum 810         |
-|   Wireless lighting through JamBaLinux SonicCore.         |
+|   Wireless lighting through JamBaLinux Sonic Core.        |
 |                                                           |
 |   The plugin source is MIT licensed. It is compiled       |
 |   against OpenRGB headers (GPL-2.0-or-later), so the      |

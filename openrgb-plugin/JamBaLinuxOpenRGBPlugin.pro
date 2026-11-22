@@ -1,4 +1,4 @@
-# OpenRGB plugin for the JBL Quantum 810 Wireless through JamBaLinux SonicCore.
+# OpenRGB plugin for the JBL Quantum 810 Wireless through JamBaLinux Sonic Core.
 #
 # Build against the OpenRGB source tree matching the installed OpenRGB
 # (plugin API 5, OpenRGB 1.1):

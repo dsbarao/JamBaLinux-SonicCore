@@ -58,6 +58,15 @@ struct CachedLighting
 std::optional<CachedLighting> ReadCachedStatus(const std::string& program);
 std::optional<LightingState>  ReadCachedLighting(const std::string& program);
 
+/*---------------------------------------------------------*\
+| The colors OpenRGB asks the headset for, written to       |
+| $XDG_RUNTIME_DIR/jambalinux-soniccore-openrgb.json even   |
+| when the headset is off, so the SonicCore app's effects   |
+| can follow the computer's lighting. Removed on unload.    |
+\*---------------------------------------------------------*/
+void PublishRequestedLighting(const LightingState& state);
+void ClearRequestedLighting();
+
 class LightingWriter
 {
 public:

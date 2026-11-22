@@ -66,7 +66,7 @@ KCM.SimpleKCM {
                 }
                 const list = [{
                     target: "auto",
-                    label: "Automático — segue a saída padrão do sistema (agora: "
+                    label: "Automático (agora: "
                         + describe(result.effective) + ")"
                 }]
                 for (const output of result.outputs ?? []) {
@@ -94,6 +94,7 @@ KCM.SimpleKCM {
             id: outputBox
             Kirigami.FormData.label: "Equalizador e áudio espacial em:"
             Layout.minimumWidth: Kirigami.Units.gridUnit * 18
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 24
             model: page.outputs.map(item => item.label)
             onActivated: page.choose(currentIndex)
         }

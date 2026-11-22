@@ -99,6 +99,12 @@ Kirigami.ApplicationWindow {
         onToggleRequested: window.toggle()
     }
 
+    function openSettings(page, title) {
+        if (pageStack.layers.depth > 1)
+            pageStack.layers.pop()
+        pageStack.layers.push(page, { "title": title })
+    }
+
     function toggle() {
         if (window.visible && window.active) {
             window.hide()
@@ -221,6 +227,53 @@ Kirigami.ApplicationWindow {
                     checkable: true
                     checked: settings.background === "none"
                     onTriggered: settings.background = "none"
+                }
+                Kirigami.Action {
+                    separator: true
+                }
+                Kirigami.Action {
+                    text: "Reagir ao som"
+                    tooltip: "O fundo pulsa com os graves"
+                    checkable: true
+                    checked: settings.backgroundReactive
+                    onTriggered: settings.backgroundReactive = !settings.backgroundReactive
+                }
+                Kirigami.Action {
+                    text: "Intensidade"
+                    Kirigami.Action {
+                        text: "Suave"
+                        checkable: true
+                        checked: settings.backgroundIntensity === 0
+                        onTriggered: settings.backgroundIntensity = 0
+                    }
+                    Kirigami.Action {
+                        text: "Média"
+                        checkable: true
+                        checked: settings.backgroundIntensity === 1
+                        onTriggered: settings.backgroundIntensity = 1
+                    }
+                    Kirigami.Action {
+                        text: "Intensa"
+                        checkable: true
+                        checked: settings.backgroundIntensity === 2
+                        onTriggered: settings.backgroundIntensity = 2
+                    }
+                }
+            },
+            // The battery economy and the audio output, as full pages over
+            // the panel (Esc or the back arrow returns).
+            Kirigami.Action {
+                text: "Configurações"
+                icon.name: "configure"
+                Kirigami.Action {
+                    text: "Bateria"
+                    icon.name: "battery-good"
+                    onTriggered: window.openSettings(core.batterySettingsPage, "Bateria")
+                }
+                Kirigami.Action {
+                    text: "Saída de áudio"
+                    icon.name: "audio-card"
+                    onTriggered: window.openSettings(core.outputSettingsPage, "Saída de áudio")
                 }
             },
             // Opacity of the window's backgrounds, always in the toolbar.

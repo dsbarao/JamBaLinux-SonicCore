@@ -22,6 +22,7 @@ mod openrgb;
 mod pipewire;
 mod power;
 mod spatial;
+mod spatial_apps;
 mod spatial_pipewire;
 mod state;
 mod wallpaper;
@@ -266,11 +267,27 @@ fn spawn_charging_watcher() -> Result<(), String> {
     thread::Builder::new()
         .name("soniccore-usb-power".into())
         .spawn(|| {
-            let mut confirmed = state::load().ok().and_then(|cached| cached.charging);
+            // Charging inferred from the battery is not a USB state.
+            let mut confirmed = state::load().ok().and_then(|cached| {
+                if cached.charging_inferred == Some(true) {
+                    Some(false)
+                } else {
+                    cached.charging
+                }
+            });
             let mut candidate = None;
             let mut candidate_samples = 0_u8;
+            let mut ticks = 0_u32;
             loop {
                 thread::sleep(Duration::from_millis(250));
+                // Once a minute: end inferred charging that stopped rising.
+                ticks = ticks.wrapping_add(1);
+                if ticks.is_multiple_of(240) {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_millis());
+                    let _ = state::update_recovering_if(|cached| cached.expire_inferred_charging(now));
+                }
                 let Ok(current) = charging_usb_connected() else {
                     continue;
                 };
@@ -287,8 +304,10 @@ fn spawn_charging_watcher() -> Result<(), String> {
                 }
                 if candidate_samples >= 3 {
                     if let Err(error) = state::update_recovering_if(|cached| {
-                        let changed = cached.charging != Some(current);
+                        let changed = cached.charging != Some(current)
+                            || cached.charging_inferred.is_some();
                         cached.charging = Some(current);
+                        cached.charging_inferred = None;
                         changed
                     }) {
                         eprintln!("failed to cache USB power state: {error}");
@@ -1778,7 +1797,7 @@ fn show(dry_run: bool) -> Result<bool, String> {
 fn usage() {
     eprintln!("JamBaLinux Sonic Core — gaming headset control for Linux");
     eprintln!(
-        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>|gain <db|auto>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
+        "usage: soniccore <scan|inspect|hid-descriptor|monitor [--dry-run]|daemon|status [--dry-run] [--format json]|cached-status --format json|probe-status|set <feature> <value>|lighting-hold <on|off>|meter <--format json [--frames N]|--dbus>|audio-path --format json|openrgb [link] [--format json]|wallpaper --format json|output [--format json|set <auto|quantum-game|SINK>]|power [--format json|set <low-battery|idle> <off|N>]|equalizer [--format json|status [--format json]|set <hz> <db>|preset <factory-id>|profile <list [--format json]|create <name>|apply <custom-id>|update <custom-id>|rename <custom-id> <name>|delete <custom-id>>|reset|bypass <on|off>|gain <db|auto>|night <on|off>]|spatial [--format json|status [--format json]|preflight [--format json]|mode <off|binaural-stereo>|sound <game|cinema|music|custom>|sound constant <on|off>|sound set <intensity|dialogue|bass|surround> <value>|apps [--format json]|app <on|off> <application>|enable|disable]|notify [--dry-run]|show [--dry-run]|export --format json>"
     );
     eprintln!(
         "spatial is an experimental, disabled-by-default open binaural processor; enable requires a validated user-provided HRIR dataset"
@@ -1846,6 +1865,7 @@ struct EqualizerStatusOutput {
     preamp_auto: bool,
     /// The input gain the DSP runs (Auto's value, 0 while bypassed).
     dsp_preamp_db: f32,
+    night: bool,
     pipewire: pipewire::Status,
 }
 
@@ -1866,6 +1886,7 @@ fn print_equalizer_status(json: bool) -> Result<(), String> {
                 preamp_db: profile.preamp_db,
                 preamp_auto: profile.preamp_auto,
                 dsp_preamp_db,
+                night: profile.night,
                 preset,
                 pipewire,
             })
@@ -1922,6 +1943,7 @@ struct EqualizerMutationOutput<'a> {
     preamp_db: f32,
     preamp_auto: bool,
     dsp_preamp_db: f32,
+    night: bool,
     error: Option<String>,
 }
 
@@ -1941,6 +1963,7 @@ fn execute_equalizer_mutation(
                     preamp_db: requested.preamp_db,
                     preamp_auto: requested.preamp_auto,
                     dsp_preamp_db: requested.dsp_preamp_db(),
+                    night: requested.night,
                     error: None,
                 };
                 println!(
@@ -1962,6 +1985,7 @@ fn execute_equalizer_mutation(
                     preamp_db: previous.preamp_db,
                     preamp_auto: previous.preamp_auto,
                     dsp_preamp_db: previous.dsp_preamp_db(),
+                    night: previous.night,
                     error: Some(error),
                 };
                 println!(
@@ -2253,6 +2277,7 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             requested.bypassed = previous.bypassed;
             requested.preamp_db = previous.preamp_db;
             requested.preamp_auto = previous.preamp_auto;
+            requested.night = previous.night;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         Some("profile") => equalizer_profile(args),
@@ -2271,6 +2296,7 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             requested.bypassed = previous.bypassed;
             requested.preamp_db = previous.preamp_db;
             requested.preamp_auto = previous.preamp_auto;
+            requested.night = previous.night;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         // "Som natural": every band at 0 dB, the saved bands kept for later.
@@ -2285,6 +2311,20 @@ fn equalizer(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             let previous = equalizer::load_for_mutation(&mutation_lock)?;
             let mut requested = previous.clone();
             requested.bypassed = bypassed;
+            execute_equalizer_mutation(format_json, &previous, &requested)
+        }
+        // "Volume equilibrado": loud passages turned down (night mode).
+        Some("night") => {
+            let (format_json, values) = parse_mutation_args(args)?;
+            let night = match values.as_slice() {
+                [value] if value == "on" => true,
+                [value] if value == "off" => false,
+                _ => return Err("equalizer night requires exactly `on` or `off`".into()),
+            };
+            let mutation_lock = equalizer::mutation_lock()?;
+            let previous = equalizer::load_for_mutation(&mutation_lock)?;
+            let mut requested = previous.clone();
+            requested.night = night;
             execute_equalizer_mutation(format_json, &previous, &requested)
         }
         // "Ganho": the level going into the bands, or `auto` to follow them.
@@ -2451,6 +2491,43 @@ fn spatial(mut args: impl Iterator<Item = String>) -> Result<bool, String> {
             let mode = spatial::SpatialMode::parse(&value)?;
             let profile = spatial::set_mode(mode)?;
             print_spatial(&profile, false)?;
+            Ok(true)
+        }
+        // "3D por aplicativo": the applications playing now and their choice.
+        Some("apps") => {
+            let json = match (args.next().as_deref(), args.next()) {
+                (None, _) => false,
+                (Some("--format"), Some(format)) if format == "json" && args.next().is_none() => true,
+                _ => return Err("usage: soniccore spatial apps [--format json]".into()),
+            };
+            let apps = spatial_apps::playing_apps()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({ "schema": 1, "apps": apps }))
+                        .map_err(|error| error.to_string())?
+                );
+            } else {
+                for app in apps {
+                    println!(
+                        "{}: 3D {} (now on {})",
+                        app.app,
+                        if app.spatial { "on" } else { "off" },
+                        app.route
+                    );
+                }
+            }
+            Ok(true)
+        }
+        Some("app") => {
+            let enabled = match args.next().as_deref() {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return Err("usage: soniccore spatial app <on|off> <application>".into()),
+            };
+            let app = args.collect::<Vec<_>>().join(" ");
+            spatial_apps::set_app_3d(&app, enabled)?;
+            println!("3D {} for {}", if enabled { "on" } else { "off" }, app.trim());
             Ok(true)
         }
         // Listening modes and their fine controls, applied live.
@@ -3086,6 +3163,7 @@ mod tests {
             preamp_db: profile.preamp_db,
             preamp_auto: profile.preamp_auto,
             dsp_preamp_db: profile.dsp_preamp_db(),
+            night: profile.night,
             error: Some("test error".into()),
         };
         let json = serde_json::to_value(output).unwrap();

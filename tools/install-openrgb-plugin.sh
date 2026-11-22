@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds and installs the JamBaLinux SonicCore plugin for OpenRGB, which makes
+# Builds and installs the JamBaLinux Sonic Core plugin for OpenRGB, which makes
 # the JBL Quantum 810 Wireless appear as an OpenRGB device. The plugin drives
 # the headset only through the soniccore CLI, so install SonicCore first
 # (tools/install-user.sh).

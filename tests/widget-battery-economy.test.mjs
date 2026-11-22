@@ -42,5 +42,5 @@ test("a página Saída de som escolhe pela CLI, com aspas, e explica o que fica 
     assert.match(outputPage, /arguments\.map\(shellQuote\)/)
     assert.match(outputPage, /target: output\.quantum_game \? "quantum-game" : output\.name/)
     assert.match(outputPage, /canal de Chat do fone nunca é usado/)
-    assert.match(outputPage, /target: "auto",\n\s+label: "Automático — segue a saída padrão do sistema/)
+    assert.match(outputPage, /target: "auto",\n\s+label: "Automático \(agora: "/)
 })

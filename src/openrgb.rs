@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const PLUGIN_FILE: &str = "libJamBaLinuxSonicCorePlugin.so";
-/// The name OpenRGB lists the plugin under in its settings.
-const PLUGIN_NAME: &str = "JamBaLinux SonicCore";
+/// The name OpenRGB lists the plugin under in its settings, and the name it
+/// had before the rebranding (an entry OpenRGB may still keep).
+const PLUGIN_NAME: &str = "JamBaLinux Sonic Core";
+const OLD_PLUGIN_NAME: &str = "JamBaLinux SonicCore";
 const SUPPORTED_VERSIONS: &[&str] = &["1.1"];
 const BUILD_TOOLS: &[&str] = &["qmake6", "make", "g++", "git"];
 
@@ -112,11 +114,13 @@ pub fn parse_version(output: &str) -> Option<String> {
 /// has never loaded it (OpenRGB adds the entry, enabled, on first load).
 pub fn plugin_enabled(settings: &str) -> Option<bool> {
     let value: serde_json::Value = serde_json::from_str(settings).ok()?;
-    value["Plugins"]["plugins"]
-        .as_array()?
-        .iter()
-        .find(|plugin| plugin["name"].as_str() == Some(PLUGIN_NAME))
-        .and_then(|plugin| plugin["enabled"].as_bool())
+    let plugins = value["Plugins"]["plugins"].as_array()?;
+    [PLUGIN_NAME, OLD_PLUGIN_NAME].into_iter().find_map(|name| {
+        plugins
+            .iter()
+            .find(|plugin| plugin["name"].as_str() == Some(name))
+            .and_then(|plugin| plugin["enabled"].as_bool())
+    })
 }
 
 fn openrgb_running() -> bool {
@@ -296,6 +300,11 @@ mod tests {
             {"name":"OpenRGB Effects Plugin","enabled":true},
             {"name":"JamBaLinux SonicCore","enabled":false}]}}"#;
         assert_eq!(plugin_enabled(settings), Some(false));
+        // The current name wins over an entry left from the old one.
+        let both = r#"{"Plugins":{"plugins":[
+            {"name":"JamBaLinux SonicCore","enabled":false},
+            {"name":"JamBaLinux Sonic Core","enabled":true}]}}"#;
+        assert_eq!(plugin_enabled(both), Some(true));
         assert_eq!(plugin_enabled(r#"{"Plugins":{"plugins":[]}}"#), None);
         assert_eq!(plugin_enabled("not json"), None);
     }

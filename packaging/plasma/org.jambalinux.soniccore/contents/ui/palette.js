@@ -53,3 +53,16 @@ function at(palette, t, fallback) {
                    first[1] + (second[1] - first[1]) * amount,
                    first[2] + (second[2] - first[2]) * amount, 1)
 }
+
+// The same hue at full brightness: OpenRGB effects often send the computer's
+// colors dimmed (a fade, an idle visualizer), which as a theme reads as
+// black. Colors too dark to have a hue become black (left out of a palette).
+function fullBrightness(value) {
+    const hex = normalize(value)
+    if (!hex) return ""
+    const rgb = channels(hex)
+    const peak = Math.max(rgb[0], rgb[1], rgb[2])
+    if (peak < 4 / 255) return "#000000"
+    const part = channel => Math.round(channel / peak * 255).toString(16).padStart(2, "0")
+    return "#" + part(rgb[0]) + part(rgb[1]) + part(rgb[2])
+}

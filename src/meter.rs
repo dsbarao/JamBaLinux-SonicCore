@@ -193,6 +193,10 @@ impl Analyzer {
 struct Window {
     samples: VecDeque<f32>,
     since_frame: usize,
+    /// Loudest sample of either channel since the last frame: every sample
+    /// is seen once, so a single clipped sample is never missed (the mono
+    /// mix the spectrum uses would halve a clip on one side).
+    channel_peak: f32,
 }
 
 impl Window {
@@ -200,6 +204,7 @@ impl Window {
         Self {
             samples: VecDeque::from(vec![0.0; WINDOW]),
             since_frame: 0,
+            channel_peak: 0.0,
         }
     }
 
@@ -207,6 +212,7 @@ impl Window {
     fn push(&mut self, left: f32, right: f32) -> bool {
         self.samples.pop_front();
         self.samples.push_back((left + right) * 0.5);
+        self.channel_peak = self.channel_peak.max(left.abs()).max(right.abs());
         self.since_frame += 1;
         if self.since_frame >= HOP {
             self.since_frame = 0;
@@ -218,6 +224,10 @@ impl Window {
 
     fn contiguous(&mut self) -> &[f32] {
         self.samples.make_contiguous()
+    }
+
+    fn take_peak(&mut self) -> f32 {
+        std::mem::take(&mut self.channel_peak)
     }
 }
 
@@ -311,7 +321,10 @@ fn read_frames(mut input: impl Read, mut on_frame: impl FnMut(Frame)) {
             let left = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
             let right = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
             if window.push(left, right) {
-                on_frame(analyzer.analyze(window.contiguous()));
+                let mut frame = analyzer.analyze(window.contiguous());
+                // Above 1.0 (0 dBFS) the sound clips on its way out.
+                frame.peak = window.take_peak();
+                on_frame(frame);
             }
         }
         carry.drain(..whole);
@@ -496,6 +509,22 @@ mod tests {
         let silence = analyzer.analyze(&vec![0.0; WINDOW]);
         assert!(!silence.active);
         assert!(silence.bands.iter().all(|&level| level == 0.0));
+    }
+
+    #[test]
+    fn a_clip_on_one_channel_shows_in_the_frame_peak() {
+        let mut bytes = Vec::new();
+        for index in 0..(HOP * 2) {
+            // Quiet left, and one right sample past full scale.
+            let right = if index == HOP + 7 { 1.4_f32 } else { 0.1 };
+            bytes.extend_from_slice(&0.1_f32.to_le_bytes());
+            bytes.extend_from_slice(&right.to_le_bytes());
+        }
+        let mut frames = Vec::new();
+        read_frames(std::io::Cursor::new(bytes), |frame| frames.push(frame));
+        assert_eq!(frames.len(), 2);
+        assert!((frames[0].peak - 0.1).abs() < 1e-6);
+        assert!((frames[1].peak - 1.4).abs() < 1e-6);
     }
 
     #[test]

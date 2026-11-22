@@ -51,16 +51,18 @@ changed live:
 
 ## 3. Volume balance (night mode)
 
-- [ ] **Volume equilibrado**: loudness normalisation with the `ebur128`
-  plugin so explosions and whispers stay closer, for late-night play.
-- [ ] Off by default; one switch in the equalizer card.
+- [x] **Volume equilibrado**: the `ebur128` plugin measures both channels
+  as one (momentary loudness) and `lufs2gain` + `clamp` turn loud passages
+  down towards -23 LUFS, never above unity, so nothing plays louder than it
+  came in; a mixer fades it in and out live (`soniccore equalizer night`).
+- [x] Off by default; one switch in the equalizer card.
 
 ## 4. Getting games into the 3D sink without menus
 
-- [ ] A list of the apps playing now with a **3D** toggle per app, moving that
-  stream to the spatial sink (and back) with PipeWire metadata, so the user
-  does not have to pick the output inside each game.
-- [ ] Remember the choice per application name.
+- [x] A list of the apps playing now with a **3D** toggle per app. With the
+  spatial sound on every routed app goes through 3D; turning an app off keeps
+  it on the equalizer only (`soniccore spatial apps`, `spatial app <on|off>`).
+- [x] Remember the choice per application name (`spatial-apps.json`).
 
 ## Interface rules
 

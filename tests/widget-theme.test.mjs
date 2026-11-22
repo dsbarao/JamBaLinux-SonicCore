@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
@@ -77,12 +78,26 @@ test("cores pretas ou luzes apagadas usam a cor de destaque do sistema", () => {
     const vivoAccent = extract(mainSource, "vivoAccent")
     const normalizeColor = value => value
     const Kirigami = { Theme: { highlightColor: "accent" } }
-    const call = (value, lightingEnabled = true) =>
-        new Function("normalizeColor", "Kirigami", "lightingEnabled", "value",
-            `return (${vivoAccent.toString()}).call({}, value)`)(normalizeColor, Kirigami, lightingEnabled, value)
+    const call = (value, themeLightingEnabled = true) =>
+        new Function("normalizeColor", "Kirigami", "themeLightingEnabled", "value",
+            `return (${vivoAccent.toString()}).call({}, value)`)(normalizeColor, Kirigami, themeLightingEnabled, value)
     assert.equal(call("#59C319"), "#59c319")
     assert.equal(call("#000000"), "accent")
     assert.equal(call(null), "accent")
+    assert.equal(call("#59C319", false), "accent")
+})
+
+test("com o fone desligado, os efeitos seguem as cores que o OpenRGB pede", () => {
+    // The theme reads the headset's colors, or the OpenRGB plugin's file
+    // while the headset is not connected.
+    assert.match(mainSource, /readonly property bool usePcLighting: headsetConnected !== true && pcLighting !== null/)
+    assert.match(mainSource, /pcColors: usePcLighting \? pcLighting\.colors\.map\(Palette\.fullBrightness\)/)
+    assert.match(mainSource, /themeLogoColors: usePcLighting \? pcColors\.slice\(0, 5\)/)
+    assert.match(mainSource, /themeRingColors: usePcLighting \? pcColors\.slice\(5, 10\)/)
+    assert.match(mainSource, /vivoPalette: Palette\.build\(themeLightingEnabled, themeLogoColors,/)
+    assert.match(mainSource, /"\/jambalinux-soniccore-openrgb\.json"/)
+    const appScript = readFileSync(new URL("../packaging/app/soniccore-app", import.meta.url), "utf8")
+    assert.match(appScript, /export QML_XHR_ALLOW_FILE_READ=1/)
 })
 
 test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros", () => {
@@ -124,7 +139,7 @@ test("a paleta do Vivo usa todas as cores das luzes, sem preto nem repetidas", a
     const paletteSource = await readFile(new URL("ui/palette.js", base), "utf8")
     const Qt = { rgba: (r, g, b, a) => ({ r, g, b, a }) }
     const Palette = new Function("Qt", paletteSource.replace(".pragma library", "")
-        + "\nreturn { build, at }")(Qt)
+        + "\nreturn { build, at, fullBrightness }")(Qt)
     const wave = ["#37309a", "#9a3095", "#9a3033", "#9a8530", "#309a30"]
 
     assert.deepEqual(Palette.build(true, wave, wave, 5), wave)
@@ -133,6 +148,11 @@ test("a paleta do Vivo usa todas as cores das luzes, sem preto nem repetidas", a
     assert.deepEqual(Palette.build(false, wave, wave, 5), [])
     assert.deepEqual(Palette.build(true, null, null, 5), [])
 
+    // Dimmed effect colors keep their hue at full brightness.
+    assert.equal(Palette.fullBrightness("#120606"), "#ff5555")
+    assert.equal(Palette.fullBrightness("#0E1113"), "#bce4ff")
+    assert.equal(Palette.fullBrightness("#020202"), "#000000")
+    assert.equal(Palette.fullBrightness("bad"), "")
     assert.equal(Palette.at([], 0.5, "fallback"), "fallback")
     assert.deepEqual(Palette.at(["#ff0000", "#0000ff"], 0.5, null), { r: 0.5, g: 0, b: 0.5, a: 1 })
     assert.deepEqual(Palette.at(wave, 1, null).g, 0x9a / 255)

@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -81,6 +82,11 @@ Item {
     property bool expanded: false
     signal toggleRequested()
 
+    // The widget's settings pages (battery economy, audio output), which a
+    // host without Plasma's settings dialog (the app) opens itself.
+    readonly property url batterySettingsPage: Qt.resolvedUrl("configBattery.qml")
+    readonly property url outputSettingsPage: Qt.resolvedUrl("configOutput.qml")
+
     // Keep the unexpanded home reference in one place. The non-interactive
     // shell in soniccoreCommand expands it once when it starts the CLI.
     readonly property string soniccoreBinary: "$HOME/.cargo/bin/soniccore"
@@ -162,6 +168,8 @@ Item {
     property var equalizerServiceActive: null
     // "Som natural": the DSP runs flat; the saved bands stay as they are.
     property bool equalizerBypassed: false
+    // "Volume equilibrado" (night mode): loud passages turned down.
+    property bool equalizerNight: false
     // Listening mode of the 3D sound and its fine controls (dB / share).
     property string spatialListening: "game"
     property var spatialSound: ({ "intensity": 1, "dialogue_db": 0, "bass_db": 0, "surround_db": 0 })
@@ -180,6 +188,8 @@ Item {
     // by the largest boost. dspPreamp is what runs (Auto's value, 0 while off).
     property real equalizerPreampDb: 0
     property bool equalizerPreampAuto: false
+    // Lit for a moment whenever the output reached full scale (clipping).
+    property bool equalizerClipping: false
     property real equalizerDspPreampDb: 0
     // Latest requested gain (dB or "auto") not sent yet, like the bands.
     property var pendingEqualizerGain: null
@@ -193,6 +203,9 @@ Item {
     property bool spatialUpdating: false
     property bool spatialBusy: false
     property bool spatialEnabled: false
+    // "3D por aplicativo": what plays now, each with its 3D choice
+    // ({ app, icon, spatial, route }). Kept until an application stops.
+    property var spatialApps: []
     property string spatialMode: "off"
     property bool spatialReady: false
     property bool spatialDatasetValid: false
@@ -243,12 +256,25 @@ Item {
     property url wallpaperUrl
     // The lights' own colors tint the Vivo theme; black or unknown zones
     // fall back to the system accent.
-    readonly property color vivoAccentA: vivoAccent(Array.isArray(logoColors) ? logoColors[0] : logoColor)
-    readonly property color vivoAccentB: vivoAccent(Array.isArray(ringColors) ? ringColors[0] : ringColor)
+    // With the headset off, the colors OpenRGB is asking for (the computer's
+    // lighting, published by the OpenRGB plugin) take their place, so the
+    // effects keep following the PC: { off, colors: [10 × "#rrggbb"] }.
+    property var pcLighting: null
+    readonly property bool usePcLighting: headsetConnected !== true && pcLighting !== null
+    // An effect paints the colors even when OpenRGB lists the headset as
+    // Off (as it does while the headset itself is off); only black means
+    // no color, and the palette already leaves black out.
+    readonly property var themeLightingEnabled: usePcLighting ? true : lightingEnabled
+    // Their hue at full brightness: effects often send them dimmed.
+    readonly property var pcColors: usePcLighting ? pcLighting.colors.map(Palette.fullBrightness) : []
+    readonly property var themeLogoColors: usePcLighting ? pcColors.slice(0, 5) : (logoColors ?? logoColor)
+    readonly property var themeRingColors: usePcLighting ? pcColors.slice(5, 10) : (ringColors ?? ringColor)
+    readonly property color vivoAccentA: vivoAccent(Array.isArray(themeLogoColors) ? themeLogoColors[0] : themeLogoColors)
+    readonly property color vivoAccentB: vivoAccent(Array.isArray(themeRingColors) ? themeRingColors[0] : themeRingColors)
     // Every light color (all segments of both zones), so the theme follows
     // multi-color effects too, not just the first segment.
-    readonly property var vivoPalette: Palette.build(lightingEnabled, logoColors ?? logoColor,
-                                                     ringColors ?? ringColor, 5)
+    readonly property var vivoPalette: Palette.build(themeLightingEnabled, themeLogoColors,
+                                                     themeRingColors, 5)
     readonly property bool deviceAvailable: batteryPercent >= 0 && headsetConnected !== false
     readonly property bool daemonAvailable: daemonWatcher.registered
     readonly property color batteryColor: headsetConnected === false
@@ -282,7 +308,7 @@ Item {
     }
 
     function vivoAccent(value) {
-        if (lightingEnabled === false || typeof value !== "string") return Kirigami.Theme.highlightColor
+        if (themeLightingEnabled === false || typeof value !== "string") return Kirigami.Theme.highlightColor
         const hex = String(normalizeColor(value)).toLowerCase()
         return /^#[0-9a-f]{6}$/.test(hex) && hex !== "#000000" ? hex : Kirigami.Theme.highlightColor
     }
@@ -381,6 +407,14 @@ Item {
             closeEqualizerProfileEditors()
             return
         }
+        loadShownSections()
+    }
+
+    // The app opens already shown (expanded is true from the start), and
+    // a property's first value does not run onExpandedChanged.
+    Component.onCompleted: if (expanded) loadShownSections()
+
+    function loadShownSections() {
         if (!openRgbLinking) openRgbMessage = ""
         refreshOpenRgb()
         loadPicker()
@@ -540,6 +574,43 @@ Item {
         pendingEqualizerBands = pending
         equalizerFullRefresh.stop()
         sendNextEqualizerBand()
+    }
+
+    // The OpenRGB plugin's file, read while the headset is off (a few
+    // hundred bytes; the app allows local reads for it).
+    readonly property string pcLightingUrl: StandardPaths.writableLocation(StandardPaths.RuntimeLocation)
+        + "/jambalinux-soniccore-openrgb.json"
+
+    function readPcLighting() {
+        const request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) return
+            let next = null
+            try {
+                const value = JSON.parse(request.responseText)
+                if (value && value.schema === 1 && Array.isArray(value.colors) && value.colors.length === 10)
+                    next = { "off": value.off === true, "colors": value.colors.map(String) }
+            } catch (error) {
+            }
+            if (JSON.stringify(next) !== JSON.stringify(root.pcLighting))
+                root.pcLighting = next
+        }
+        request.open("GET", pcLightingUrl)
+        request.send()
+    }
+
+    Timer {
+        interval: 300
+        repeat: true
+        triggeredOnStart: true
+        running: root.expanded && root.vivo && root.headsetConnected !== true
+        onTriggered: root.readPcLighting()
+    }
+
+    Timer {
+        id: clipHold
+        interval: 1500
+        onTriggered: root.equalizerClipping = false
     }
 
     function setEqualizerGain(gain) {
@@ -735,6 +806,8 @@ Item {
         if (action === "reset") return "Bandas zeradas"
         if (action === "bypass-on") return "Som natural: equalizador desligado"
         if (action === "bypass-off") return "Equalizador ligado"
+        if (action === "night-on") return "Volume equilibrado: sons altos mais baixos"
+        if (action === "night-off") return "Volume equilibrado desligado"
         if (action === "preset" || action === "apply")
             return "Perfil de equalização aplicado"
         if (action === "create") return "Perfil personalizado criado"
@@ -768,6 +841,10 @@ Item {
 
     function resetEqualizer() {
         startEqualizerAction("reset", ["reset"])
+    }
+
+    function setEqualizerNight(night) {
+        startEqualizerAction(night ? "night-on" : "night-off", ["night", night ? "on" : "off"])
     }
 
     function setEqualizerBypassed(bypassed) {
@@ -1257,6 +1334,12 @@ Item {
             VivoPanel {
                 id: vivoPanel
                 visible: root.vivo
+                onPeakChanged: {
+                    if (peak >= 0.999) {
+                        root.equalizerClipping = true
+                        clipHold.restart()
+                    }
+                }
                 Layout.fillWidth: true
                 Layout.preferredHeight: implicitHeight
                 running: root.vivo && root.expanded
@@ -1517,6 +1600,23 @@ Item {
                         }
                     }
 
+                    // Night mode: works with the equalizer on or off.
+                    PlasmaComponents.Switch {
+                        id: equalizerNightToggle
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "Volume equilibrado"
+                        checked: root.equalizerNight
+                        enabled: !root.equalizerBusy && !root.equalizerUpdating
+                        QQC2.ToolTip.text: "Abaixa explosões e músicas altas para perto do volume das falas, sem aumentar nada. Bom para jogar à noite."
+                        QQC2.ToolTip.visible: hovered
+                        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        onClicked: {
+                            const on = checked
+                            checked = Qt.binding(function() { return root.equalizerNight })
+                            root.setEqualizerNight(on)
+                        }
+                    }
+
                     ColumnLayout {
                         Layout.fillWidth: true
                         id: equalizerBody
@@ -1763,6 +1863,28 @@ Item {
                                 horizontalAlignment: Text.AlignRight
                                 text: `${equalizerGainSlider.value > 0 ? "+" : ""}${equalizerGainSlider.value.toFixed(1)} dB`
                                 opacity: 0.7
+                            }
+
+                            // "Pico": lights red when the sound reaches full
+                            // scale, held long enough to be seen.
+                            Rectangle {
+                                id: equalizerClipLight
+                                visible: root.vivo
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 0.6
+                                Layout.preferredHeight: Layout.preferredWidth
+                                radius: width / 2
+                                color: root.equalizerClipping
+                                    ? Kirigami.Theme.negativeTextColor
+                                    : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                        Kirigami.Theme.textColor.b, 0.18)
+                                Behavior on color { ColorAnimation { duration: Kirigami.Units.shortDuration } }
+
+                                HoverHandler { id: clipHover }
+                                QQC2.ToolTip.text: root.equalizerClipping
+                                    ? "Distorcendo: o som passou do limite. Baixe o Ganho ou use o Auto."
+                                    : "Pico: acende em vermelho quando o som passa do limite e distorce."
+                                QQC2.ToolTip.visible: clipHover.hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                             }
 
                             PlasmaComponents.Button {
@@ -2050,9 +2172,56 @@ Item {
                             color: Kirigami.Theme.negativeTextColor
                         }
 
+                        // "3D por aplicativo": each application playing now,
+                        // with its own switch; the choice is remembered.
                         PlasmaComponents.Label {
                             Layout.fillWidth: true
-                            text: "Nos jogos, escolha a saída espacial JamBaLinux."
+                            Layout.topMargin: Kirigami.Units.smallSpacing
+                            visible: root.spatialApps.length > 0
+                            text: "3D por aplicativo"
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        Repeater {
+                            model: root.spatialApps
+
+                            delegate: RowLayout {
+                                id: appRow
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+
+                                Kirigami.Icon {
+                                    source: appRow.modelData.icon || "audio-x-generic"
+                                    fallback: "audio-x-generic"
+                                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                                }
+
+                                PlasmaComponents.Label {
+                                    Layout.fillWidth: true
+                                    text: appRow.modelData.app
+                                    elide: Text.ElideRight
+                                }
+
+                                PlasmaComponents.Switch {
+                                    text: "3D"
+                                    checked: appRow.modelData.spatial === true
+                                    onClicked: {
+                                        const on = checked
+                                        checked = Qt.binding(() => appRow.modelData.spatial === true)
+                                        root.setAppSpatial(appRow.modelData.app, on)
+                                    }
+                                }
+                            }
+                        }
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            text: root.spatialApps.length > 0
+                                ? "Desligue o 3D de um aplicativo para ele tocar só com o equalizador."
+                                : "Os aplicativos que tocarem aparecem aqui, cada um com o seu 3D."
                             wrapMode: Text.Wrap
                             horizontalAlignment: Text.AlignHCenter
                             opacity: 0.6
@@ -2544,6 +2713,7 @@ Item {
                     const profile = JSON.parse(stdout)
                     const pipewire = profile.pipewire ?? {}
                     root.equalizerBypassed = profile.bypassed === true
+                    root.equalizerNight = profile.night === true
                     if (!root.equalizerBusy && root.pendingEqualizerGain === null)
                         root.showEqualizerGain(profile)
                     // Bypassed, the live graph runs flat: show the saved bands.
@@ -2681,6 +2851,52 @@ Item {
         id: spatialSoundRefresh
         interval: 400
         onTriggered: root.refreshSpatial()
+    }
+
+    function refreshSpatialApps() {
+        spatialAppsSource.connectSource(soniccoreCommand(["spatial", "apps", "--format", "json"]))
+    }
+
+    function setAppSpatial(app, enabled) {
+        // Shown at once; the routing loop moves the streams within 0.5 s.
+        spatialApps = spatialApps.map(entry => entry.app === app
+            ? Object.assign({}, entry, { "spatial": enabled }) : entry)
+        spatialAppsSource.connectSource(soniccoreCommand(
+            ["spatial", "app", enabled ? "on" : "off", app]))
+    }
+
+    Plasma5Support.DataSource {
+        id: spatialAppsSource
+        engine: "executable"
+
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            const exitCode = Number(data["exit code"] ?? -1)
+            if (sourceName.indexOf("'app'") >= 0) {
+                if (exitCode !== 0)
+                    root.spatialError = String(data.stderr ?? "").trim()
+                        || "Não foi possível mudar o 3D do aplicativo"
+                root.refreshSpatialApps()
+                return
+            }
+            if (exitCode !== 0) return
+            try {
+                const result = JSON.parse(String(data.stdout ?? ""))
+                if (Array.isArray(result.apps)) root.spatialApps = result.apps
+            } catch (error) {
+            }
+        }
+    }
+
+    // What plays changes at any time; a light read every 3 s while the
+    // spatial sound is on and the panel is shown.
+    Timer {
+        interval: 3000
+        repeat: true
+        triggeredOnStart: true
+        running: root.expanded && root.spatialEnabled
+        onTriggered: root.refreshSpatialApps()
+        onRunningChanged: if (!running) root.spatialApps = []
     }
 
     Plasma5Support.DataSource {

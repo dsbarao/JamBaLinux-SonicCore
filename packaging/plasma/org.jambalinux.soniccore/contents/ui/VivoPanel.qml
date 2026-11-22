@@ -50,6 +50,9 @@ Item {
         return sum / 6
     }
     property bool soundActive: false
+    // Loudest sample of either channel in the last frame; above 1.0 the
+    // sound clips on its way out.
+    property real peak: 0
     property var path: null
     property bool framePending: false
     // One shared 25 Hz beat drives every moving part. Free-running QML
@@ -82,8 +85,11 @@ Item {
             framePending = false
             if (reply.isError || !reply.values || reply.values.length < 3) {
                 soundActive = false
+                peak = 0
                 return
             }
+            const framePeak = Number(reply.values[1])
+            peak = Number.isFinite(framePeak) ? framePeak : 0
             const raw = reply.values[0] ?? []
             const levels = []
             for (let index = 0; index < raw.length; ++index) {
