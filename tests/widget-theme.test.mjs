@@ -3,11 +3,11 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
 
-const base = new URL("../packaging/plasma/org.jambalinux.soniccore/contents/", import.meta.url)
+const base = new URL("../packaging/app/contents/", import.meta.url)
 const mainSource = await readFile(new URL("ui/SonicCore.qml", base), "utf8")
 const vivoSource = await readFile(new URL("ui/VivoPanel.qml", base), "utf8")
-const configXml = await readFile(new URL("config/main.xml", base), "utf8")
-const configPage = await readFile(new URL("ui/configAppearance.qml", base), "utf8")
+// The app keeps the appearance settings and offers the themes and backgrounds.
+const appMain = await readFile(new URL("../main.qml", base), "utf8")
 
 function extract(source, name) {
     const match = source.match(new RegExp(`    function ${name}\\(([^)]*)\\) \\{([\\s\\S]*?)^    \\}\\n`, "m"))
@@ -16,11 +16,10 @@ function extract(source, name) {
         `with (this) {${match[2]}}`)
 }
 
-test("o tema Leve é o padrão e a página de configuração oferece os dois", () => {
-    assert.match(configXml, /<entry name="theme" type="String">\s*<default>leve<\/default>/)
-    assert.match(configPage, /property string cfg_theme/)
-    assert.match(configPage, /text: "Leve"/)
-    assert.match(configPage, /text: "Vivo"/)
+test("o Vivo é o padrão do app e o seletor oferece Vivo, Hi-Fi e Leve", () => {
+    assert.match(appMain, /property string theme: "vivo"/)
+    for (const name of ["Vivo", "Hi-Fi", "Leve"])
+        assert.match(appMain, new RegExp(`text: "${name}"\\n\\s+(tooltip: .*\\n\\s+)?checkable: true`))
     assert.match(mainSource, /readonly property bool vivo: root\.configuration\.theme === "vivo"/)
 })
 
@@ -30,7 +29,7 @@ test("o Vivo só substitui o topo e só roda com o painel aberto", () => {
     assert.match(mainSource, /running: root\.vivo && root\.expanded/)
     // The Leve header (image and big battery label) hides only in Vivo.
     assert.match(mainSource, /Image \{\n\s+visible: !root\.vivo && root\.outputIsQuantum\n\s+source: root\.equipmentImage/)
-    assert.match(mainSource, /PlasmaComponents\.Label \{\n\s+visible: !root\.vivo/)
+    assert.match(mainSource, /SonicControls\.Label \{\n\s+visible: !root\.vivo/)
     // Polling stops with the popup closed or the Leve theme.
     assert.match(vivoSource, /interval: 40\n\s+repeat: true\n\s+running: panel\.running/)
     assert.match(vivoSource, /running: panel\.running && panel\.pathCommand\.length > 0/)
@@ -97,14 +96,14 @@ test("com o fone desligado, os efeitos seguem as cores que o OpenRGB pede", () =
     assert.match(mainSource, /themeRingColors: usePcLighting \? pcColors\.slice\(5, 10\)/)
     assert.match(mainSource, /vivoPalette: Palette\.build\(themeLightingEnabled, themeLogoColors,/)
     assert.match(mainSource, /"\/jambalinux-soniccore-openrgb\.json"/)
-    const appScript = readFileSync(new URL("../packaging/app/soniccore-app", import.meta.url), "utf8")
-    assert.match(appScript, /export QML_XHR_ALLOW_FILE_READ=1/)
+    const launcher = readFileSync(new URL("../packaging/app/launcher/main.cpp", import.meta.url), "utf8")
+    assert.match(launcher, /qputenv\("QML_XHR_ALLOW_FILE_READ", "1"\)/)
 })
 
 test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros", () => {
-    assert.match(configXml, /<entry name="background" type="String">\s*<default>aurora<\/default>/)
-    assert.match(configXml, /<entry name="backgroundIntensity" type="Int">\s*<default>1<\/default>/)
-    assert.match(configXml, /<entry name="backgroundReactive" type="Bool">\s*<default>true<\/default>/)
+    assert.match(appMain, /property string background: "aurora"/)
+    assert.match(appMain, /property int backgroundIntensity: 1/)
+    assert.match(appMain, /property bool backgroundReactive: true/)
     // The background is the first child of the popup, behind the controls.
     assert.match(mainSource, /fullRepresentation: Item \{[\s\S]{0,1600}VivoBackground \{[\s\S]{0,200}visible: root\.vivo && !root\.hifi && root\.vivoBackground !== "none"/)
     assert.match(mainSource, /running: root\.vivo && !root\.hifi && root\.expanded\n\s+bass: vivoPanel\.bass/)
@@ -117,7 +116,8 @@ test("o fundo do Vivo fica atrás de tudo, só no Vivo, e tem padrões seguros",
 
 test("Partículas e Ondas usam os shaders compilados", async () => {
     const background = await readFile(new URL("ui/VivoBackground.qml", base), "utf8")
-    assert.match(configPage, /readonly property var backgroundValues: \["aurora", "glass", "particles", "waves", "none"\]/)
+    for (const value of ["aurora", "glass", "wallpaper", "particles", "waves", "none"])
+        assert.match(appMain, new RegExp(`onTriggered: settings\\.background = "${value}"`))
     assert.match(background, /fragmentShader: Qt\.resolvedUrl\("\.\.\/shaders\/particles\.frag\.qsb"\)/)
     assert.match(background, /fragmentShader: Qt\.resolvedUrl\("\.\.\/shaders\/waves\.frag\.qsb"\)/)
     for (const name of ["particles", "waves"])
@@ -188,12 +188,17 @@ test("no Hi-Fi as teclas, chaves e o seletor ganham pele de metal e voltam ao no
     assert.match(mainSource, /running: root\.hifi && root\.expanded\n\s+onTriggered: root\.applyHifiSkins\(expandedRepresentation\)/)
 })
 
-test("Tocando agora controla o player do Plasma e o volume geral do PC", () => {
-    assert.match(mainSource, /import org\.kde\.plasma\.private\.mpris as Mpris/)
-    assert.match(mainSource, /readonly property var outputSink: Volume\.PreferredDevice\.sink/)
-    for (const call of ["Previous", "PlayPause", "Next"])
-        assert.match(mainSource, new RegExp(`onClicked: root\\.mediaPlayer\\.${call}\\(\\)`))
-    // 100% is PulseAudio's normal volume; never above it from here.
-    assert.match(mainSource, /readonly property int normalVolume: 65536/)
+test("Tocando agora usa o MPRIS e o volume do PipeWire, em qualquer ambiente", async () => {
+    assert.match(mainSource, /Sonic\.MediaController \{ id: media \}/)
+    assert.match(mainSource, /Sonic\.OutputVolume \{ id: outputVolume \}/)
+    for (const call of ["previous", "playPause", "next"])
+        assert.match(mainSource, new RegExp(`onClicked: media\\.${call}\\(\\)`))
+    // Never above 100% from here (amplifying stays in the desktop's applet).
     assert.match(mainSource, /Math\.max\(0, Math\.min\(100, percent\)\)/)
+    // No Plasma-only module is left in the interface.
+    for (const name of ["SonicCore", "VivoPanel", "VivoBackground", "configBattery", "configOutput"]) {
+        const source = await readFile(new URL(`ui/${name}.qml`, base), "utf8")
+        assert.doesNotMatch(source, /import org\.kde\.(plasma|kcmutils)/, name)
+    }
+    assert.doesNotMatch(appMain, /import org\.kde\.(plasma|kcmutils)/)
 })

@@ -56,8 +56,14 @@ if command -v kpackagetool6 >/dev/null 2>&1 && [[ -d "$PLASMOID_TARGET" ]]; then
 fi
 
 rm -rf -- "$APP_TARGET"
+# The app as a Flatpak (tools/install-user.sh --flatpak).
+if command -v flatpak >/dev/null 2>&1 && flatpak info --user io.github.dsbarao.SonicCore >/dev/null 2>&1; then
+    flatpak uninstall --user -y --noninteractive io.github.dsbarao.SonicCore >/dev/null || true
+fi
 rm -f -- "$ICON_TARGET"
-"$SCRIPT_DIR/kwin-window-rule.sh" --uninstall || true
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    "$SCRIPT_DIR/kwin-window-rule.sh" --uninstall || true
+fi
 rm -f -- "$SERVICE_TARGET" "$EQUALIZER_SERVICE_TARGET" "$SPATIAL_SERVICE_TARGET" "$LAUNCHER_TARGET" "$AUTOSTART_TARGET" "$METER_SERVICE_TARGET" "$OPENRGB_PLUGIN"
 # Files edited outside JamBaLinux are kept and reported; the rest still goes.
 overlay_kept=0
@@ -68,6 +74,8 @@ if command -v cargo >/dev/null 2>&1 && [[ -x "$CARGO_BINARY" ]]; then
     cargo uninstall jambalinux-soniccore
 fi
 
+# The app (and a copy from before it had its own launcher).
+pkill -u "$(id -u)" -f -- "$APP_TARGET/soniccore-app" 2>/dev/null || true
 pkill -u "$(id -u)" -f -- "$APP_TARGET/main.qml" 2>/dev/null || true
 printf '%s\n' 'Reinicie o Plasma manualmente se o widget antigo ainda aparecer no painel.'
 if [[ "$overlay_kept" -ne 0 ]]; then

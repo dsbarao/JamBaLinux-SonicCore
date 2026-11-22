@@ -22,7 +22,7 @@ fn qsb() -> Option<PathBuf> {
 #[test]
 fn compiled_shaders_match_their_sources() {
     let shaders = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("packaging/plasma/org.jambalinux.soniccore/contents/shaders");
+        .join("packaging/app/contents/shaders");
     let qsb = qsb().expect("qsb (Qt Shader Tools) is required to check the widget shaders");
     let scratch = std::env::temp_dir().join(format!("soniccore-qsb-{}", std::process::id()));
     fs::create_dir_all(&scratch).unwrap();

@@ -18,7 +18,10 @@ new identifiers directly, without legacy aliases or migration code.
 | CLI | `soniccore` |
 | Daemon | `soniccore-daemon` |
 | systemd user unit | `jambalinux-soniccore.service` |
-| Plasma widget | `org.jambalinux.soniccore` |
+| App launcher and window app id | `soniccore-app`, `jambalinux-soniccore` |
+| Flatpak app id | `io.github.dsbarao.SonicCore` |
+| QML helper module | `org.jambalinux.soniccore` (built into the launcher) |
+| Old Plasma widget (removed on install) | `org.jambalinux.soniccore` |
 | D-Bus name and interface | `org.jambalinux.soniccore.State` |
 | D-Bus object path | `/org/jambalinux/soniccore/State` |
 | Runtime cache | `$XDG_RUNTIME_DIR/jambalinux-soniccore-state.json` |

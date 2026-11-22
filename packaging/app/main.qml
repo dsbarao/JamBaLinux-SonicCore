@@ -6,14 +6,18 @@ import Qt.labs.platform as Platform
 
 import org.kde.kirigami as Kirigami
 
-import "../plasma/org.jambalinux.soniccore/contents/ui"
+import org.jambalinux.soniccore as Sonic
 
-// SonicCore as a standalone app: the same interface as the Plasma widget
-// (SonicCore.qml) in its own window, with a tray icon showing the battery.
-// Closing the window keeps it in the tray; "Sair" quits.
+import "contents/ui"
+
+// JamBaLinux Sonic Core: the interface (contents/ui/SonicCore.qml) in its own
+// window, with a tray icon showing the battery where the desktop has a tray.
+// Closing the window keeps it in the tray; "Sair" quits. Without a tray
+// (GNOME without the AppIndicator extension) closing the window quits.
 //
-// Installed by tools/install-user.sh and started by soniccore-app; from the
-// repository: `qml6 --apptype widget packaging/app/main.qml [-- --tray]`.
+// Opened by the soniccore-app launcher (packaging/app/launcher), which
+// provides the org.jambalinux.soniccore helpers; from the repository:
+// `SONICCORE_APP_DIR=packaging/app soniccore-app [--tray]`.
 Kirigami.ApplicationWindow {
     id: window
 
@@ -23,7 +27,8 @@ Kirigami.ApplicationWindow {
     minimumWidth: Kirigami.Units.gridUnit * 25
     minimumHeight: Kirigami.Units.gridUnit * 24
     // At login (autostart passes --tray) only the tray icon appears.
-    visible: !Qt.application.arguments.includes("--tray")
+    readonly property bool startedInTray: Qt.application.arguments.includes("--tray")
+    visible: !startedInTray
 
     // The app's own settings, with the same names the widget uses.
     Settings {
@@ -58,6 +63,12 @@ Kirigami.ApplicationWindow {
     }
 
     Component.onCompleted: {
+        // Started for the tray on a desktop without one: there is nothing to
+        // show at login, and the menu entry opens the window when wanted.
+        if (startedInTray && !Sonic.App.trayAvailable) {
+            Qt.callLater(Qt.quit)
+            return
+        }
         // "Transparente" was a background before the opacity control existed.
         if (settings.background === "transparent")
             settings.background = "none"
@@ -118,9 +129,22 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    // A second launch (the menu entry while it runs in the tray).
+    Connections {
+        target: Sonic.App
+        function onActivateRequested() {
+            if (windowState.maximized)
+                window.showMaximized()
+            else
+                window.show()
+            window.raise()
+            window.requestActivate()
+        }
+    }
+
     onClosing: function(close) {
         window.rememberSize()
-        if (tray.available) {
+        if (tray.available && Sonic.App.trayAvailable) {
             close.accepted = false
             window.hide()
         }

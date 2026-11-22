@@ -1,0 +1,51 @@
+# JamBaLinux Sonic Core app as a Flatpak, for distributions whose Qt is older
+# than the interface needs (Ubuntu 24.04 and what is built on it: Pop!_OS
+# 24.04 with COSMIC, Linux Mint 22 with Cinnamon). The KDE runtime brings
+# Qt 6 and Kirigami. The core (soniccore CLI, daemon, PipeWire services)
+# stays installed on the host by `tools/install-user.sh --flatpak`; the app
+# reaches it through flatpak-spawn, like the CLI tools it calls.
+#
+# Built and installed by tools/build-flatpak.sh.
+app-id: io.github.dsbarao.SonicCore
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+command: soniccore-app
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # soniccore, pactl and the wallpaper lookups run on the host.
+  - --talk-name=org.freedesktop.Flatpak
+  # The core's state signals and the spectrum meter.
+  - --talk-name=org.jambalinux.soniccore.*
+  # "Tocando agora": any media player.
+  - --talk-name=org.mpris.MediaPlayer2.*
+  # The tray icon.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # The colors the OpenRGB plugin publishes, the desktop wallpaper (system
+  # wallpapers under /usr, and the user's own pictures) and cover art.
+  - --filesystem=xdg-run/jambalinux-soniccore-openrgb.json:ro
+  - --filesystem=host-os:ro
+  - --filesystem=home:ro
+modules:
+  - name: soniccore-app
+    buildsystem: simple
+    build-commands:
+      - mkdir -p build
+      - cd build && "$(command -v qmake6 || command -v qmake)" ../packaging/app/launcher/soniccore-app.pro && make -j${FLATPAK_BUILDER_N_JOBS}
+      - install -Dm755 build/soniccore-app /app/lib/jambalinux-soniccore/soniccore-app
+      - install -Dm644 packaging/app/main.qml /app/lib/jambalinux-soniccore/main.qml
+      - cp -r packaging/app/icons packaging/app/controls packaging/app/contents /app/lib/jambalinux-soniccore/
+      - install -Dm644 packaging/brand/jambalinux-soniccore.svg /app/lib/jambalinux-soniccore/jambalinux-soniccore.svg
+      - mkdir -p /app/bin && ln -s ../lib/jambalinux-soniccore/soniccore-app /app/bin/soniccore-app
+      - install -Dm644 packaging/brand/jambalinux-soniccore.svg /app/share/icons/hicolor/scalable/apps/io.github.dsbarao.SonicCore.svg
+      - install -Dm644 packaging/flatpak/io.github.dsbarao.SonicCore.desktop /app/share/applications/io.github.dsbarao.SonicCore.desktop
+      - install -Dm644 packaging/flatpak/io.github.dsbarao.SonicCore.metainfo.xml /app/share/metainfo/io.github.dsbarao.SonicCore.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git

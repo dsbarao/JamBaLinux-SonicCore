@@ -24,7 +24,9 @@ See [rebranding](docs/rebranding.md).
 
 ## Current status
 
-Usable v0.1 controller and Plasma widget. On the initial CachyOS host, the dongle was detected as
+Usable controller and desktop app for **any Linux desktop**: Plasma, GNOME,
+COSMIC, Cinnamon, MATE and Xfce (see [Install](#install)). On the initial
+CachyOS host, the dongle was detected as
 `0ecb:2069` (`Harman International Inc`, `JBL Quantum810 Wireless`). It exposes
 five USB Audio-class interfaces and one HID-class interface. See
 [`docs/inventory/initial-cachyos.md`](docs/inventory/initial-cachyos.md).
@@ -157,34 +159,59 @@ notification.
 launcher uses this command so clicking it produces a window instead of a
 transient notification.
 
-An optional KDE application launcher is included. Install it for the current
-user after installing the CLI:
+<a id="install"></a>
+### Install (any desktop)
 
-```bash
-install -Dm644 packaging/kde/jambalinux-soniccore.desktop \
-  "$HOME/.local/share/applications/jambalinux-soniccore.desktop"
-```
+Sonic Core has two parts:
 
-It then appears in the application menu as **JamBaLinux Sonic Core**.
+- **The core** — the `soniccore` CLI, the user daemon, the equalizer and 3D
+  PipeWire services. It needs PipeWire (with `pactl`), a systemd user session
+  and Rust 1.88 or newer, and runs on every desktop.
+- **The app** — the window with the battery in the tray, the equalizer, 3D
+  sound, *Tocando agora* (media and volume) and the lights, with the Vivo,
+  Hi-Fi and Leve themes. A small Qt launcher (`packaging/app/launcher`) opens
+  the interface with its helpers built in, so it needs no Plasma library: on
+  Plasma it uses Plasma's own controls, elsewhere Qt's in the desktop's style.
+  It needs Qt 6.5 or newer and KDE's Kirigami 6.
 
-### Plasma 6 panel widget
-
-The repository also includes a native Plasma 6 widget with a compact panel
-indicator. It receives state-change signals from the user daemon and retains a
-low-frequency fallback refresh. While the USB-C charging connection
-(`0ecb:206a`) is present, the widget changes to cyan and displays a lightning
-indicator.
-
-The CLI, widget, launcher, and user service can be validated and installed
-together with the idempotent helper. `--check` makes no changes:
+Install the dependencies for your distribution, then run the installer from
+the repository. `--check` changes nothing:
 
 ```bash
 tools/install-user.sh --check
 tools/install-user.sh
 ```
 
-The helper does not install the privileged udev rule and does not restart the
-Plasma shell.
+| Distribution | Dependencies |
+| --- | --- |
+| Arch, CachyOS, Manjaro (any desktop) | `sudo pacman -S --needed rustup base-devel qt6-base qt6-declarative qt6-svg qt6-wayland kirigami qqc2-desktop-style libpulse` then `rustup default stable` |
+| Fedora 41+ (Workstation/GNOME, KDE, Cinnamon spins) | `sudo dnf install cargo gcc-c++ make qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg qt6-qtwayland kf6-kirigami kf6-qqc2-desktop-style pulseaudio-utils` |
+| Debian 13, Ubuntu 25.04+ | Qt 6 and Kirigami 6 from the distribution (`qt6-base-dev`, `qt6-declarative-dev`, the `qml6-module-*` packages for QtQuick Controls, Layouts, Effects, Shapes, QtCore, Qt.labs.platform and `org.kde.kirigami`), `build-essential`, `pulseaudio-utils`, and Rust from [rustup](https://rustup.rs) (the packaged cargo is older than 1.88). Package names can vary between releases. |
+| **Ubuntu 24.04, Pop!_OS 24.04 (COSMIC), Linux Mint 22 (Cinnamon)** | Their Qt is 6.4, too old for the app: install the app as a **Flatpak** (below). `sudo apt install flatpak build-essential pulseaudio-utils`, Rust from [rustup](https://rustup.rs). |
+
+On Ubuntu 24.04 and the distributions built on it, install the core and the
+app as a Flatpak (the KDE runtime from Flathub brings Qt 6 and Kirigami, about
+1 GB the first time):
+
+```bash
+tools/install-user.sh --flatpak
+```
+
+`tools/build-flatpak.sh` rebuilds only the Flatpak (`--bundle FILE` also
+writes a single-file bundle to install elsewhere with
+`flatpak install --user FILE`). The Flatpak reaches the host's `soniccore`
+through `flatpak-spawn`.
+
+The installer does not install the privileged udev rule (see above) and does
+not restart the desktop.
+
+**Desktop notes.** Plasma, COSMIC, Cinnamon, MATE and Xfce show the battery
+in the tray. GNOME shows tray icons only with the *AppIndicator and
+KStatusNotifierItem* extension (Ubuntu and Pop!_OS ship it); without a tray
+the app is a normal window and is not started at login. Only Plasma (KWin)
+lets the app keep its window position; elsewhere the size is remembered and
+the desktop places the window. The *Papel de parede* background reads each
+desktop's own wallpaper setting.
 
 To preview exactly what the user-level uninstaller would remove, run:
 
@@ -234,30 +261,14 @@ tools/acp-overlay.sh --uninstall
 
 `--verify` changes nothing and fails if a target file was edited outside
 JamBaLinux; `tools/install-user.sh` runs it before installing anything, so an
-edited overlay stops the installation before the CLI, widget, or services are
+edited overlay stops the installation before the CLI, app, or services are
 touched. `tools/uninstall-user.sh --confirm` removes the overlay too. Files edited
 outside JamBaLinux are kept and reported instead of deleted. After removal and
 a WirePlumber restart, the upstream profile-set applies again. A draft report
 for upstream is in
 [`docs/bug-reports/quantum810-acp-game-volume.md`](docs/bug-reports/quantum810-acp-game-volume.md).
 
-For manual widget installation, use:
-
-```bash
-kpackagetool6 --type Plasma/Applet --install \
-  packaging/plasma/org.jambalinux.soniccore
-```
-
-For later development updates, use:
-
-```bash
-kpackagetool6 --type Plasma/Applet --upgrade \
-  packaging/plasma/org.jambalinux.soniccore
-```
-
-Then enter Plasma edit mode, choose **Add Widgets**, search for
-**JamBaLinux Sonic Core**, and drag it to the panel. The widget invokes only
-allowlisted `soniccore` commands. Its popup includes expandable controls
+The app invokes only allowlisted `soniccore` commands. It includes controls
 for ambient mode (off/ANC/TalkThru), global lighting (on/off), an HSV color
 picker with five segments per zone, four effects, four animation speeds, and
 independent or synchronized Logo and Ring profiles, plus hardware sidetone
@@ -284,7 +295,7 @@ reset about one second, excluding command and scheduling overhead. Real-system v
 2026-09-19 measured the live audio effect and about 100 ms end-to-end command
 time while preserving the service PID and filter-node identity. The update path
 does not restart the service or deliberately recreate the filter node.
-`soniccore equalizer status` and the widget report actionable errors when the
+`soniccore equalizer status` and the app report actionable errors when the
 service, Game output, route, live DSP controls, or default-sink guard is not
 healthy. See
 [`docs/protocol/audio-processing.md`](docs/protocol/audio-processing.md) for the
@@ -310,7 +321,7 @@ soniccore equalizer profile delete custom-4711-0
 The `profile` subcommands accept only custom profile IDs: factory presets
 cannot be applied, updated, renamed, or deleted through them, and
 `equalizer preset <id>` remains their dedicated selector. Deleting the selected
-profile applies **Flat** in the same transaction. The widget's equalizer section
+profile applies **Flat** in the same transaction. The app's equalizer card
 offers the same operations through a profile selector plus **Criar perfil**,
 **Atualizar**, **Renomear**, and **Excluir**, and reads its list from
 `soniccore equalizer status --format json`, which also reports
@@ -380,7 +391,7 @@ the preflight and spawned PipeWire graph see the same value. No files are
 downloaded or installed automatically. The installation and removal helpers
 locate the CLI under `${CARGO_HOME:-$HOME/.cargo}/bin`. With a custom
 `CARGO_HOME`, `tools/install-user.sh` installs copies of the systemd units,
-launcher, and widget that point at that directory; paths containing spaces,
+launcher, and app that point at that directory; paths containing spaces,
 quotes, `\`, `$`, `` ` ``, `|`, or `%` are refused.
 
 The persistence/bypass transition still needs an in-person auditory acceptance:
@@ -419,7 +430,7 @@ state in `$XDG_STATE_HOME/jambalinux-soniccore/battery-history.jsonl`
 (default `~/.local/state/…`), together with the effect, the mean LED
 brightness, and the ambient mode (recorded only). Discharging intervals give a
 measured drain per hour with the lights on and off and an estimate of the
-time left, shown in the widget once there is enough data.
+time left, shown in the app once there is enough data.
 
 The optional economy uses only the confirmed lighting on/off control:
 
@@ -434,7 +445,7 @@ Lights come back on with the same colors and effect when charging (or 5
 points above the threshold) or when sound returns. Switching them on during
 an economy period is respected until the condition arms again. While the
 economy keeps the lights off, OpenRGB writes are refused like under
-`lighting-hold`. Ambient (ANC/TalkThru) is never changed. The widget's
+`lighting-hold`. Ambient (ANC/TalkThru) is never changed. The app's
 **Configurar → Bateria** page sets the same options.
 
 ### Other audio outputs
@@ -468,11 +479,11 @@ by itself, and the live meter and audio path follow it. Streams played on the
 chosen output are routed through the equalizer the same way Game streams are.
 The Quantum's Chat channel is never offered, keeping the microphone and calls
 isolated. Lighting, ANC, sidetone, and battery stay with the headset. The
-widget's **Configurar → Saída de som** page offers the same choice.
+app's **Configurações → Saída de áudio** page offers the same choice.
 
 ### Vivo theme backgrounds
 
-With the widget's **Vivo** theme, **Configurar → Aparência** also picks a
+With the app's **Vivo** theme, the **Fundo** menu also picks a
 background: **Aurora** (soft light in the headset lights' colors, drifting
 slowly), **Vidro** (the desktop wallpaper, blurred and dimmed, found with
 `soniccore wallpaper --format json`), **Partículas** (glowing dots rising),
@@ -487,7 +498,7 @@ one CPU core (Aurora adds under 1%); closed, nothing runs.
 
 ### Live meter and audio path
 
-Two read-only commands feed the widget's upcoming "Vivo" theme; neither
+Two read-only commands feed the app's Vivo and Hi-Fi themes; neither
 changes routing nor touches the headset.
 
 ```bash
@@ -497,7 +508,7 @@ soniccore audio-path --format json          # apps -> spatial -> EQ -> Quantum G
 
 `meter` records the monitor of the exact Quantum Game sink with a passive
 `pw-record` capture and analyzes it with a 2048-point FFT (31 Hz to 16 kHz,
--70 to -10 dBFS mapped onto 0 to 1); silence skips the FFT. The widget reaches
+-70 to -10 dBFS mapped onto 0 to 1); silence skips the FFT. The app reaches
 it through the session bus: `tools/install-user.sh` installs a D-Bus
 activation file for `org.jambalinux.soniccore.Meter`, so `soniccore meter
 --dbus` starts only when a frame is requested, stops capturing two seconds
@@ -528,13 +539,13 @@ directory and removes it afterwards. It installs into
 `~/.config/OpenRGB/plugins/`; restart OpenRGB to load it.
 `tools/uninstall-user.sh --confirm` removes it too.
 
-**OpenRGB and the widget take turns.** Every write records who made it
+**OpenRGB and the app take turns.** Every write records who made it
 (`lighting_source` in the status cache: `openrgb` or `soniccore`). While
-OpenRGB has written in the last five seconds, the widget's lighting section
+OpenRGB has written in the last five seconds, the app's lighting card
 says so and locks its color controls instead of letting a change vanish
 under OpenRGB's next frame. **Assumir controle** runs
 `soniccore lighting-hold on`: from then on the CLI refuses lighting writes
-from OpenRGB (the plugin pauses and logs it once) and the widget works
+from OpenRGB (the plugin pauses and logs it once) and the app works
 normally; **Devolver ao OpenRGB** runs `soniccore lighting-hold off`.
 Changes made outside OpenRGB are mirrored back into it within about two
 seconds, so its device page shows the colors the headset actually has.
@@ -555,6 +566,9 @@ is distributed under the GPL.
 - `docs/plan-v0.1.md`: milestone definition;
 - `tools/`: passive host/device inventory utilities;
 - `openrgb-plugin/`: optional OpenRGB plugin that drives the headset through the CLI;
+- `packaging/app/`: the desktop app — `main.qml`, the interface in `contents/`,
+  Plasma's and Qt's controls in `controls/`, and the Qt launcher in `launcher/`;
+- `packaging/flatpak/`: the app as a Flatpak, for Ubuntu 24.04-based systems;
 - `src/`: Linux CLI, HID parsing, allowlisted controls, and state service;
 - `docs/rebranding.md`: project identity and technical identifiers;
 - `captures/`: local capture staging; capture files are ignored by Git.

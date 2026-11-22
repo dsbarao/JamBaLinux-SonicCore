@@ -46,15 +46,14 @@ write() {
 case "${1:-}" in
     --install)
         write Description "JamBaLinux Sonic Core"
-        # The qml6 runtime's generic class plus the exact window title.
-        write wmclass "org.qt-project.qml6"
+        # The app's own id (its launcher sets it) plus the exact window title.
+        write wmclass "jambalinux-soniccore"
         write wmclassmatch 1
         write wmclasscomplete false
         write title "JamBaLinux Sonic Core"
         write titlematch 1
         write types 1
-        # Taskbar and window icon: the app's own desktop entry (the qml6
-        # runtime would otherwise show a generic icon).
+        # Taskbar and window icon: the app's own desktop entry.
         write desktopfile jambalinux-soniccore
         write desktopfilerule 2
         # 4 = Remember: KWin keeps the last value the user left.

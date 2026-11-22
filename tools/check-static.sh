@@ -11,7 +11,7 @@ cd "$project_root"
 shopt -s nullglob
 shell_scripts=(tools/*.sh)
 python_scripts=(tools/*.py)
-qml_files=(packaging/plasma/org.jambalinux.soniccore/contents/ui/*.qml)
+qml_files=(packaging/app/contents/ui/*.qml)
 
 for script in "${shell_scripts[@]}"; do
     bash -n "$script"

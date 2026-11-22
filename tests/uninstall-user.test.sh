@@ -144,6 +144,7 @@ make_install_stubs() {
     # cargo install: create the binaries where CARGO_HOME says.
     cat > "$stub_bin/cargo" <<'STUB'
 #!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then echo "cargo ${CARGO_STUB_VERSION:-1.90.0} (stub)"; exit 0; fi
 printf 'cargo %s\n' "$*" >> "$INSTALL_LOG"
 mkdir -p -- "$CARGO_HOME/bin"
 printf '#!/bin/sh\n' > "$CARGO_HOME/bin/soniccore"
@@ -156,6 +157,21 @@ target="$HOME/.local/share/plasma/plasmoids"
 mkdir -p -- "$target"
 rm -rf -- "$target/org.jambalinux.soniccore"
 cp -a -- "${@: -1}" "$target/org.jambalinux.soniccore"
+STUB
+    # qmake6 + make: a launcher binary without compiling anything.
+    cat > "$stub_bin/qmake6" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    "-query QT_VERSION") echo 6.8.0 ;;
+    "-query QT_INSTALL_QML") echo "$HOME/no-qml" ;;
+    *) printf 'qmake6 %s\n' "$*" >> "$INSTALL_LOG" ;;
+esac
+STUB
+    cat > "$stub_bin/make" <<'STUB'
+#!/usr/bin/env bash
+printf 'make %s\n' "$*" >> "$INSTALL_LOG"
+printf '#!/bin/sh\n' > soniccore-app
+chmod +x soniccore-app
 STUB
     local command
     for command in pactl pipewire pw-link pw-cli pw-dump; do
@@ -188,6 +204,10 @@ test_custom_cargo_home_is_written_into_installed_files() {
     [[ -x "$home/.local/share/jambalinux-soniccore/app/soniccore-app" ]]
     [[ -f "$home/.local/share/jambalinux-soniccore/app/icons/battery-unknown.svg" ]]
     grep -Fqx 'import "contents/ui"' "$home/.local/share/jambalinux-soniccore/app/main.qml"
+    # Both sets of controls: Plasma's for Plasma, Qt's for the other desktops.
+    [[ -f "$home/.local/share/jambalinux-soniccore/app/controls/plasma/org/jambalinux/soniccore/controls/qmldir" ]]
+    [[ -f "$home/.local/share/jambalinux-soniccore/app/controls/qt/org/jambalinux/soniccore/controls/qmldir" ]]
+    grep -Fq "qmake6 $PROJECT_DIR/packaging/app/launcher/soniccore-app.pro" "$home/install.log"
     grep -Fq "\"$cargo_home/bin/soniccore\"" \
         "$home/.local/share/jambalinux-soniccore/app/contents/ui/SonicCore.qml"
     # On KDE, KWin remembers the app window (only our own rule group).
@@ -222,7 +242,7 @@ test_default_cargo_home_installs_packaging_verbatim() {
         "$home/.config/systemd/user/jambalinux-soniccore.service"
     grep -Fqx "Exec=$home/.cargo/bin/soniccore meter --dbus" \
         "$home/.local/share/dbus-1/services/org.jambalinux.soniccore.Meter.service"
-    cmp -s -- "$PROJECT_DIR/packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml" \
+    cmp -s -- "$PROJECT_DIR/packaging/app/contents/ui/SonicCore.qml" \
         "$home/.local/share/jambalinux-soniccore/app/contents/ui/SonicCore.qml"
 }
 
@@ -266,7 +286,76 @@ test_unsafe_cargo_home_is_refused() {
     [[ ! -e "$home/install.log" ]]
 }
 
+test_old_qt_is_refused_before_any_change() {
+    local home="$TEMP_HOME/old-qt-home"
+    local stub_bin="$home/stub-bin"
+    local output status
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+    # Ubuntu 24.04 (and Pop!_OS 24.04, Mint 22): Qt 6.4.
+    sed -i 's/echo 6.8.0/echo 6.4.2/' "$stub_bin/qmake6"
+
+    set +e
+    output="$(HOME="$home" CARGO_HOME="$home/.cargo" INSTALL_LOG="$home/install.log" \
+        PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" 2>&1)"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]]
+    [[ "$output" == *"Qt 6.4.2 é antigo demais"* ]]
+    [[ ! -e "$home/install.log" ]]
+    [[ ! -e "$home/.config/systemd/user/jambalinux-soniccore.service" ]]
+}
+
+test_old_rust_is_refused_before_any_change() {
+    local home="$TEMP_HOME/old-rust-home"
+    local stub_bin="$home/stub-bin"
+    local output status
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+
+    set +e
+    output="$(HOME="$home" CARGO_HOME="$home/.cargo" INSTALL_LOG="$home/install.log" \
+        CARGO_STUB_VERSION=1.75.0 PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" 2>&1)"
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]]
+    [[ "$output" == *"Rust 1.75.0 é antigo demais"* ]]
+    [[ "$output" == *"rustup"* ]]
+    [[ ! -e "$home/install.log" ]]
+}
+
+test_flatpak_mode_installs_the_core_and_hands_the_app_to_flatpak() {
+    local home="$TEMP_HOME/flatpak-home"
+    local stub_bin="$home/stub-bin"
+    mkdir -p -- "$home"
+    make_install_stubs "$stub_bin"
+    # Qt 6.4 (Ubuntu 24.04): the native app cannot be built, the Flatpak can.
+    sed -i 's/echo 6.8.0/echo 6.4.2/' "$stub_bin/qmake6"
+    printf '#!/bin/sh\nprintf "flatpak %%s\\n" "$*" >> "$INSTALL_LOG"\n' > "$stub_bin/flatpak"
+    printf '#!/bin/sh\nprintf "flatpak-builder %%s\\n" "$*" >> "$INSTALL_LOG"\n' > "$stub_bin/flatpak-builder"
+    chmod +x -- "$stub_bin/flatpak" "$stub_bin/flatpak-builder"
+
+    HOME="$home" CARGO_HOME="$home/.cargo" INSTALL_LOG="$home/install.log" \
+        PATH="$stub_bin:$PATH" /bin/bash "$INSTALLER" --flatpak >/dev/null 2>&1
+
+    # The core: units and the CLI.
+    grep -Fq "cargo install" "$home/install.log"
+    [[ -f "$home/.config/systemd/user/jambalinux-soniccore.service" ]]
+    # The app: built as a Flatpak, started from it at login; no native copy.
+    grep -Fq "flatpak-builder --user --install-deps-from=flathub" "$home/install.log"
+    grep -Fq "packaging/flatpak/io.github.dsbarao.SonicCore.yml" "$home/install.log"
+    grep -Fqx "Exec=flatpak run io.github.dsbarao.SonicCore --tray" "$home/.config/autostart/jambalinux-soniccore.desktop"
+    [[ ! -e "$home/.local/share/applications/jambalinux-soniccore.desktop" ]]
+    [[ ! -e "$home/.local/share/jambalinux-soniccore/app" ]]
+    ! grep -Fq "qmake6 $PROJECT_DIR" "$home/install.log"
+}
+
 test_check_changes_nothing
+test_old_qt_is_refused_before_any_change
+test_old_rust_is_refused_before_any_change
+test_flatpak_mode_installs_the_core_and_hands_the_app_to_flatpak
 test_install_check_reports_each_required_audio_client
 test_custom_cargo_home_is_written_into_installed_files
 test_default_cargo_home_installs_packaging_verbatim

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 readonly PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly SHADERS="$PROJECT_DIR/packaging/plasma/org.jambalinux.soniccore/contents/shaders"
+readonly SHADERS="$PROJECT_DIR/packaging/app/contents/shaders"
 QSB="${QSB:-$(command -v qsb6 || command -v qsb || true)}"
 [[ -n "$QSB" ]] || QSB=/usr/lib/qt6/bin/qsb
 [[ -x "$QSB" ]] || { printf 'erro: qsb (Qt Shader Tools) não encontrado\n' >&2; exit 1; }

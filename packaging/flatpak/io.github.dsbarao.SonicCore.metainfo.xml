@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.dsbarao.SonicCore</id>
+  <name>JamBaLinux Sonic Core</name>
+  <summary>Battery, equalizer, 3D sound and lights of the JBL Quantum 810 Wireless</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.dsbarao">
+    <name>Daniel Barão</name>
+  </developer>
+  <description>
+    <p>The JamBaLinux Sonic Core app: headset battery in the tray, a ten-band
+    equalizer, 3D sound, night mode, media controls and the headset lights,
+    with the Vivo, Hi-Fi and Leve themes. It needs the Sonic Core core
+    installed on the computer (tools/install-user.sh --flatpak).</p>
+  </description>
+  <url type="homepage">https://github.com/dsbarao/JamBaLinux-SonicCore</url>
+  <launchable type="desktop-id">io.github.dsbarao.SonicCore.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+</component>

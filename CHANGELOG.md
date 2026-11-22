@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 — unreleased
+
+- run the app on any Linux desktop (Plasma, GNOME, COSMIC, Cinnamon, MATE,
+  Xfce): a small Qt launcher (`packaging/app/launcher`) replaces the `qml6`
+  runner and brings the helpers the interface needs (commands, D-Bus, media
+  over MPRIS, output volume through PipeWire), so no Plasma library is
+  required; Plasma keeps Plasma's own controls, other desktops get Qt's in the
+  desktop's style, and the Vivo, Hi-Fi and Leve themes look the same;
+- move the interface from the old Plasma widget package to `packaging/app`
+  and drop the widget-only files;
+- read the wallpaper of GNOME, COSMIC, Cinnamon, MATE and Xfce as well as
+  Plasma's;
+- install anywhere with Qt 6.5+ and Kirigami 6 (`tools/install-user.sh` builds
+  the launcher and checks the Qt and Rust versions), and as a Flatpak on
+  Ubuntu 24.04, Pop!_OS 24.04 and Mint 22 (`tools/install-user.sh --flatpak`,
+  `tools/build-flatpak.sh`);
+- one copy of the app per user: opening it again shows the running window;
+  without a tray (GNOME without AppIndicator) closing quits and it does not
+  start at login;
+- every helper process ends with the app, even when it is killed.
+
 ## 0.2.0 — unreleased
 
 - rebrand the project and desktop presentation as JamBaLinux SonicCore;

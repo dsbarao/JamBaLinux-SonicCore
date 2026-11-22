@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url)
+    "../packaging/app/contents/ui/SonicCore.qml", import.meta.url)
 const widgetSource = await readFile(widgetPath, "utf8")
 
 test("confirmed-state buttons do not use checkable", () => {
@@ -75,7 +75,7 @@ test("listening modes: Natural turns the 3D off, a named mode sets its levels an
 })
 
 test("equalizer switch shows the confirmed bypass state and folds the bands away", () => {
-    const switchMatch = widgetSource.match(/PlasmaComponents\.Switch\s*\{(\s*id:\s*equalizerToggle[\s\S]*?)\n\s*\}/)
+    const switchMatch = widgetSource.match(/SonicControls\.Switch\s*\{(\s*id:\s*equalizerToggle[\s\S]*?)\n\s*\}/)
     assert.notEqual(switchMatch, null, "the equalizer card must have its on/off switch")
     assert.match(switchMatch[1], /checked:\s*!root\.equalizerBypassed/)
     assert.match(switchMatch[1], /checked\s*=\s*Qt\.binding\(function\(\)\s*\{\s*return\s+!root\.equalizerBypassed\s*\}\)/)

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const widgetPath = new URL(
-    "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml",
+    "../packaging/app/contents/ui/SonicCore.qml",
     import.meta.url
 )
 const widgetSource = await readFile(widgetPath, "utf8")
@@ -52,7 +52,7 @@ test("spatial polling timer runs only when popup is expanded and spatial section
 test("a leitura periódica do espacial não mexe na grade dos modos (sem piscar)", async () => {
     const { readFile } = await import("node:fs/promises")
     const source = await readFile(new URL(
-        "../packaging/plasma/org.jambalinux.soniccore/contents/ui/SonicCore.qml", import.meta.url), "utf8")
-    assert.match(source, /PlasmaComponents\.BusyIndicator \{\n\s+running: root\.spatialBusy\n\s+visible: running/)
+        "../packaging/app/contents/ui/SonicCore.qml", import.meta.url), "utf8")
+    assert.match(source, /SonicControls\.BusyIndicator \{\n\s+running: root\.spatialBusy\n\s+visible: running/)
     assert.doesNotMatch(source, /running: root\.spatialBusy \|\| root\.spatialUpdating/)
 })

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=JamBaLinux Sonic Core
+Comment=Battery, equalizer and lights of the JBL Quantum 810 Wireless
+Exec=soniccore-app
+Icon=io.github.dsbarao.SonicCore
+Terminal=false
+StartupNotify=false
+Categories=AudioVideo;Audio;Utility;
+Keywords=JamBaLinux;SonicCore;JBL;Quantum;headset;battery;equalizer;
+StartupWMClass=io.github.dsbarao.SonicCore
